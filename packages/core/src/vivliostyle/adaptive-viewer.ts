@@ -968,6 +968,23 @@ export class AdaptiveViewer {
     this.renderTask = null;
   }
 
+  /**
+   * Reset the viewer to its initial loading state.
+   * This cancels any running rendering task, clears all rendered pages,
+   * and sets the ready state to LOADING.
+   */
+  resetViewer() {
+    this.cancelRenderingTask();
+    this.hidePages();
+    if (this.opfView) {
+      this.opfView.removeRenderedPages();
+    }
+    this.pageSizes = [];
+    this.removePageSizePageRules();
+    this.pagePosition = null;
+    this.setReadyState(Constants.ReadyState.LOADING);
+  }
+
   resize(): Task.Result<boolean> {
     this.needResize = false;
     this.needRefresh = false;

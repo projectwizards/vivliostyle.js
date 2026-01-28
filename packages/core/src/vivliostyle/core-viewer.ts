@@ -498,6 +498,15 @@ export class CoreViewer {
   cancelPagination(): void {
     this.adaptViewer_.cancelRenderingTask();
   }
+
+  /**
+   * Reset the viewer to its initial loading state.
+   * This cancels any running rendering task, clears all rendered pages,
+   * and sets the ready state to LOADING.
+   */
+  resetViewer(): void {
+    this.adaptViewer_.resetViewer();
+  }
 }
 
 function convertSingleDocumentOptions(
