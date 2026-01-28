@@ -957,7 +957,11 @@ export class AdaptiveViewer {
     return Math.min(widthZoom, heightZoom);
   }
 
-  private cancelRenderingTask() {
+  /**
+   * Cancel the current rendering task if one is running.
+   * This can be used to abort pagination triggered by loadDocument/loadPublication.
+   */
+  cancelRenderingTask() {
     if (this.renderTask) {
       this.renderTask.interrupt(new RenderingCanceledError());
     }

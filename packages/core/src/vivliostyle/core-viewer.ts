@@ -490,6 +490,14 @@ export class CoreViewer {
     }
     return opfView.cmykStore.toJSON();
   }
+
+  /**
+   * Cancel the current pagination/rendering task if one is running.
+   * This can be used to abort pagination triggered by loadDocument or loadPublication.
+   */
+  cancelPagination(): void {
+    this.adaptViewer_.cancelRenderingTask();
+  }
 }
 
 function convertSingleDocumentOptions(
