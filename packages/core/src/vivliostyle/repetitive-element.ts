@@ -601,7 +601,11 @@ export class RepetitiveElementsOwnerLayoutConstraint
       (overflownNodeContext && !nodeContext) ||
       (nodeContext && nodeContext.overflow)
     ) {
-      return false;
+      return !isOverflowInsideRepetitiveElementsOwner(
+        nodeContext,
+        overflownNodeContext,
+        repetitiveElements,
+      );
     } else {
       return true;
     }
@@ -696,7 +700,9 @@ export class RepetitiveElementsOwnerLayoutConstraint
   }
 }
 
-export class RepetitiveElementsOwnerLayoutRetryer extends LayoutRetryers.AbstractLayoutRetryer {
+export class RepetitiveElementsOwnerLayoutRetryer
+  extends LayoutRetryers.AbstractLayoutRetryer
+{
   constructor(
     public readonly formattingContext: RepetitiveElement.RepetitiveElementsOwnerFormattingContext,
     private readonly processor: RepetitiveElementsOwnerLayoutProcessor,
@@ -1064,6 +1070,22 @@ export function appendFooter(
     }
   }
   return Task.newResult(true);
+}
+
+/**
+ * Check whether an overflow is within the scope of the repetitive elements
+ * owner. Returns true if the overflow should trigger header/footer skipping
+ * (i.e., the overflowing node is inside the owner), false otherwise.
+ * (Issue #1873)
+ */
+export function isOverflowInsideRepetitiveElementsOwner(
+  nodeContext: Vtree.NodeContext,
+  overflownNodeContext: Vtree.NodeContext,
+  repetitiveElements: RepetitiveElement.RepetitiveElements,
+): boolean {
+  const ownerNode = repetitiveElements.ownerSourceNode;
+  const overflowNC = nodeContext || overflownNodeContext;
+  return !overflowNC || ownerNode.contains(overflowNC.sourceNode);
 }
 
 function getRepetitiveElementsOwnerFormattingContextOrNull(

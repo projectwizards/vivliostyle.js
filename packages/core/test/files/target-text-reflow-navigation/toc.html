@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Target-text Reflow Navigation Repro - TOC</title>
+    <style>
+      @page {
+        size: 82mm 110mm;
+        margin: 8mm 8mm 12mm;
+
+        @bottom-center {
+          font-size: 9px;
+          content: counter(page);
+        }
+      }
+
+      html {
+        font: 13px/1.3 serif;
+        widows: 1;
+        orphans: 1;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      h1 {
+        margin: 0 0 0.9em;
+        font-size: 20px;
+      }
+
+      p {
+        margin: 0 0 0.8em;
+      }
+
+      nav {
+        display: block;
+      }
+
+      ol {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      li {
+        margin: 0 0 0.5em;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      a::before {
+        content: target-text(attr(href url));
+      }
+
+      a::after {
+        content: leader(".") target-counter(attr(href url), page);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Contents</h1>
+    <p>
+      This fixture reproduces a viewer navigation regression triggered by a
+      cross-document target-text() reflow.
+    </p>
+    <nav role="doc-toc" aria-label="Table of Contents">
+      <ol>
+        <li><a href="chapter.html#s1"></a></li>
+        <li><a href="chapter.html#s2"></a></li>
+        <li><a href="chapter.html#s3"></a></li>
+        <li><a href="chapter.html#s4"></a></li>
+        <li><a href="chapter.html#s5"></a></li>
+        <li><a href="chapter.html#s6"></a></li>
+        <li><a href="chapter.html#s7"></a></li>
+        <li><a href="chapter.html#s8"></a></li>
+      </ol>
+    </nav>
+  </body>
+</html>

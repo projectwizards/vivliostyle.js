@@ -210,6 +210,48 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/57749636?v=4",
       "profile": "https://github.com/u1f992",
       "contributions": ["code"]
+    },
+    {
+      "login": "depth42",
+      "name": "Frank Illenberger",
+      "avatar_url": "https://avatars.githubusercontent.com/u/207403?v=4",
+      "profile": "https://github.com/depth42",
+      "contributions": ["code"]
+    },
+    {
+      "login": "davidmondok",
+      "name": "David Mondok",
+      "avatar_url": "https://avatars.githubusercontent.com/u/3883758?v=4",
+      "profile": "https://www.woda.at/",
+      "contributions": ["code"]
+    },
+    {
+      "login": "jdtcn",
+      "name": "Sergey",
+      "avatar_url": "https://avatars.githubusercontent.com/u/47177226?v=4",
+      "profile": "https://github.com/jdtcn",
+      "contributions": ["code"]
+    },
+    {
+      "login": "tomaioo",
+      "name": "tomaioo",
+      "avatar_url": "https://avatars.githubusercontent.com/u/203048277?v=4",
+      "profile": "https://github.com/tomaioo",
+      "contributions": ["code"]
+    },
+    {
+      "login": "bobbytung",
+      "name": "Bobby Tung",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1863378?v=4",
+      "profile": "http://wanderer.tw/",
+      "contributions": ["code"]
+    },
+    {
+      "login": "SAY-5",
+      "name": "Sai Asish Y",
+      "avatar_url": "https://avatars.githubusercontent.com/u/240962040?v=4",
+      "profile": "https://sayportfolio.vercel.app/",
+      "contributions": ["code"]
     }
   ],
   "contributorsPerLine": 7

@@ -21,6 +21,7 @@ import * as Asserts from "./asserts";
 import * as Css from "./css";
 import * as Constants from "./constants";
 import * as GeometryUtil from "./geometry-util";
+import * as LayoutHelper from "./layout-helper";
 import * as Logging from "./logging";
 import * as CssLogicalUtil from "./css-logical-util";
 import * as Sizing from "./sizing";
@@ -32,6 +33,14 @@ export const FloatReference = PageFloats.FloatReference;
 export type FloatReference = PageFloats.FloatReference; // eslint-disable-line no-redeclare
 
 type PageFloatID = PageFloats.PageFloatID;
+
+/**
+ * Minimum outer block size (in px) for a footnote during iterative sizing.
+ * When the halved size falls below this threshold, the retry loop stops and
+ * the footnote is forbidden instead. Chosen to be roughly one line-height so
+ * that the fragment is still visually meaningful. (Issue #1879)
+ */
+const MIN_FOOTNOTE_BLOCK_SIZE = 20;
 
 export function floatReferenceOf(str: string): FloatReference {
   switch (str) {
@@ -112,6 +121,21 @@ export class PageFloat implements PageFloats.PageFloat {
   order: number | null = null;
   id: PageFloatID | null = null;
 
+  /**
+   * Set to true when this float is created inside a page float area.
+   * Used to bypass the normal anchor check in isAllowedOnContext because
+   * the anchor node is lost after page-level invalidation. (Issue #1675)
+   */
+  insidePageFloatArea: boolean = false;
+
+  /**
+   * Reference to the parent page float that contains this float.
+   * Set when this float is created inside a page float area, allowing
+   * isAllowedOnContext to check whether the parent is still present.
+   * (Issue #1675)
+   */
+  parentPageFloat: PageFloat | null = null;
+
   constructor(
     public readonly nodePosition: Vtree.NodePosition,
     public readonly floatReference: FloatReference,
@@ -136,7 +160,21 @@ export class PageFloat implements PageFloats.PageFloat {
   }
 
   isAllowedOnContext(pageFloatLayoutContext: PageFloatLayoutContext): boolean {
-    return pageFloatLayoutContext.isAnchorAlreadyAppeared(this.getId());
+    if (pageFloatLayoutContext.isAnchorAlreadyAppeared(this.getId())) {
+      return true;
+    }
+    // When the float was created inside a page float area, its anchor node
+    // is lost after page-level invalidation (the page float area context is
+    // detached during re-layout). Check whether the parent page float still
+    // has a fragment on this context: if the parent was removed (e.g. by
+    // checkAndForbidNotAllowedFloat), this float should also be removed
+    // to avoid orphaned fragments on the page. (Issue #1675)
+    if (this.insidePageFloatArea && this.parentPageFloat) {
+      return !!pageFloatLayoutContext.findPageFloatFragment(
+        this.parentPageFloat,
+      );
+    }
+    return false;
   }
 
   isAllowedToPrecede(other: PageFloat): boolean {
@@ -174,10 +212,45 @@ export class PageFloatStore {
   findPageFloatByNodePosition(
     nodePosition: Vtree.NodePosition,
   ): PageFloat | null {
+    // First try exact match using isSameNodePosition
     const index = this.floats.findIndex((f) =>
       VtreeImpl.isSameNodePosition(f.nodePosition, nodePosition),
     );
-    return index >= 0 ? this.floats[index] : null;
+    if (index >= 0) {
+      return this.floats[index];
+    }
+    // For table cells (PseudoColumn), the steps array may differ in length
+    // but the sourceNode (steps[0].node) should be the same.
+    // This ensures footnotes inside table cells are identified correctly
+    // even when processed within PseudoColumn context.
+    // Only apply this fallback when steps lengths differ, and compare step
+    // nodes up to the shorter length to avoid false matches with EPUB
+    // footnotes that share the same shadow template element as steps[0].node.
+    const nSteps = nodePosition?.steps;
+    if (nSteps?.length) {
+      const fallbackIndex = this.floats.findIndex((f) => {
+        const fSteps = f.nodePosition.steps;
+        if (
+          !fSteps?.length ||
+          fSteps.length === nSteps.length ||
+          f.nodePosition.offsetInNode !== nodePosition.offsetInNode ||
+          f.nodePosition.after !== nodePosition.after
+        ) {
+          return false;
+        }
+        const minLen = Math.min(fSteps.length, nSteps.length);
+        for (let i = 0; i < minLen; i++) {
+          if (fSteps[i].node !== nSteps[i].node) {
+            return false;
+          }
+        }
+        return true;
+      });
+      if (fallbackIndex >= 0) {
+        return this.floats[fallbackIndex];
+      }
+    }
+    return null;
   }
 
   findPageFloatById(id: PageFloatID) {
@@ -293,6 +366,38 @@ export class PageFloatLayoutContext
   private floatsDeferredFromPrevious: PageFloatContinuation[];
   private layoutConstraints: LayoutType.LayoutConstraint[] = [];
   private locked: boolean = false;
+  /**
+   * Maximum outer block size for footnotes on this page.
+   * Set when a footnote is placed but then found to be not-allowed (anchor
+   * not reachable in multi-column). Each retry halves this value until
+   * the footnote fits or is too small to display. (Issue #1879)
+   */
+  footnoteMaxBlockSize: number | null = null;
+
+  /**
+   * When true, max-height on @footnote areas should be ignored.
+   * Set when a page contains only footnote continuation(s) and no body
+   * content. Per CSS GCPM §2.4.2, max-height should not apply in this
+   * case. (Issue #1878)
+   */
+  ignoreFootnoteAreaMaxHeight: boolean = false;
+
+  /**
+   * Tracks footnote IDs whose anchors have been registered at least once
+   * during this page's layout cycle. Unlike floatAnchors, this set
+   * survives invalidate() calls, so we can detect feedback loops where
+   * a footnote's own size pushes its anchor off the page. (Issue #1879)
+   */
+  private footnoteAnchorsSeen: Set<PageFloatID> = new Set();
+
+  /**
+   * Reference to the outer column's context for page float area contexts.
+   * Used only for getParent() navigation to propagate nested page floats
+   * and footnotes to region/page level. Unlike `parent`, this does NOT
+   * affect children registration, isInvalidated() propagation, or
+   * getFloatFragmentExclusions(). (Issue #1675)
+   */
+  private outerContext: PageFloatLayoutContext | null = null;
 
   constructor(
     public readonly parent: PageFloatLayoutContext,
@@ -307,8 +412,13 @@ export class PageFloatLayoutContext
       parent.children.push(this);
     }
     this.writingMode =
-      writingMode || (parent && parent.writingMode) || Css.ident.horizontal_tb;
-    this.direction = direction || (parent && parent.direction) || Css.ident.ltr;
+      (!Css.isDefaultingValue(writingMode) && writingMode) ||
+      (parent && parent.writingMode) ||
+      Css.ident.horizontal_tb;
+    this.direction =
+      (!Css.isDefaultingValue(direction) && direction) ||
+      (parent && parent.direction) ||
+      Css.ident.ltr;
     this.floatStore = parent ? parent.floatStore : new PageFloatStore();
     const previousSibling = this.getPreviousSibling();
     this.floatsDeferredFromPrevious = previousSibling
@@ -316,11 +426,37 @@ export class PageFloatLayoutContext
       : [];
   }
 
+  /**
+   * Returns the effective parent context for hierarchy traversal.
+   * For normal contexts, returns `parent`. For page float area contexts
+   * (where `parent` is null), falls back to `outerContext`. (Issue #1675)
+   */
+  get effectiveParent(): PageFloatLayoutContext | null {
+    return this.parent ?? this.outerContext;
+  }
+
   private getParent(floatReference: FloatReference): PageFloatLayoutContext {
-    if (!this.parent) {
-      throw new Error(`No PageFloatLayoutContext for ${floatReference}`);
+    if (this.parent) {
+      return this.parent;
     }
-    return this.parent;
+    // Fall back to the outer context for page float area contexts.
+    // This allows nested page floats and footnotes inside page float areas
+    // to propagate to the region/page level without the side effects of
+    // a full parent connection. (Issue #1675)
+    if (this.outerContext) {
+      return this.outerContext;
+    }
+    throw new Error(`No PageFloatLayoutContext for ${floatReference}`);
+  }
+
+  /**
+   * Set the outer context for a page float area context.
+   * This shares the float store so that page floats/footnotes created inside
+   * a page float area are visible at all levels. (Issue #1675)
+   */
+  setOuterContext(outerContext: PageFloatLayoutContext) {
+    this.outerContext = outerContext;
+    this.floatStore = outerContext.floatStore;
   }
 
   private getPreviousSiblingOf(
@@ -508,12 +644,30 @@ export class PageFloatLayoutContext
 
   hasContinuingFloatFragmentsInFlow(flowName: string): boolean {
     return this.hasFloatFragments(
-      (fragment) => fragment.continues && fragment.getFlowName() === flowName,
+      (fragment) =>
+        fragment.continues &&
+        fragment.getFlowName() === flowName &&
+        fragment.floatSide !== "block-end",
     );
+  }
+
+  markPageFloatAnchorSeen(float: PageFloat) {
+    if (!("footnotePolicy" in float)) {
+      return;
+    }
+    let ctx: PageFloatLayoutContext | null = this;
+    while (ctx) {
+      ctx.footnoteAnchorsSeen.add(float.getId());
+      ctx = ctx.parent ?? ctx.outerContext;
+    }
   }
 
   registerPageFloatAnchor(float: PageFloat, anchorViewNode: Node) {
     this.floatAnchors[float.getId()] = anchorViewNode;
+    // Record that this float's anchor has been seen at least once on this
+    // page, propagating up the context hierarchy so the page-level context
+    // can detect feedback loops. (Issue #1879)
+    this.markPageFloatAnchorSeen(float);
   }
 
   collectPageFloatAnchors() {
@@ -554,6 +708,13 @@ export class PageFloatLayoutContext
     } else {
       const parent = this.getParent(float.floatReference);
       parent.deferPageFloat(continuation);
+    }
+  }
+
+  removeFloatDeferredToNext(float: PageFloat) {
+    const index = this.floatsDeferredToNext.findIndex((c) => c.float === float);
+    if (index >= 0) {
+      this.floatsDeferredToNext.splice(index, 1);
     }
   }
 
@@ -651,6 +812,75 @@ export class PageFloatLayoutContext
     return result;
   }
 
+  private hasRootMultiColumnFootnoteContext(): boolean {
+    return this.children.some((child) => {
+      let rootColumnCount = 0;
+      for (const grandchild of child.children) {
+        if (grandchild.generatingNodePosition) {
+          continue;
+        }
+        rootColumnCount += 1;
+        if (rootColumnCount > 1) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
+
+  private hasNonRootMultiColumnFootnoteContext(): boolean {
+    return this.children.some((child) =>
+      child.children.some((grandchild) => {
+        const elem = grandchild.getContainer()?.element;
+        return elem != null && LayoutHelper.containsNonRootMultiColumn(elem);
+      }),
+    );
+  }
+
+  private hasMultiColumnFootnoteContext(): boolean {
+    return (
+      this.hasRootMultiColumnFootnoteContext() ||
+      this.hasNonRootMultiColumnFootnoteContext()
+    );
+  }
+
+  private trySetFootnoteRetryMaxBlockSize(currentOuter: number): boolean {
+    const newMax =
+      this.footnoteMaxBlockSize != null
+        ? this.footnoteMaxBlockSize / 2
+        : currentOuter / 2;
+    if (newMax < MIN_FOOTNOTE_BLOCK_SIZE) {
+      return false;
+    }
+    this.footnoteMaxBlockSize = newMax;
+    return true;
+  }
+
+  initFootnoteRetryFromEmptyFragment(
+    float: PageFloat,
+    area: LayoutType.PageFloatArea,
+  ): boolean {
+    // Issue #1891: when the footnote call moves later in a multicol flow, the
+    // first attempt may produce an empty fragment before footnoteMaxBlockSize
+    // has been initialized. Seed the usual size-reduction loop from the space
+    // currently available on the page instead of deferring the whole footnote.
+    if (
+      !(
+        "footnotePolicy" in float &&
+        this.footnoteMaxBlockSize == null &&
+        this.footnoteAnchorsSeen.has(float.getId()) &&
+        this.hasMultiColumnFootnoteContext()
+      )
+    ) {
+      return false;
+    }
+    const availableOuterBlockSize =
+      (area.vertical ? area.width : area.height) +
+      area.getInsetBefore() +
+      area.getInsetAfter();
+    return this.trySetFootnoteRetryMaxBlockSize(availableOuterBlockSize);
+  }
+
   checkAndForbidNotAllowedFloat(): boolean {
     if (this.checkAndForbidFloatFollowingDeferredFloat()) {
       return true;
@@ -659,9 +889,36 @@ export class PageFloatLayoutContext
       const fragment = this.floatFragments[i];
       const notAllowedFloat = fragment.findNotAllowedFloat(this);
       if (notAllowedFloat) {
+        const isFootnote =
+          fragment.area &&
+          "isFootnote" in fragment.area &&
+          (fragment.area as any).isFootnote;
         if (this.locked) {
           this.invalidate();
         } else {
+          // Issue #1879: For footnotes in multi-column, try reducing the
+          // footnote size instead of forbidding. When a page-level footnote
+          // is too large, it reduces column/page heights so much that the
+          // anchor can't be reached (feedback loop). Halving the size and
+          // retrying lets the footnote fragment at a size that still allows
+          // the anchor to be reached during re-layout.
+          const hasMultiColumn =
+            isFootnote &&
+            this.footnoteAnchorsSeen.has(notAllowedFloat.getId()) &&
+            this.hasMultiColumnFootnoteContext();
+          if (hasMultiColumn) {
+            const currentOuter =
+              fragment.area.computedBlockSize +
+              fragment.area.getInsetBefore() +
+              fragment.area.getInsetAfter();
+            if (this.trySetFootnoteRetryMaxBlockSize(currentOuter)) {
+              // Retry with reduced size
+              this.removePageFloatFragment(fragment);
+              this.removeEndFloatFragments(fragment.floatSide);
+              return true;
+            }
+            // Too small to display — fall through to forbid
+          }
           this.removePageFloatFragment(fragment);
           this.forbid(notAllowedFloat);
 
@@ -709,6 +966,31 @@ export class PageFloatLayoutContext
   finish() {
     if (this.checkAndForbidNotAllowedFloat()) {
       return;
+    }
+    for (let i = this.floatsDeferredToNext.length - 1; i >= 0; i--) {
+      const continuation = this.floatsDeferredToNext[i];
+      const float = continuation.float;
+      const existingFragment = this.findPageFloatFragment(float);
+      if (
+        this.floatReference === FloatReference.PAGE &&
+        "footnotePolicy" in float &&
+        float.footnotePolicy === Css.ident.line &&
+        this.footnoteAnchorsSeen.has(float.getId()) &&
+        !existingFragment
+      ) {
+        // Once the anchor line has already appeared on the page, a deferred
+        // footnote-policy: line footnote can no longer move independently.
+        // If a fragment already started on this page, the deferred part is
+        // just the continuation and should remain allowed to split.
+        if (this.locked) {
+          this.invalidate();
+          return;
+        }
+        this.removeFloatDeferredToNext(float);
+        this.forbid(float);
+        this.invalidate();
+        return;
+      }
     }
     for (let i = this.floatsDeferredToNext.length - 1; i >= 0; i--) {
       const continuation = this.floatsDeferredToNext[i];
@@ -968,6 +1250,7 @@ export class PageFloatLayoutContext
     layoutContext: Vtree.LayoutContext,
     clientLayout: Vtree.ClientLayout,
     condition?: (p1: PageFloatFragment, p2: PageFloatLayoutContext) => boolean,
+    includeParent: boolean = true,
   ): number {
     Asserts.assert(this.container);
     const logicalSide = this.toLogical(side);
@@ -981,13 +1264,14 @@ export class PageFloatLayoutContext
       clientLayout,
       condition,
     );
-    if (this.parent && this.parent.container) {
+    if (includeParent && this.parent && this.parent.container) {
       const parentLimit = this.parent.getLimitValue(
         physicalSide,
         physicalSide2,
         layoutContext,
         clientLayout,
         condition,
+        includeParent,
       );
       switch (physicalSide) {
         case "top":
@@ -1072,6 +1356,24 @@ export class PageFloatLayoutContext
       floatMinWrapBlockStart: 0,
       floatMinWrapBlockEnd: 0,
     };
+    // During column balancing, the container's JS block-size (width for
+    // vertical, height for horizontal) may be reduced while the CSS element
+    // dimensions stay at the original value. Use the original CSS dimensions
+    // for float limit calculations to keep consistency with float fragment
+    // positions, which are based on the real DOM layout. (Issue #1764)
+    // Only apply when CSS > JS (balancing reduced JS), not when CSS < JS
+    // (footnotes reduced CSS via adjustColumnBlockSizeForBlockEndFloats).
+    if (this.container.vertical) {
+      const cssWidth = parseFloat(this.container.element?.style?.width);
+      if (isFinite(cssWidth) && cssWidth > this.container.width) {
+        limits.right += cssWidth - this.container.width;
+      }
+    } else {
+      const cssHeight = parseFloat(this.container.element?.style?.height);
+      if (isFinite(cssHeight) && cssHeight > this.container.height) {
+        limits.bottom += cssHeight - this.container.height;
+      }
+    }
 
     function resolveLengthPercentage(numeric, viewNode, containerLength) {
       if (numeric.unit === "%") {
@@ -1106,6 +1408,12 @@ export class PageFloatLayoutContext
         }
         const area = f.area;
         const floatMinWrapBlock = f.continuations[0].float.floatMinWrapBlock;
+        const outerBlockEnd = area.vertical
+          ? area.left + area.getInsetLeft() + area.width + area.getInsetRight()
+          : area.top + area.getInsetTop() + area.height + area.getInsetBottom();
+        const outerInlineEnd = area.vertical
+          ? area.top + area.getInsetTop() + area.height + area.getInsetBottom()
+          : area.left + area.getInsetLeft() + area.width + area.getInsetRight();
         let top = l.top;
         let left = l.left;
         let bottom = l.bottom;
@@ -1115,9 +1423,9 @@ export class PageFloatLayoutContext
         switch (logicalFloatSide) {
           case "inline-start":
             if (area.vertical) {
-              top = Math.max(top, area.top + area.height);
+              top = Math.max(top, outerInlineEnd);
             } else {
-              left = Math.max(left, area.left + area.width);
+              left = Math.max(left, outerInlineEnd);
             }
             break;
           case "block-start":
@@ -1131,14 +1439,14 @@ export class PageFloatLayoutContext
               }
               right = Math.min(right, area.left);
             } else {
-              if (floatMinWrapBlock && area.top + area.height > top) {
+              if (floatMinWrapBlock && outerBlockEnd > top) {
                 floatMinWrapBlockStart = resolveLengthPercentage(
                   floatMinWrapBlock,
                   (area as any).rootViewNodes[0],
                   paddingRect.y2 - paddingRect.y1,
                 ) as number;
               }
-              top = Math.max(top, area.top + area.height);
+              top = Math.max(top, outerBlockEnd);
             }
             break;
           case "inline-end":
@@ -1150,14 +1458,14 @@ export class PageFloatLayoutContext
             break;
           case "block-end":
             if (area.vertical) {
-              if (floatMinWrapBlock && area.left + area.width > left) {
+              if (floatMinWrapBlock && outerBlockEnd > left) {
                 floatMinWrapBlockEnd = resolveLengthPercentage(
                   floatMinWrapBlock,
                   (area as any).rootViewNodes[0],
                   paddingRect.x2 - paddingRect.x1,
                 ) as number;
               }
-              left = Math.max(left, area.left + area.width);
+              left = Math.max(left, outerBlockEnd);
             } else {
               if (floatMinWrapBlock && area.top < bottom) {
                 floatMinWrapBlockEnd = resolveLengthPercentage(
@@ -1266,26 +1574,34 @@ export class PageFloatLayoutContext
     );
     const blockOffset = area.vertical ? area.originX : area.originY;
     const inlineOffset = area.vertical ? area.originY : area.originX;
-    blockStart = area.vertical
-      ? Math.min(
-          blockStart,
-          area.left +
-            area.getInsetLeft() +
-            area.width +
-            area.getInsetRight() +
-            blockOffset,
-        )
-      : Math.max(blockStart, area.top + blockOffset);
-    blockEnd = area.vertical
-      ? Math.max(blockEnd, area.left + blockOffset)
-      : Math.min(
-          blockEnd,
-          area.top +
-            area.getInsetTop() +
-            area.height +
-            area.getInsetBottom() +
-            blockOffset,
-        );
+    // For footnotes, skip clamping blockStart/blockEnd to the area's own
+    // dimensions. The area dimensions may be constrained by max-block-size
+    // (max-height in horizontal, max-width in vertical), but the footnote
+    // needs the full page limits for correct block-end positioning.
+    // After positioning, the block dimension is clamped to max-block-size
+    // in setupFloatArea. (Issue #1878)
+    if (!area.isFootnote) {
+      blockStart = area.vertical
+        ? Math.min(
+            blockStart,
+            area.left +
+              area.getInsetLeft() +
+              area.width +
+              area.getInsetRight() +
+              blockOffset,
+          )
+        : Math.max(blockStart, area.top + blockOffset);
+      blockEnd = area.vertical
+        ? Math.max(blockEnd, area.left + blockOffset)
+        : Math.min(
+            blockEnd,
+            area.top +
+              area.getInsetTop() +
+              area.height +
+              area.getInsetBottom() +
+              blockOffset,
+          );
+    }
 
     function limitBlockStartEndValueWithOpenRect(getRect, rect) {
       let openRect = getRect(area.bands, rect);
@@ -1344,15 +1660,55 @@ export class PageFloatLayoutContext
           return null;
         }
       }
+      // For footnotes with a valid anchor edge, constrain the available
+      // block space so the footnote starts no higher than the anchor
+      // position. This enables footnote fragmentation: content that
+      // doesn't fit below the anchor overflows and is deferred to the
+      // next page.
+      if (
+        area.isFootnote &&
+        anchorEdge !== null &&
+        isFinite(anchorEdge) &&
+        logicalFloatSides[0] === "block-end"
+      ) {
+        if (area.vertical) {
+          blockStart = Math.min(blockStart, anchorEdge);
+        } else {
+          blockStart = Math.max(blockStart, anchorEdge);
+        }
+      }
       outerBlockSize = (blockEnd - blockStart) * area.getBoxDir();
-      blockSize = outerBlockSize - area.getInsetBefore() - area.getInsetAfter();
+      // Issue #1879: Apply footnoteMaxBlockSize constraint from iterative
+      // retry. When a footnote was found too large (anchor not reachable
+      // in multi-column re-layout), this limits the footnote area.
+      if (area.isFootnote && this.footnoteMaxBlockSize != null) {
+        outerBlockSize = Math.min(outerBlockSize, this.footnoteMaxBlockSize);
+        // Adjust blockStart accordingly for correct positioning
+        if (area.vertical) {
+          blockStart = blockEnd + outerBlockSize;
+        } else {
+          blockStart = blockEnd - outerBlockSize;
+        }
+      }
+      blockSize = Math.max(
+        0,
+        outerBlockSize - area.getInsetBefore() - area.getInsetAfter(),
+      );
       outerInlineSize = (inlineEnd - inlineStart) * area.getInlineDir();
       inlineSize = outerInlineSize - area.getInsetStart() - area.getInsetEnd();
       if (!force && (blockSize <= 0 || inlineSize <= 0)) {
         return null;
       }
     } else {
-      blockSize = area.computedBlockSize;
+      // computedBlockSize already includes the border-box size (padding +
+      // border) of the root float elements and any positive trailing margin.
+      // However, negative trailing margin is not reflected, so only add the
+      // negative part of margin-after here. (Issue #1752)
+      const marginAfter = area.getContentBlockMarginAfter();
+      blockSize = Math.max(
+        0,
+        area.computedBlockSize + Math.min(0, marginAfter),
+      );
       outerBlockSize = blockSize + area.getInsetBefore() + area.getInsetAfter();
       const availableBlockSize = (blockEnd - blockStart) * area.getBoxDir();
       if (logicalFloatSides[0] === "snap-block") {
@@ -1503,28 +1859,120 @@ export class PageFloatLayoutContext
     );
   }
 
-  getBlockStartEdgeOfBlockEndFloats(): number {
-    const isVertical = this.getContainer().vertical;
-    return this.floatFragments
-      .filter((fragment) => fragment.floatSide === "block-end")
-      .reduce(
-        (edge, fragment) => {
-          const rect = fragment.getOuterRect();
-          if (isVertical) {
-            return Math.max(edge, rect.x2);
-          } else {
-            return Math.min(edge, rect.y1);
-          }
-        },
-        isVertical ? 0 : Infinity,
-      );
+  getBlockEndEdgeOfBlockStartFloats(inlinePos?: number): number {
+    let context: PageFloatLayoutContext = this;
+    let container: Vtree.Container | null = null;
+    while (context && !container) {
+      container = context.container;
+      context = context.parent;
+    }
+    const isVertical = !!container?.vertical;
+    let edge = NaN;
+    this.floatFragments
+      .filter((fragment) => fragment.floatSide.includes("block-start"))
+      .filter((fragment) => {
+        if (!isFinite(inlinePos)) {
+          return true;
+        }
+        const rect = fragment.getOuterRect();
+        return isVertical
+          ? rect.y1 <= inlinePos && inlinePos <= rect.y2
+          : rect.x1 <= inlinePos && inlinePos <= rect.x2;
+      })
+      .forEach((fragment) => {
+        const rect = fragment.getOuterRect();
+        const fragmentEdge = isVertical ? rect.x1 : rect.y2;
+        edge = isFinite(edge)
+          ? isVertical
+            ? Math.min(edge, fragmentEdge)
+            : Math.max(edge, fragmentEdge)
+          : fragmentEdge;
+      });
+    if (this.parent) {
+      const parentEdge =
+        this.parent.getBlockEndEdgeOfBlockStartFloats(inlinePos);
+      if (isFinite(parentEdge)) {
+        edge = isFinite(edge)
+          ? isVertical
+            ? Math.min(edge, parentEdge)
+            : Math.max(edge, parentEdge)
+          : parentEdge;
+      }
+    }
+    return edge;
+  }
+
+  getBlockStartEdgeOfBlockEndFloats(inlinePos?: number): number {
+    let context: PageFloatLayoutContext = this;
+    let container: Vtree.Container | null = null;
+    while (context && !container) {
+      container = context.container;
+      context = context.parent;
+    }
+    const isVertical = !!container?.vertical;
+    let edge = NaN;
+    this.floatFragments
+      .filter((fragment) => fragment.floatSide.includes("block-end"))
+      .filter((fragment) => {
+        if (!isFinite(inlinePos)) {
+          return true;
+        }
+        const rect = fragment.getOuterRect();
+        return isVertical
+          ? rect.y1 <= inlinePos && inlinePos <= rect.y2
+          : rect.x1 <= inlinePos && inlinePos <= rect.x2;
+      })
+      .forEach((fragment) => {
+        const rect = fragment.getOuterRect();
+        const fragmentEdge = isVertical ? rect.x2 : rect.y1;
+        edge = isFinite(edge)
+          ? isVertical
+            ? Math.max(edge, fragmentEdge)
+            : Math.min(edge, fragmentEdge)
+          : fragmentEdge;
+      });
+    if (this.parent) {
+      const parentEdge =
+        this.parent.getBlockStartEdgeOfBlockEndFloats(inlinePos);
+      if (isFinite(parentEdge)) {
+        edge = isFinite(edge)
+          ? isVertical
+            ? Math.max(edge, parentEdge)
+            : Math.min(edge, parentEdge)
+          : parentEdge;
+      }
+    }
+    return edge;
   }
 
   getPageFloatClearEdge(clear: string, column: LayoutType.Column): number {
+    const shouldIgnoreFloatForClear = (floatSide: string) => {
+      const logicalFloatSides = this.toLogicalFloatSides(floatSide);
+      const primaryLogicalFloatSide = logicalFloatSides[0];
+      if (clear === "both") {
+        return primaryLogicalFloatSide === "block-end";
+      }
+      if (clear === "inline-start") {
+        return (
+          logicalFloatSides.includes("inline-end") ||
+          primaryLogicalFloatSide === "block-end"
+        );
+      }
+      if (clear === "inline-end") {
+        return (
+          logicalFloatSides.includes("inline-start") ||
+          primaryLogicalFloatSide === "block-start" ||
+          primaryLogicalFloatSide === "block-end"
+        );
+      }
+      return false;
+    };
+
     function isContinuationOfAlreadyAppearedFloat(
       context: PageFloatLayoutContext,
     ) {
       return (continuation: PageFloatContinuation) =>
+        !shouldIgnoreFloatForClear(continuation.float.floatSide) &&
         context.isAnchorAlreadyAppeared(continuation.float.getId());
     }
 
@@ -1532,16 +1980,10 @@ export class PageFloatLayoutContext
       fragment: PageFloatFragment,
       context: PageFloatLayoutContext,
     ) {
-      if (
-        (clear === "inline-start" &&
-          (fragment.floatSide.includes("inline-end") ||
-            fragment.floatSide === "block-end")) ||
-        (clear === "inline-end" &&
-          (fragment.floatSide.includes("inline-start") ||
-            fragment.floatSide === "block-start"))
-      ) {
-        // Clear page-floats by clear:inline-start/end on non-page-float elements.
-        // (Issue #1550)
+      if (shouldIgnoreFloatForClear(fragment.floatSide)) {
+        // Block-end page floats, including footnotes, are positioned after the
+        // current block and must not force inline-side clear on normal blocks.
+        // (Issue #1987, revisiting Issue #1550 behavior)
         return false;
       }
       return fragment.continuations.some(
@@ -1878,6 +2320,7 @@ export class NormalPageFloatLayoutStrategy implements PageFloatLayoutStrategy {
     Asserts.assert(nodeContext.floatSide);
     const floatSide: string = nodeContext.floatSide;
     const nodePosition = nodeContext.toNodePosition();
+    const insidePageFloat = !!pageFloatLayoutContext.generatingNodePosition;
     return column
       .resolveFloatReferenceFromColumnSpan(
         floatReference,
@@ -1895,6 +2338,14 @@ export class NormalPageFloatLayoutStrategy implements PageFloatLayoutStrategy {
           pageFloatLayoutContext.flowName,
           nodeContext.floatMinWrapBlock,
         );
+        float.insidePageFloatArea = insidePageFloat;
+        if (insidePageFloat) {
+          const parentNodePos = pageFloatLayoutContext.generatingNodePosition;
+          if (parentNodePos) {
+            float.parentPageFloat =
+              pageFloatLayoutContext.findPageFloatByNodePosition(parentNodePos);
+          }
+        }
         pageFloatLayoutContext.addPageFloat(float);
         return Task.newResult(float);
       });
@@ -1932,7 +2383,9 @@ export class NormalPageFloatLayoutStrategy implements PageFloatLayoutStrategy {
     floatArea: LayoutType.PageFloatArea,
     floatContainer: Vtree.Container,
     column: LayoutType.Column,
-  ) {}
+  ): Task.Result<void> {
+    return Task.newResult(undefined);
+  }
 
   /** @override */
   forbid(float: PageFloat, pageFloatLayoutContext: PageFloatLayoutContext) {}

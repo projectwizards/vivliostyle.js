@@ -99,6 +99,50 @@ export interface CMYKValueJSON {
   y: number;
   k: number;
 }
+
+export interface RGBValueJSON {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export type CmykReserveMapEntry = [RGBValueJSON, CMYKValueJSON];
+
+export function isValidCmykReserveMap(
+  data: unknown,
+): data is CmykReserveMapEntry[] {
+  if (!Array.isArray(data)) {
+    return false;
+  }
+  return data.every((entry) => {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      return false;
+    }
+    const [rgb, cmyk] = entry;
+    if (
+      !rgb ||
+      typeof rgb !== "object" ||
+      Array.isArray(rgb) ||
+      !cmyk ||
+      typeof cmyk !== "object" ||
+      Array.isArray(cmyk)
+    ) {
+      return false;
+    }
+    const rgbObj = rgb as { r: unknown; g: unknown; b: unknown };
+    const cmykObj = cmyk as { c: unknown; m: unknown; y: unknown; k: unknown };
+    return (
+      Number.isFinite(rgbObj.r as number) &&
+      Number.isFinite(rgbObj.g as number) &&
+      Number.isFinite(rgbObj.b as number) &&
+      Number.isFinite(cmykObj.c as number) &&
+      Number.isFinite(cmykObj.m as number) &&
+      Number.isFinite(cmykObj.y as number) &&
+      Number.isFinite(cmykObj.k as number)
+    );
+  });
+}
+
 class CMYKValue {
   static readonly MAX = 10000;
 
@@ -177,7 +221,8 @@ function getNumValue(v: Css.Val): number | null {
 export function parseDeviceCmyk(
   func: Css.Func,
 ): { cmyk: CMYKValue; alpha: number | null } | null {
-  if (func.name !== "device-cmyk") {
+  // Also accept legacy cmyk() as an alias for device-cmyk()
+  if (func.name !== "device-cmyk" && func.name !== "cmyk") {
     return null;
   }
 
@@ -255,6 +300,14 @@ export class CmykStore {
     }
     this.#map.set(key, cmyk);
     return srgb;
+  }
+
+  registerCmykReserveMap(entries: CmykReserveMapEntry[]): void {
+    for (const [rgb, cmyk] of entries) {
+      const srgb = SRGBValue.fromInt(rgb.r, rgb.g, rgb.b);
+      const cmykVal = CMYKValue.fromInt(cmyk.c, cmyk.m, cmyk.y, cmyk.k);
+      this.#map.set(srgb.toKey(), cmykVal);
+    }
   }
 
   toJSON(): Record<string, CMYKValueJSON> {

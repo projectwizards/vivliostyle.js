@@ -22,9 +22,7 @@ import * as Base from "./base";
 import * as Break from "./break";
 import * as Constants from "./constants";
 import * as Css from "./css";
-import * as CssParser from "./css-parser";
 import * as CssProp from "./css-prop";
-import * as CssTokenizer from "./css-tokenizer";
 import * as Diff from "./diff";
 import * as Exprs from "./exprs";
 import * as GeometryUtil from "./geometry-util";
@@ -289,7 +287,10 @@ export function canIgnore(node: Node, whitespace?: Whitespace): boolean {
   if (node.nodeType == 1) {
     return false;
   }
-  const text = node.textContent;
+  return canIgnoreText(node.textContent, whitespace);
+}
+
+export function canIgnoreText(text: string, whitespace?: Whitespace): boolean {
   switch (whitespace) {
     case Whitespace.PRESERVE:
       return text.length == 0;
@@ -467,7 +468,7 @@ export function newNodePositionFromNodeContext(
     shadowContext: nodeContext.shadowContext,
     nodeShadow: null,
     shadowSibling: null,
-    formattingContext: null,
+    formattingContext: nodeContext.formattingContext,
     fragmentIndex:
       initialFragmentIndex != null
         ? initialFragmentIndex
@@ -582,7 +583,6 @@ export class NodeContext implements Vtree.NodeContext {
   clearSide: string | null = null;
   floatMinWrapBlock: Css.Numeric | null = null;
   columnSpan: Css.Val | null = null;
-  verticalAlign: string = "baseline";
   captionSide: string = "top";
   inlineBorderSpacing: number = 0;
   blockBorderSpacing: number = 0;
@@ -645,7 +645,6 @@ export class NodeContext implements Vtree.NodeContext {
     this.clearSide = null;
     this.floatMinWrapBlock = null;
     this.columnSpan = null;
-    this.verticalAlign = "baseline";
     this.flexContainer = false;
     this.whitespace = this.parent ? this.parent.whitespace : Whitespace.IGNORE;
     this.hyphenateCharacter = this.parent
@@ -684,7 +683,6 @@ export class NodeContext implements Vtree.NodeContext {
     np.clearSide = this.clearSide;
     np.floatMinWrapBlock = this.floatMinWrapBlock;
     np.columnSpan = this.columnSpan;
-    np.verticalAlign = this.verticalAlign;
     np.captionSide = this.captionSide;
     np.inlineBorderSpacing = this.inlineBorderSpacing;
     np.blockBorderSpacing = this.blockBorderSpacing;
@@ -1386,15 +1384,6 @@ export class ContentPropertyHandler extends Css.Visitor {
     const ex = expr.toExpr();
     let val = ex.evaluate(this.context);
     if (typeof val === "string") {
-      if (ex instanceof Exprs.Named) {
-        // For env(pub-title) and env(doc-title)
-        // Need to unquote the result. To be consistent with cssparse.evaluateExprToCSS()
-        val = CssParser.parseValue(
-          ex.scope,
-          new CssTokenizer.Tokenizer(val, null),
-          "",
-        ).stringValue();
-      }
       assert(this.elem.ownerDocument);
       const node = this.exprContentListener(ex, val, this.elem.ownerDocument);
       if (

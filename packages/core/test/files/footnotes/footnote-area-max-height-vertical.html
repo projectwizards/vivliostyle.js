@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>Footnote Fragmentation Test</title>
+    <style>
+      @page {
+        size: 148mm 105mm;
+        margin: 20mm;
+
+        @bottom-center {
+          content: "Page " counter(page);
+          font-size: 0.8rem;
+        }
+
+        @footnote {
+          border-block-start: 1px solid black;
+          padding-block-start: 1em;
+          margin-block-start: 1em;
+          max-block-size: 50vb;
+          box-sizing: border-box;
+          background: pink;
+        }
+      }
+
+      :root {
+        writing-mode: vertical-rl;
+        font-size: 12pt;
+        line-height: 1.5;
+      }
+
+      .footnote {
+        float: footnote;
+        font: 0.9rem/1.5 serif;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Footnote Fragmentation Test</h1>
+    <p>This is some sample text to fill the page. We want to simulate a case where the footnote is too long to fit entirely at the bottom of the page<span class="footnote">This is a very long footnote. It is intentionally made long so that it cannot fit entirely within the remaining space at the bottom of the page. The expected behavior (as seen in Prince) is that the footnote starts on the same page as this reference and continues onto the next page. However, in Vivliostyle, the entire footnote may be pushed to the next page instead of being split. To ensure sufficient length, we repeat content: Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum volutpat, nunc sit amet varius dignissim, lacus erat facilisis urna, vitae facilisis lorem justo ut nulla. Integer non purus ut massa scelerisque tincidunt. Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo. Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt. (repeat as needed...)</span></p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+  </body>
+</html>

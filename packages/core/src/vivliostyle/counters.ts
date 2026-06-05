@@ -33,11 +33,24 @@ import { Layout } from "./types";
 function cloneCounterValues(
   counters: CssCascade.CounterValues,
 ): CssCascade.CounterValues {
-  const result = {};
+  const result = Object.create(null) as CssCascade.CounterValues;
   Object.keys(counters).forEach((name) => {
     result[name] = Array.from(counters[name]);
   });
   return result;
+}
+
+/**
+ * Decode CSS string escape sequences.
+ * e.g., `\22` → `"`, `\A` → newline, `\\` → `\`
+ */
+function decodeCssString(s: string): string {
+  return s.replace(/\\([0-9a-fA-F]{1,6})\s?|\\(.)/g, (_, hex, ch) => {
+    if (hex) {
+      return String.fromCodePoint(parseInt(hex, 16));
+    }
+    return ch;
+  });
 }
 
 /**
@@ -56,6 +69,35 @@ function extractPseudoElementText(
     const pseudos = clone.querySelectorAll("[data-adapt-pseudo]");
     pseudos.forEach((pseudo) => pseudo.remove());
     return clone.textContent || "";
+  } else if (pseudoElement === "marker") {
+    // First check for traditional marker span (e.g., footnote-marker inside)
+    const pseudoElem = element.querySelector(
+      `[data-adapt-pseudo="marker"], [data-adapt-pseudo="footnote-marker"]`,
+    );
+    if (pseudoElem) {
+      return pseudoElem.textContent || "";
+    }
+    // Native ::marker: read from --viv-marker-content CSS custom property.
+    // The property is always set as an inline style on the element itself
+    // (via computedStyle in vgen.ts), so element.style is sufficient.
+    // Avoid getComputedStyle here as it can cause unwanted style computation
+    // side effects on unrelated elements (e.g., canvas image-orientation).
+    const markerContent = (element as HTMLElement).style?.getPropertyValue(
+      "--viv-marker-content",
+    );
+    if (markerContent) {
+      // Extract only string components from the CSS content value.
+      // e.g., url(icon.png) "1. " → "1. " (url() tokens are ignored)
+      const stringMatches = markerContent.match(
+        /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g,
+      );
+      if (stringMatches && stringMatches.length > 0) {
+        return stringMatches
+          .map((s) => decodeCssString(s.substring(1, s.length - 1)))
+          .join("");
+      }
+    }
+    return "";
   } else {
     // Extract ::before or ::after content
     const pseudoElem = element.querySelector(
@@ -148,8 +190,8 @@ type NamedRunningValues = {
 
 class CounterResolver implements CssCascade.CounterResolver {
   styler: CssStyler.Styler | null = null;
-  namedStringValues: NamedRunningValues = {};
-  runningElements: NamedRunningValues = {};
+  namedStringValues: NamedRunningValues = Object.create(null);
+  runningElements: NamedRunningValues = Object.create(null);
 
   constructor(
     public readonly counterStore: CounterStore,
@@ -264,6 +306,46 @@ class CounterResolver implements CssCascade.CounterResolver {
   }
 
   /**
+   * Returns document counter snapshot at the start of the page where the
+   * target element was laid out. Returns null if the element has not been
+   * laid out yet.
+   */
+  private getTargetPageDocCounters(
+    transformedId: string,
+  ): CssCascade.CounterValues | null {
+    if (this.counterStore.currentPage.elementsById[transformedId]) {
+      return this.counterStore.currentPageDocCounters;
+    } else {
+      return this.counterStore.pageDocCountersById[transformedId] || null;
+    }
+  }
+
+  /**
+   * Adjust element counter values for cross-scope page-controlled counters.
+   * The page counter operates at the outermost scope, so only the first
+   * (outermost) counter value is adjusted. Returns the adjusted array.
+   */
+  private adjustCountersForCrossScope(
+    name: string,
+    elementCounters: number[],
+    pageCounters: CssCascade.CounterValues | null,
+    docStartCounters: CssCascade.CounterValues | null,
+  ): number[] {
+    if (!this.counterStore.isPageControlledCounter(name) || !pageCounters) {
+      return elementCounters;
+    }
+    const pageVals = pageCounters[name] || [];
+    const pageVal = pageVals.length ? pageVals[pageVals.length - 1] : 0;
+    const docStartVals = docStartCounters?.[name] || [];
+    const docStartVal = docStartVals.length ? docStartVals[0] : 0;
+    if (!elementCounters.length) {
+      return [pageVal];
+    }
+    const adjustedFirst = pageVal + (elementCounters[0] - docStartVal);
+    return [adjustedFirst, ...elementCounters.slice(1)];
+  }
+
+  /**
    * Returns page-based text content for an element with the specified ID.
    * Returns null if the element has not been laid out yet.
    * @param transformedId ID transformed by DocumentURLTransformer to handle a
@@ -314,31 +396,33 @@ class CounterResolver implements CssCascade.CounterResolver {
     const id = this.getFragment(url);
     const transformedId = this.getTransformedId(url);
 
-    // Since this method is executed during Styler.styleUntil is being called,
-    // set false to lookForElement argument.
-    let counters = this.getTargetCounters(id, transformedId, false);
-    if (counters && counters[name]) {
-      // Since an element-based counter is defined, any page-based counter is
-      // obscured even if it exists.
-      const countersOfName = counters[name];
-      return new Exprs.Const(
-        this.rootScope,
-        format(countersOfName[countersOfName.length - 1] || null),
-      );
-    }
+    // Always use a Native expression so the value is resolved at layout time.
+    // This ensures page-controlled counters get the cross-scope adjustment
+    // (pageControlledCounterNames may not be set during initial styling).
     const expr = new Exprs.Native(
       this.pageScope,
       () => {
-        // Since This block is evaluated during layout, lookForElement
+        // Since this block is evaluated during layout, lookForElement
         // argument can be set to true.
-        counters = this.getTargetCounters(id, transformedId, true);
+        const counters = this.getTargetCounters(id, transformedId, true);
 
         if (counters) {
           if (counters[name]) {
-            // Since an element-based counter is defined, any page-based
-            // counter is obscured even if it exists.
             const countersOfName = counters[name];
-            return format(countersOfName[countersOfName.length - 1] || null);
+            // Apply cross-scope adjustment for page-controlled counters
+            const pageCounters = this.getTargetPageCounters(transformedId);
+            const docStartCounters =
+              this.getTargetPageDocCounters(transformedId);
+            const adjusted = this.adjustCountersForCrossScope(
+              name,
+              countersOfName,
+              pageCounters,
+              docStartCounters,
+            );
+            if (pageCounters) {
+              this.counterStore.resolveReference(transformedId);
+            }
+            return format(adjusted[adjusted.length - 1] || null);
           } else {
             const pageCounters = this.getTargetPageCounters(transformedId);
             if (pageCounters) {
@@ -402,14 +486,26 @@ class CounterResolver implements CssCascade.CounterResolver {
           return "??"; // TODO more reasonable placeholder?
         } else {
           this.counterStore.resolveReference(transformedId);
-          const pageCountersOfName = pageCounters[name] || [];
           const elementCounters = this.getTargetCounters(
             id,
             transformedId,
             true,
           );
-          const elementCountersOfName = elementCounters[name] || [];
-          return format(pageCountersOfName.concat(elementCountersOfName));
+          const elementCountersOfName = elementCounters?.[name] || [];
+          // Apply cross-scope adjustment for page-controlled counters
+          const docStartCounters = this.getTargetPageDocCounters(transformedId);
+          const adjusted = this.adjustCountersForCrossScope(
+            name,
+            elementCountersOfName,
+            pageCounters,
+            docStartCounters,
+          );
+          if (adjusted.length) {
+            return format(adjusted);
+          }
+          // Fall back to page-only counters if no element counters
+          const pageCountersOfName = pageCounters[name] || [];
+          return format(pageCountersOfName);
         }
       },
       `target-counters-${name}-of-${url}`,
@@ -510,6 +606,9 @@ class CounterResolver implements CssCascade.CounterResolver {
       .sort(Base.numberCompare);
 
     const currentPage = this.counterStore.currentPage;
+    if (!currentPage) {
+      return "";
+    }
     const pageStartOffset = currentPage.isBlankPage
       ? currentPage.offset - 1
       : currentPage.offset;
@@ -614,7 +713,8 @@ class CounterResolver implements CssCascade.CounterResolver {
     elementOffset: number,
   ): void {
     const values =
-      this.namedStringValues[name] || (this.namedStringValues[name] = {});
+      this.namedStringValues[name] ||
+      (this.namedStringValues[name] = Object.create(null));
     values[elementOffset] = stringValue;
   }
 
@@ -624,34 +724,46 @@ class CounterResolver implements CssCascade.CounterResolver {
    */
   setRunningElement(name: string, elementOffset: number): void {
     const values =
-      this.runningElements[name] || (this.runningElements[name] = {});
+      this.runningElements[name] ||
+      (this.runningElements[name] = Object.create(null));
     values[elementOffset] = String(elementOffset);
   }
 }
 
 export class CounterStore {
-  countersById: { [key: string]: CssCascade.CounterValues } = {};
-  pageCountersById: { [key: string]: CssCascade.CounterValues } = {};
-  pageTextById: { [key: string]: { [pseudoElement: string]: string } } = {};
+  countersById: { [key: string]: CssCascade.CounterValues } =
+    Object.create(null);
+  pageCountersById: { [key: string]: CssCascade.CounterValues } =
+    Object.create(null);
+  pageDocCountersById: { [key: string]: CssCascade.CounterValues } =
+    Object.create(null);
+  pageTextById: { [key: string]: { [pseudoElement: string]: string } } =
+    Object.create(null);
   currentPageDocCounters: CssCascade.CounterValues | null = null;
   previousPageDocCounters: CssCascade.CounterValues | null = null;
-  currentPageDocCounterChanges: { [key: string]: boolean } = {};
+  currentPageDocCounterChanges: { [key: string]: boolean } =
+    Object.create(null);
   currentPageDocCounterChangeTypes: {
     [key: string]: "reset" | "set" | "increment";
-  } = {};
-  currentPageCounters: CssCascade.CounterValues = {};
-  previousPageCounters: CssCascade.CounterValues = {};
+  } = Object.create(null);
+  currentPageCounters: CssCascade.CounterValues = Object.create(null);
+  previousPageCounters: CssCascade.CounterValues = Object.create(null);
   currentPageCountersStack: CssCascade.CounterValues[] = [];
   pageIndicesById: {
     [key: string]: { spineIndex: number; pageIndex: number };
-  } = {};
+  } = Object.create(null);
   currentPage: Vtree.Page = null;
   newReferencesOfCurrentPage: TargetCounterReference[] = [];
   referencesToSolve: TargetCounterReference[] = [];
   referencesToSolveStack: TargetCounterReference[][] = [];
-  unresolvedReferences: { [key: string]: TargetCounterReference[] } = {};
-  resolvedReferences: { [key: string]: TargetCounterReference[] } = {};
-  pageControlledCounterNames: { [key: string]: boolean } = { page: true };
+  unresolvedReferences: { [key: string]: TargetCounterReference[] } =
+    Object.create(null);
+  resolvedReferences: { [key: string]: TargetCounterReference[] } =
+    Object.create(null);
+  pageControlledCounterNames: { [key: string]: boolean } = Object.assign(
+    Object.create(null),
+    { page: true },
+  );
   private pagesCounterExprs: {
     expr: Exprs.Val;
     format: (p1: number[]) => string;
@@ -707,10 +819,10 @@ export class CounterStore {
     this.currentPageDocCounters = counters
       ? cloneCounterValues(counters)
       : null;
-    this.currentPageDocCounterChanges = {};
+    this.currentPageDocCounterChanges = Object.create(null);
     this.currentPageDocCounterChangeTypes = changeTypes
       ? { ...changeTypes }
-      : {};
+      : Object.create(null);
     if (changes) {
       changes.forEach((name) => {
         this.currentPageDocCounterChanges[name] = true;
@@ -719,7 +831,9 @@ export class CounterStore {
   }
 
   setPageControlledCounterNames(names: string[]) {
-    const map: { [key: string]: boolean } = { page: true };
+    const map: { [key: string]: boolean } = Object.assign(Object.create(null), {
+      page: true,
+    });
     names.forEach((name) => {
       map[name] = true;
     });
@@ -767,7 +881,7 @@ export class CounterStore {
     const docChangeTypes = this.currentPageDocCounterChangeTypes || {};
     const docCounterInfo: {
       [key: string]: { delta: number; reset: boolean; value: number };
-    } = {};
+    } = Object.create(null);
     if (this.currentPageDocCounters) {
       const prevDocCounters = this.previousPageDocCounters || {};
       for (const counterName in this.currentPageDocCounters) {
@@ -792,7 +906,7 @@ export class CounterStore {
         };
       }
     }
-    const skipIncrement: { [key: string]: boolean } = {};
+    const skipIncrement: { [key: string]: boolean } = Object.create(null);
     let resetMap: { [key: string]: number };
     const reset = cascadedPageStyle["counter-reset"] as CssCascade.CascadeValue;
     if (reset) {
@@ -850,7 +964,7 @@ export class CounterStore {
         incrementMap["page"] = 1;
       }
     } else {
-      incrementMap = {};
+      incrementMap = Object.create(null);
       if (!(docCounterInfo["page"] && docCounterInfo["page"].reset)) {
         incrementMap["page"] = 1;
       }
@@ -891,18 +1005,6 @@ export class CounterStore {
         this.definePageCounter(resetCounterName, resetMap[resetCounterName]);
       }
     }
-    if (setMap) {
-      // Apply counter-set after reset to match counter update order
-      // (reset -> set -> increment).
-      for (const setCounterName in setMap) {
-        if (!this.currentPageCounters[setCounterName]) {
-          this.definePageCounter(setCounterName, setMap[setCounterName]);
-        } else {
-          const counterValues = this.currentPageCounters[setCounterName];
-          counterValues[counterValues.length - 1] = setMap[setCounterName];
-        }
-      }
-    }
     for (const incrementCounterName in incrementMap) {
       if (skipIncrement[incrementCounterName]) {
         continue;
@@ -913,6 +1015,18 @@ export class CounterStore {
       const counterValues = this.currentPageCounters[incrementCounterName];
       counterValues[counterValues.length - 1] +=
         incrementMap[incrementCounterName];
+    }
+    if (setMap) {
+      // Match the standard counter update order:
+      // counter-reset -> counter-increment -> counter-set.
+      for (const setCounterName in setMap) {
+        if (!this.currentPageCounters[setCounterName]) {
+          this.definePageCounter(setCounterName, setMap[setCounterName]);
+        } else {
+          const counterValues = this.currentPageCounters[setCounterName];
+          counterValues[counterValues.length - 1] = setMap[setCounterName];
+        }
+      }
     }
   }
 
@@ -985,8 +1099,14 @@ export class CounterStore {
     const ids = Object.keys(this.currentPage.elementsById);
     if (ids.length > 0) {
       const currentPageCounters = cloneCounterValues(this.currentPageCounters);
+      const currentPageDocCounters = this.currentPageDocCounters
+        ? cloneCounterValues(this.currentPageDocCounters)
+        : null;
       ids.forEach((id) => {
         this.pageCountersById[id] = currentPageCounters;
+        if (currentPageDocCounters) {
+          this.pageDocCountersById[id] = currentPageDocCounters;
+        }
 
         // Capture text content for target-text()
         const elements = this.currentPage.elementsById[id];
@@ -1041,6 +1161,126 @@ export class CounterStore {
       }
     }
     this.currentPage = null;
+  }
+
+  /**
+   * Adjust page counter snapshots for elements in spines after the specified
+   * spine. Called when a preceding spine's page count changes (e.g. TOC
+   * expands after target-text resolution), shifting all subsequent pages.
+   */
+  adjustPageCountersOfLaterSpines(
+    expandedSpineIndex: number,
+    pageDelta: number,
+  ): void {
+    if (pageDelta <= 0) return;
+    // Multiple IDs on the same page share the same counter object reference
+    // (assigned in finishPage). Use a Set to avoid adjusting the same object
+    // multiple times.
+    const adjusted = new Set<CssCascade.CounterValues>();
+    for (const id of Object.keys(this.pageIndicesById)) {
+      const idx = this.pageIndicesById[id];
+      if (idx.spineIndex > expandedSpineIndex) {
+        const counters = this.pageCountersById[id];
+        if (counters && counters["page"] && !adjusted.has(counters)) {
+          adjusted.add(counters);
+          counters["page"] = counters["page"].map((v) => v + pageDelta);
+        }
+      }
+    }
+  }
+
+  /**
+   * Walk through target-counter DOM nodes in the given page containers and
+   * update their text content from the current pageCountersById snapshots.
+   */
+  updateTargetCounterNodesInPages(pages: Vtree.Page[]): void {
+    for (const page of pages) {
+      if (!page || !page.container) continue;
+      const nodes = page.container.querySelectorAll(`[${TARGET_COUNTER_ATTR}]`);
+      for (const node of nodes) {
+        const key = node.getAttribute(TARGET_COUNTER_ATTR);
+        const expr = this.targetCounterExprs.find((o) => o.expr.key === key);
+        if (expr && expr.transformedId) {
+          const counterValue = this.pageCountersById[expr.transformedId];
+          if (counterValue) {
+            const arr: number[] = counterValue[expr.name];
+            if (arr) {
+              node.textContent = expr.format(arr[arr.length - 1]);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Resolve page-level counter values for a page.
+   *
+   * Prefer an explicit per-page snapshot when one is supplied. Otherwise fall
+   * back to looking up tracked element IDs on the page via pageCountersById.
+   *
+   * Note: explicitCounters are pageCounterStarts (pre-increment snapshots),
+   * while pageCountersById stores post-increment values. When using
+   * explicitCounters as a fallback, the caller should be aware of this
+   * distinction. For the "page" counter the difference is +1, but this
+   * method returns whichever snapshot it finds without adjustment.
+   */
+  private getPageCountersForPage(
+    page: Vtree.Page,
+    explicitCounters?: CssCascade.CounterValues | null,
+  ): CssCascade.CounterValues | null {
+    // First try pageCountersById (post-render values) via any tracked element
+    const elementIds = Object.keys(page.elementsById);
+    for (const elementId of elementIds) {
+      const counters = this.pageCountersById[elementId];
+      if (counters) {
+        return counters;
+      }
+    }
+    // Fall back to explicit per-page counters (e.g. pageCounterStarts)
+    if (explicitCounters) {
+      return explicitCounters;
+    }
+    return null;
+  }
+
+  /**
+   * Walk through page-counter DOM nodes in the given page containers and
+   * update their text content from the adjusted pageCountersById snapshots.
+   * Called after adjustPageCountersOfLaterSpines has shifted the counters.
+   *
+   * When available, pass explicit per-page counter snapshots aligned with the
+   * given pages so pages without tracked element IDs are also updated.
+   */
+  updatePageCounterNodesInPages(
+    pages: Vtree.Page[],
+    pageCountersByPage?: Array<CssCascade.CounterValues | null>,
+  ): void {
+    for (let i = 0; i < pages.length; i++) {
+      const page = pages[i];
+      if (!page?.container) continue;
+
+      const counters = this.getPageCountersForPage(
+        page,
+        pageCountersByPage?.[i],
+      );
+      if (!counters) continue;
+
+      const nodes = page.container.querySelectorAll(`[${PAGE_COUNTER_ATTR}]`);
+      for (const node of nodes) {
+        const key = node.getAttribute(PAGE_COUNTER_ATTR);
+        const counterExpr = this.pageCounterExprs.find(
+          (o) => o.expr.key === key,
+        );
+        if (!counterExpr) continue;
+        const str = (counterExpr.expr as Exprs.Native)?.str;
+        const counterName = str?.replace(/^page-counters?-/, "");
+        const counterValues = counters[counterName];
+        if (counterValues) {
+          node.textContent = counterExpr.format(counterValues);
+        }
+      }
+    }
   }
 
   /**

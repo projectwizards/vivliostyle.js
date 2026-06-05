@@ -1,0 +1,44 @@
+<!-- Test case for semantic ::footnote-call replacing source noteref content -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DPUB ::footnote-call replaces source content</title>
+  <style>
+    @page {
+      size: 160mm 120mm;
+      margin: 12mm;
+    }
+
+    :root {
+      counter-reset: footnote;
+    }
+
+    body {
+      font-family: serif;
+      line-height: 1.45;
+    }
+
+    a[role="doc-noteref"]::footnote-call {
+      content: counter(footnote);
+    }
+
+    aside[role="doc-footnote"]::footnote-marker {
+      content: counter(footnote) ". ";
+    }
+  </style>
+</head>
+<body>
+  <h1>DPUB ::footnote-call replaces source content</h1>
+  <p>
+    Expected: the visible noteref calls are 1 and 2 only, not 1* and 2*.
+    The call styling should match the semantic noteref styling only once.
+  </p>
+  <p>
+    The quick brown fox<a href="#fn-fox" role="doc-noteref">*</a>
+    jumps over the lazy dog<a href="#fn-dog" role="doc-noteref">*</a>.
+  </p>
+  <aside id="fn-fox" role="doc-footnote">The fox is an animal.</aside>
+  <aside id="fn-dog" role="doc-footnote">The dog is also an animal.</aside>
+</body>
+</html>

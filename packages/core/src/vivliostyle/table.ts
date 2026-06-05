@@ -19,6 +19,7 @@
  */
 import * as Asserts from "./asserts";
 import * as Base from "./base";
+import * as Break from "./break";
 import * as BreakPosition from "./break-position";
 import * as Css from "./css";
 import * as LayoutHelper from "./layout-helper";
@@ -43,6 +44,8 @@ import {
 
 export class TableRow {
   cells: TableCell[] = [];
+  breakBefore: string | null = null;
+  breakAfter: string | null = null;
 
   constructor(
     public readonly rowIndex: number,
@@ -136,7 +139,9 @@ export class TableCaptionView {
   ) {}
 }
 
-export class BetweenTableRowBreakPosition extends BreakPosition.EdgeBreakPosition {
+export class BetweenTableRowBreakPosition
+  extends BreakPosition.EdgeBreakPosition
+{
   private formattingContext: TableFormattingContext;
 
   acceptableCellBreakPositions: Layout.BreakPositionAndNodeContext[] = null;
@@ -165,10 +170,46 @@ export class BetweenTableRowBreakPosition extends BreakPosition.EdgeBreakPositio
       (bp) => !!bp.nodeContext,
     );
     if (allCellsBreakable) {
+      // Also verify that all non-spanning cells in the row have fully rendered.
+      // If any cell has remaining content, this between-row break would lose it
+      // because finishBreak for between-row breaks only saves break positions
+      // for row-spanning cells. An InsideTableRowBreakPosition should be used
+      // instead. (Issue #1663)
+      if (this.hasUnfinishedCells()) {
+        return null;
+      }
       return breakNodeContext;
     } else {
       return null;
     }
+  }
+
+  /**
+   * Check if any non-spanning cell in the row has content that wasn't fully
+   * rendered. This happens when page floats (footnotes) reduce available space
+   * during a retry, causing cell content to overflow within the row even though
+   * the row boundary appears acceptable. (Issue #1663)
+   */
+  private hasUnfinishedCells(): boolean {
+    const rowIndex = this.getRowIndex();
+    const allCells = this.formattingContext.getCellsFallingOnRow(rowIndex);
+    for (const cell of allCells) {
+      // Skip row-spanning cells (handled by getAcceptableCellBreakPositions)
+      if (cell.rowIndex + cell.rowSpan - 1 > rowIndex) {
+        continue;
+      }
+      const cellFragment = this.formattingContext.getCellFragmentOfCell(cell);
+      if (cellFragment) {
+        const bp = cellFragment.findAcceptableBreakPosition();
+        if (
+          bp.nodeContext &&
+          !cellFragment.pseudoColumn.isLastAfterNodeContext(bp.nodeContext)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   override getMinBreakPenalty(): number {
@@ -214,7 +255,9 @@ export class BetweenTableRowBreakPosition extends BreakPosition.EdgeBreakPositio
   }
 }
 
-export class InsideTableRowBreakPosition extends BreakPosition.AbstractBreakPosition {
+export class InsideTableRowBreakPosition
+  extends BreakPosition.AbstractBreakPosition
+{
   acceptableCellBreakPositions: Layout.BreakPositionAndNodeContext[] = null;
 
   constructor(
@@ -372,12 +415,38 @@ export class TableFormattingContext
       return firstTime;
     }
     switch (nodeContext.display) {
-      case "table-row":
-        return this.cellBreakPositions.length === 0;
-      case "table-cell":
+      case "table-row": {
+        // Check both cellBreakPositions and fragmentIndex to determine if this
+        // is the first time laying out this row (issue #1663).
+        // Previous-fragment row-spanning cells are laid out separately before
+        // the current row; they should not make the row itself a continuation.
+        const rowIndex = this.findRowIndexBySourceNode(nodeContext.sourceNode);
+        return (
+          this.cellBreakPositions.every((p) =>
+            this.isPreviousFragmentRowSpanningCellBreakPosition(p, rowIndex),
+          ) && nodeContext.fragmentIndex <= 1
+        );
+      }
+      case "table-cell": {
+        // For cells, check if this cell's source node is in cellBreakPositions
+        // or if fragmentIndex indicates this is a continuation (issue #1663).
+        // A table-cell directly under the table participates in an anonymous
+        // row, so a continued table fragment must not make a fresh cell look
+        // like a continuation fragment.
+        if (nodeContext.fragmentIndex > 1) {
+          return false;
+        }
+        if (
+          nodeContext.parent?.display === "table-row" &&
+          nodeContext.parent.fragmentIndex > 1
+        ) {
+          return false;
+        }
+        // Check if this cell's sourceNode is in cellBreakPositions
         return !this.cellBreakPositions.some(
           (p) => p.cellNodePosition.steps[0].node === nodeContext.sourceNode,
         );
+      }
       default:
         return firstTime;
     }
@@ -436,6 +505,18 @@ export class TableFormattingContext
 
   findRowIndexBySourceNode(sourceNode: Node): number {
     return this.rows.findIndex((row) => sourceNode === row.sourceNode);
+  }
+
+  private isPreviousFragmentRowSpanningCellBreakPosition(
+    cellBreakPosition: BrokenTableCellPosition,
+    rowIndex: number,
+  ): boolean {
+    const cell = cellBreakPosition.cell;
+    return (
+      rowIndex >= 0 &&
+      cell.rowIndex < rowIndex &&
+      cell.rowIndex + cell.rowSpan > rowIndex
+    );
   }
 
   addCellFragment(
@@ -617,7 +698,9 @@ export class TableFormattingContext
   }
 
   override restoreState(state: any) {
-    this.cellBreakPositions = state as BrokenTableCellPosition[];
+    // Create a fresh copy to prevent the saved state from being mutated
+    // during subsequent layout attempts (issue #1667).
+    this.cellBreakPositions = [].concat(state as BrokenTableCellPosition[]);
   }
 }
 
@@ -810,6 +893,11 @@ export class EntireTableLayoutStrategy extends LayoutUtil.EdgeSkipper {
             this.rowIndex,
             new TableRow(this.rowIndex, nodeContext.sourceNode),
           );
+          // Capture row's own breakBefore for forced break detection
+          if (nodeContext.breakBefore) {
+            formattingContext.rows[this.rowIndex].breakBefore =
+              nodeContext.breakBefore;
+          }
           if (!repetitiveElements.firstContentSourceNode) {
             repetitiveElements.firstContentSourceNode =
               nodeContext.sourceNode as Element;
@@ -852,6 +940,14 @@ export class EntireTableLayoutStrategy extends LayoutUtil.EdgeSkipper {
           if (!this.inHeaderOrFooter) {
             formattingContext.lastRowViewNode = nodeContext.viewNode as Element;
             this.inRow = false;
+            // Capture row's own breakAfter for forced break detection
+            const row = formattingContext.rows[this.rowIndex];
+            if (row && nodeContext.breakAfter) {
+              row.breakAfter = Break.resolveEffectiveBreakValue(
+                row.breakAfter,
+                nodeContext.breakAfter,
+              );
+            }
           }
           break;
         case "table-cell":
@@ -867,6 +963,23 @@ export class EntireTableLayoutStrategy extends LayoutUtil.EdgeSkipper {
               new TableCell(this.rowIndex, this.columnIndex, elem),
             );
             this.columnIndex++;
+            fixTableCellWrapperForBaseline(elem);
+            // Propagate cell break values to the row for forced break detection
+            const cellRow = formattingContext.rows[this.rowIndex];
+            if (cellRow) {
+              if (nodeContext.breakBefore) {
+                cellRow.breakBefore = Break.resolveEffectiveBreakValue(
+                  cellRow.breakBefore,
+                  nodeContext.breakBefore,
+                );
+              }
+              if (nodeContext.breakAfter) {
+                cellRow.breakAfter = Break.resolveEffectiveBreakValue(
+                  cellRow.breakAfter,
+                  nodeContext.breakAfter,
+                );
+              }
+            }
           }
           break;
       }
@@ -929,6 +1042,7 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
   originalStopAtOverflow: boolean;
   inHeader: boolean;
   inFooter: boolean;
+  private didExtractRowSpanningCellBreakPositions: boolean = false;
 
   constructor(
     public readonly formattingContext: TableFormattingContext,
@@ -973,7 +1087,6 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
     const columnIndex = cell.columnIndex;
     const colSpan = cell.colSpan;
     const cellViewNode = cellNodeContext.viewNode as Element;
-    const verticalAlign = cellNodeContext.verticalAlign;
     if (colSpan > 1) {
       Base.setCSSProperty(cellViewNode, "box-sizing", "border-box");
       Base.setCSSProperty(
@@ -1000,38 +1113,62 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
     }
     return cellFragment.pseudoColumn
       .layout(startChunkPosition, true)
-      .thenReturn(true);
+      .thenAsync(() => {
+        fixTableCellWrapperForBaseline(cellViewNode);
+        return Task.newResult(true);
+      });
   }
 
-  hasBrokenCellAtSlot(slotIndex): boolean {
-    const cellBreakPosition = this.formattingContext.cellBreakPositions[0];
-    if (cellBreakPosition) {
-      return cellBreakPosition.cell.anchorSlot.columnIndex === slotIndex;
+  /**
+   * Find the break position for the cell at the given slot index.
+   * Returns the break position and its index in cellBreakPositions, or null if not found.
+   * Uses sourceNode matching instead of sequential index to support layout retry (issue #1663).
+   */
+  findBrokenCellAtSlot(
+    slotIndex: number,
+    sourceNode: Node,
+  ): { position: BrokenTableCellPosition; index: number } | null {
+    const cellBreakPositions = this.formattingContext.cellBreakPositions;
+    for (let i = 0; i < cellBreakPositions.length; i++) {
+      const p = cellBreakPositions[i];
+      if (
+        p.cell.anchorSlot.columnIndex === slotIndex &&
+        p.cellNodePosition.steps[0].node === sourceNode
+      ) {
+        return { position: p, index: i };
+      }
     }
-    return false;
+    return null;
   }
 
   private extractRowSpanningCellBreakPositions(): BrokenTableCellPosition[][] {
+    if (this.didExtractRowSpanningCellBreakPositions) {
+      return [];
+    }
     const cellBreakPositions = this.formattingContext.cellBreakPositions;
     if (cellBreakPositions.length === 0) {
       return [];
     }
     const rowSpanningCellBreakPositions = [];
-    let i = 0;
-    do {
-      const p = cellBreakPositions[i];
-      const rowIndex = p.cell.rowIndex;
-      if (rowIndex < this.currentRowIndex) {
+    cellBreakPositions.forEach((p) => {
+      const cell = p.cell;
+      const rowIndex = cell.rowIndex;
+      // Only extract cells that actually span into the current row
+      // (i.e., rowIndex < currentRowIndex AND rowIndex + rowSpan > currentRowIndex)
+      // Fix for issue #1663: Don't extract cells that are entirely in previous rows
+      if (
+        rowIndex < this.currentRowIndex &&
+        rowIndex + cell.rowSpan > this.currentRowIndex
+      ) {
         let arr = rowSpanningCellBreakPositions[rowIndex];
         if (!arr) {
           arr = rowSpanningCellBreakPositions[rowIndex] = [];
         }
         arr.push(p);
-        cellBreakPositions.splice(i, 1);
-      } else {
-        i++;
       }
-    } while (i < cellBreakPositions.length);
+    });
+    this.didExtractRowSpanningCellBreakPositions =
+      rowSpanningCellBreakPositions.length > 0;
     return rowSpanningCellBreakPositions;
   }
 
@@ -1053,7 +1190,7 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
     );
     let cont = Task.newResult(true);
     let spanningCellRowIndex = 0;
-    const occupiedSlotIndices = [];
+    const occupiedSlotIndices: number[] = [];
     rowSpanningCellBreakPositions.forEach((rowCellBreakPositions) => {
       cont = cont.thenAsync(() => {
         // Is it always correct to assume steps[1] to be the row?
@@ -1152,11 +1289,55 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
     return this.layoutRowSpanningCellsFromPreviousFragment(state).thenAsync(
       () => {
         this.registerCellFragmentIndex();
+
+        // Merge pre-collected cell/row break values with state.breakAtTheEdge
+        let breakAtEdge = state.breakAtTheEdge;
+        if (this.currentRowIndex > 0) {
+          const prevRow = formattingContext.rows[this.currentRowIndex - 1];
+          if (prevRow?.breakAfter) {
+            breakAtEdge = Break.resolveEffectiveBreakValue(
+              breakAtEdge,
+              prevRow.breakAfter,
+            );
+          }
+        }
+        const currentRow = formattingContext.rows[this.currentRowIndex];
+        if (currentRow?.breakBefore) {
+          breakAtEdge = Break.resolveEffectiveBreakValue(
+            breakAtEdge,
+            currentRow.breakBefore,
+          );
+        }
+
+        // Check for forced break before this row
+        if (!state.leadingEdge && Break.isForcedBreakValue(breakAtEdge)) {
+          this.column.checkOverflowAndSaveEdgeAndBreakPosition(
+            state.lastAfterNodeContext,
+            null,
+            true,
+            breakAtEdge,
+          );
+          if (nodeContext.viewNode?.parentNode) {
+            nodeContext.viewNode.parentNode.removeChild(nodeContext.viewNode);
+          }
+          // Set block-end box-break flags on the table and its ancestors
+          // since doFinishBreak skips finishBreak when pageBreakType is set
+          if (state.lastAfterNodeContext) {
+            this.column.layoutContext.processFragmentedBlockEdge(
+              state.lastAfterNodeContext,
+            );
+          }
+          this.column.pageBreakType = breakAtEdge;
+          this.resetColumn();
+          state.break = true;
+          return Task.newResult(true);
+        }
+
         const overflown = this.column.checkOverflowAndSaveEdgeAndBreakPosition(
           state.lastAfterNodeContext,
           null,
           true,
-          state.breakAtTheEdge,
+          breakAtEdge,
         );
         if (
           overflown &&
@@ -1178,13 +1359,13 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
       this.currentRowIndex,
     ).cells;
     cells.forEach((cell) => {
-      const cellBreakPosition =
-        this.formattingContext.cellBreakPositions[cell.columnIndex];
-      if (
-        cellBreakPosition &&
-        cellBreakPosition.cell.anchorSlot.columnIndex ==
-          cell.anchorSlot.columnIndex
-      ) {
+      // Use proper lookup by cell reference instead of array index,
+      // since cellBreakPositions may contain entries from multiple rows
+      // after the fix for issue #1663.
+      const cellBreakPosition = this.formattingContext.cellBreakPositions.find(
+        (p) => p.cell === cell,
+      );
+      if (cellBreakPosition) {
         const tdNodeStep = cellBreakPosition.cellNodePosition.steps[0];
         const offset = (
           this.column.layoutContext as Vgen.ViewFactory
@@ -1220,9 +1401,17 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
     state.nodeContext = afterNodeContext;
     const frame = Task.newFrame<boolean>("startTableCell");
     let cont: Task.Result<Vtree.ChunkPosition>;
-    if (this.hasBrokenCellAtSlot(cell.anchorSlot.columnIndex)) {
-      const cellBreakPosition =
-        this.formattingContext.cellBreakPositions.shift();
+    // Use sourceNode matching instead of sequential index to support layout retry (issue #1663)
+    const brokenCell = this.findBrokenCellAtSlot(
+      cell.anchorSlot.columnIndex,
+      nodeContext.sourceNode,
+    );
+    if (brokenCell) {
+      const cellBreakPosition = brokenCell.position;
+      // Remove the consumed entry from cellBreakPositions so that
+      // subsequent rows are not affected by stale entries.
+      // (Old code used cellBreakPositions.shift() which consumed entries.)
+      this.formattingContext.cellBreakPositions.splice(brokenCell.index, 1);
       nodeContext.fragmentIndex =
         cellBreakPosition.cellNodePosition.steps[0].fragmentIndex + 1;
       cont = Task.newResult(cellBreakPosition.breakChunkPosition);
@@ -1355,6 +1544,46 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
       );
       this.resetColumn();
       state.break = true;
+    } else if (display === "table-row" && !this.inHeader && !this.inFooter) {
+      const cont = super.afterNonInlineElementNode(state);
+      const pending = cont && cont.isPending() ? cont : Task.newResult(true);
+      return pending.thenAsync(() => {
+        if (!state.break) {
+          const overflown = this.column.checkOverflowAndSaveEdge(
+            nodeContext,
+            null,
+          );
+          const repetitiveElements =
+            this.formattingContext.getRepetitiveElements();
+          const overflownDueToRepetitiveElements =
+            this.column.nodeContextOverflowingDueToRepetitiveElements ===
+            nodeContext;
+          // Keep this guard broad. During repetitive-element retry passes the
+          // footer may already be marked skipped in the current state even
+          // though footer dropping is still the mechanism that resolves the
+          // overflow for this table fragment.
+          const canResolveByDroppingFooter =
+            !overflown &&
+            overflownDueToRepetitiveElements &&
+            !!repetitiveElements?.isFooterRegistered();
+          if (overflown || overflownDueToRepetitiveElements) {
+            // Catch row overflow as soon as the row finishes; otherwise the
+            // next row start detects it one row too late and content can drift
+            // into the page margin before the break is taken. (Issue #1902)
+            if (
+              !canResolveByDroppingFooter &&
+              this.formattingContext.getRowSpanningCellsOverflowingTheRow(
+                this.currentRowIndex,
+              ).length === 0
+            ) {
+              this.resetColumn();
+              nodeContext.overflow = true;
+              state.break = true;
+            }
+          }
+        }
+        return Task.newResult(true);
+      });
     } else {
       return super.afterNonInlineElementNode(state);
     }
@@ -1568,6 +1797,23 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
     const initialNodeContext = nodeContext.copy();
     this.layoutEntireTable(nodeContext, column).then((nodeContextAfter) => {
       const tableElement = nodeContextAfter.viewNode as Element;
+
+      // CSS 2.1 §13.3.3: The first row's break-before propagates to the
+      // table.  If the first row has a forced break-before and the table is
+      // not at the leading edge of the page/column, trigger a page break
+      // before the table so it moves to the next page.
+      const firstRow = formattingContext.rows[0];
+      if (
+        firstRow &&
+        Break.isForcedBreakValue(firstRow.breakBefore) &&
+        this.hasInFlowContentBefore(tableElement, column)
+      ) {
+        tableElement.parentNode?.removeChild(tableElement);
+        column.pageBreakType = firstRow.breakBefore;
+        frame.finish(initialNodeContext);
+        return;
+      }
+
       const tableBBox = LayoutHelper.getElementClientRectAdjusted(
         column.clientLayout,
         tableElement,
@@ -1582,7 +1828,9 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
         ).current;
       if (
         !column.isOverflown(edge) &&
-        (!tableLayoutOption || !tableLayoutOption.calculateBreakPositionsInside)
+        (!tableLayoutOption ||
+          !tableLayoutOption.calculateBreakPositionsInside) &&
+        !this.hasForcedBreakInRows(formattingContext)
       ) {
         column.breakPositions.push(
           new EntireTableBreakPosition(initialNodeContext),
@@ -1595,6 +1843,58 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
       frame.finish(null);
     });
     return frame.result();
+  }
+
+  /**
+   * Check if any row inside the table has a forced break value
+   * (propagated from cells or set on the row itself).
+   */
+  private hasForcedBreakInRows(
+    formattingContext: TableFormattingContext,
+  ): boolean {
+    for (let i = 0; i < formattingContext.rows.length; i++) {
+      const row = formattingContext.rows[i];
+      if (!row) continue;
+      // Skip the first row's breakBefore (break before the table, not inside)
+      if (i > 0 && Break.isForcedBreakValue(row.breakBefore)) {
+        return true;
+      }
+      // Skip the last row's breakAfter (break after the table, not inside)
+      if (
+        i < formattingContext.rows.length - 1 &&
+        Break.isForcedBreakValue(row.breakAfter)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Check if there is any in-flow content before the given view node.
+   * Walks previous siblings at each ancestor level (up to the column root)
+   * to determine whether the table is at the leading edge of the
+   * page/column.
+   */
+  private hasInFlowContentBefore(
+    viewNode: Node,
+    column: Layout.Column,
+  ): boolean {
+    let node: Node | null = viewNode;
+    while (node && node !== column.element) {
+      let sibling = node.previousSibling;
+      while (sibling) {
+        if (sibling.nodeType === 1 && !LayoutHelper.isOutOfFlow(sibling)) {
+          return true;
+        }
+        if (sibling.nodeType === 3 && !VtreeImpl.canIgnore(sibling)) {
+          return true;
+        }
+        sibling = sibling.previousSibling;
+      }
+      node = node.parentNode;
+    }
+    return false;
   }
 
   addCaptions(
@@ -1686,39 +1986,35 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
       nodeContext.formattingContext,
     );
     const rootViewNode = formattingContext.getRootViewNode(nodeContext);
-    const frame = Task.newFrame<Vtree.NodeContext>(
-      "TableFormattingContext.layout",
-    );
-    let cont: Task.Result<Vtree.NodeContext>;
     if (!rootViewNode) {
-      cont = column.buildDeepElementView(nodeContext);
+      return column.buildDeepElementView(nodeContext);
     } else {
       if (leadingEdge) {
+        const repetitiveElements = formattingContext.getRepetitiveElements();
+        // Issue #1980: a table can resume at a new page/column from the middle
+        // of its body, so it never passes through the table-root retry path
+        // below. Header-only tables would then drop their repeated thead on the
+        // first continuation page unless we preserve the header here. Keep
+        // footer-bearing tables on the normal skip logic, because existing
+        // fixtures intentionally drop header/footer when space is too tight.
+        if (
+          repetitiveElements &&
+          nodeContext.sourceNode !== formattingContext.tableSourceNode &&
+          !nodeContext.after &&
+          !repetitiveElements.isFooterRegistered()
+        ) {
+          repetitiveElements.preventSkippingHeader();
+        }
         RepetitiveElementImpl.appendHeaderToAncestors(
           nodeContext.parent,
           column,
         );
       }
-      cont = new LayoutRetryer(formattingContext, this).layout(
+      return new LayoutRetryer(formattingContext, this).layout(
         nodeContext,
         column,
       );
     }
-    cont.then((result) => {
-      frame.finish(result);
-
-      // Restore column box size if it was modified in `LayoutHelper.getElementClientRectAdjusted()`.
-      if (
-        column.element.hasAttribute("data-vivliostyle-column-height-adjusted")
-      ) {
-        Base.setCSSProperty(column.element, "width", `${column.width}px`);
-        Base.setCSSProperty(column.element, "height", `${column.height}px`);
-        column.element.removeAttribute(
-          "data-vivliostyle-column-height-adjusted",
-        );
-      }
-    });
-    return frame.result();
   }
 
   /** @override */
@@ -1765,7 +2061,6 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
       const rowIndex = formattingContext.findRowIndexBySourceNode(
         nodeContext.sourceNode,
       );
-      formattingContext.cellBreakPositions = [];
       let cells: TableCell[];
       if (!nodeContext.after) {
         cells = formattingContext.getCellsFallingOnRow(rowIndex);
@@ -1773,6 +2068,14 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
         cells =
           formattingContext.getRowSpanningCellsOverflowingTheRow(rowIndex);
       }
+      // Only remove entries for cells that are about to be re-broken,
+      // preserving break positions from other rows (e.g., from previous pages).
+      // Fix for issue #1663: unconditional reset lost previous-page break info
+      // during layout retry.
+      formattingContext.cellBreakPositions =
+        formattingContext.cellBreakPositions.filter(
+          (p) => !cells.includes(p.cell),
+        );
       if (cells.length) {
         const frame = Task.newFrame<boolean>(
           "TableLayoutProcessor.finishBreak",
@@ -1902,6 +2205,47 @@ function adjustCellHeight(
 }
 
 /**
+ * When a table cell has vertical-align: baseline and its content wrapper
+ * contains only out-of-flow children (position: absolute/fixed), the wrapper
+ * generates a spurious baseline from whitespace text nodes. This causes the
+ * browser's baseline alignment to incorrectly shift the absolutely positioned
+ * elements' static positions. Fix by setting the wrapper to display: contents
+ * so it becomes transparent to the box model and the browser can apply its
+ * table-cell baseline static-position fix correctly.
+ */
+function fixTableCellWrapperForBaseline(cellViewNode: Element): void {
+  // Find the table cell element (cellViewNode may be the wrapper div itself
+  // due to the shadow/template model, not the <td>)
+  const cellElement = cellViewNode.matches("td, th")
+    ? cellViewNode
+    : cellViewNode.closest("td, th");
+  if (!cellElement) {
+    return;
+  }
+  const cellStyle = (cellElement as HTMLElement).style;
+  if (cellStyle.verticalAlign !== "baseline") {
+    return;
+  }
+  const wrapper = cellElement.querySelector(
+    ".-vivliostyle-table-cell-container",
+  );
+  if (!wrapper) {
+    return;
+  }
+  const children = wrapper.children;
+  if (children.length === 0) {
+    return;
+  }
+  for (let i = 0; i < children.length; i++) {
+    const pos = (children[i] as HTMLElement).style.position;
+    if (pos !== "absolute" && pos !== "fixed") {
+      return;
+    }
+  }
+  Base.setCSSProperty(wrapper, "display", "contents");
+}
+
+/**
  * Adjusts the height of a table row to prevent another preceding row
  * containing fragmented rowspanning cells and dummy empty cells which
  * should have zero height from having non-zero height due to
@@ -1998,6 +2342,8 @@ export class LayoutRetryer extends LayoutRetryers.AbstractLayoutRetryer {
     if (!repetitiveElements || !repetitiveElements.doneInitialLayout) {
       return new LayoutEntireTable(this.tableFormattingContext, this.processor);
     } else {
+      // The unconditional preserve-header path stays limited to table-root
+      // retries; mid-table continuations are handled at the leading edge above.
       if (
         nodeContext.sourceNode ===
           this.tableFormattingContext.tableSourceNode &&
@@ -2129,7 +2475,9 @@ export class EntireTableLayoutConstraint
   }
 }
 
-export class LayoutFragmentedTable extends RepetitiveElementImpl.LayoutFragmentedBlock {
+export class LayoutFragmentedTable
+  extends RepetitiveElementImpl.LayoutFragmentedBlock
+{
   constructor(
     formattingContext: TableFormattingContext,
     public readonly processor: TableLayoutProcessor,
@@ -2193,7 +2541,11 @@ export class TableRowLayoutConstraint
       (overflownNodeContext && !nodeContext) ||
       (nodeContext && nodeContext.overflow)
     ) {
-      return false;
+      return !RepetitiveElementImpl.isOverflowInsideRepetitiveElementsOwner(
+        nodeContext,
+        overflownNodeContext,
+        repetitiveElements,
+      );
     } else {
       return true;
     }

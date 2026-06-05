@@ -3,8 +3,7 @@
 .vercel
 .now
 
-docs/anchors.json
-docs/supported-features.html
+artifacts
 
 # Created by https://www.gitignore.io/api/node
 # Edit at https://www.gitignore.io/?templates=node
@@ -97,3 +96,6 @@ jspm_packages/
 .dynamodb/
 
 # End of https://www.gitignore.io/api/node
+
+# Vivliostyle viewer archive generated during release/CI
+*.zip

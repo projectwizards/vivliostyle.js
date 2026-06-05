@@ -2959,14 +2959,15 @@ export class IsNthOfPageTypeAction extends CssCascade.IsNthAction {
   }
 
   override apply(cascadeInstance: CssCascade.CascadeInstance): void {
-    if (cascadeInstance.currentPageType !== this.pageType) {
+    const pageTypeIndices = cascadeInstance.pageTypePageIndices[this.pageType];
+    if (!pageTypeIndices) {
       return;
     }
-    // Get page count for this page type within the current page group
-    const pageTypeCount =
-      cascadeInstance.pageTypePageCounts[this.pageType] || 0;
-    if (this.matchANPlusB(pageTypeCount)) {
-      this.chained.apply(cascadeInstance);
+    for (const pageTypeIndex of pageTypeIndices) {
+      if (this.matchANPlusB(pageTypeIndex)) {
+        this.chained.apply(cascadeInstance);
+        return;
+      }
     }
   }
 
@@ -3112,7 +3113,6 @@ export class PageParserHandler
     parent: CssCascade.CascadeParserHandler,
     validatorSet: CssValidator.ValidatorSet,
     private readonly pageProps: { [key: string]: CssCascade.ElementStyle },
-    private readonly footnoteProps?: CssCascade.ElementStyle,
   ) {
     super(scope, owner, parent?.condition, parent, null, validatorSet, false);
   }
@@ -3150,7 +3150,8 @@ export class PageParserHandler
               this.chain.push(
                 new IsNthOfPageTypeAction(this.scope, a, b, pageType),
               );
-              this.specificity += 256;
+              // specificity of :nth(An+B) pseudo-class + page type selector
+              this.specificity += 65536 + 256;
             } else {
               // :nth(An+B) syntax - applies to document page number
               this.currentPseudoPageClassSelectors.push(
@@ -3306,27 +3307,14 @@ export class PageParserHandler
   }
 
   override startFootnoteRule(pseudoelem: string | null): void {
-    // Check if we're inside a page rule with selectors
-    const hasPageSelectors =
-      this.currentPageSelectors.length > 0 &&
-      this.currentPageSelectors[0].selectors !== null;
-
-    // Determine target style based on whether we have page selectors
-    let style: CssCascade.ElementStyle;
-    if (hasPageSelectors || !this.footnoteProps) {
-      // Store in page-specific elementStyle for page selector support
-      const footnoteAreaMap = CssCascade.getMutableStyleMap(
-        this.elementStyle,
-        footnoteAreaKey,
-      );
-      style = footnoteAreaMap["area"];
-      if (!style) {
-        style = {} as CssCascade.ElementStyle;
-        footnoteAreaMap["area"] = style;
-      }
-    } else {
-      // No page selectors - add directly to global footnoteProps for backward compatibility
-      style = this.footnoteProps;
+    const footnoteAreaMap = CssCascade.getMutableStyleMap(
+      this.elementStyle,
+      footnoteAreaKey,
+    );
+    let style = footnoteAreaMap["area"];
+    if (!style) {
+      style = {} as CssCascade.ElementStyle;
+      footnoteAreaMap["area"] = style;
     }
 
     // Handle pseudoelement if specified

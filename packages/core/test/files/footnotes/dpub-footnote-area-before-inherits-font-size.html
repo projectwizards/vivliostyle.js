@@ -1,0 +1,49 @@
+<!-- Test case for semantic footnote area pseudo inheriting @footnote font-size -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DPUB @footnote ::before inherits @footnote font-size</title>
+  <style>
+    @page {
+      size: 160mm 120mm;
+      margin: 12mm;
+    }
+
+    @footnote {
+      font-size: 100px;
+      margin-block-start: 0.5em;
+    }
+
+    :root {
+      counter-reset: footnote;
+      font-size: 16px;
+    }
+
+    body {
+      font-family: serif;
+      line-height: 1.45;
+    }
+
+    a[role="doc-noteref"]::footnote-call {
+      content: counter(footnote);
+    }
+
+    aside[role="doc-footnote"]::footnote-marker {
+      content: counter(footnote) ". ";
+    }
+  </style>
+</head>
+<body>
+  <h1>DPUB @footnote ::before inherits @footnote font-size</h1>
+  <p>
+    Expected: footnote area margin-block-start is 50px and the @footnote ::before
+    margin-block-end is 40px when @footnote sets font-size: 100px.
+  </p>
+  <p>
+    The quick brown fox<a href="#fn-fox" role="doc-noteref">*</a>
+    jumps over the lazy dog.
+  </p>
+  <aside id="fn-fox" role="doc-footnote">The fox is an animal.</aside>
+</body>
+</html>

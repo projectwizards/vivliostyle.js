@@ -18,6 +18,7 @@
  * @fileoverview Columns - Control column layout.
  */
 import * as Asserts from "./asserts";
+import * as Base from "./base";
 import * as Css from "./css";
 import * as MathUtil from "./math-util";
 import * as PageFloats from "./page-floats";
@@ -73,6 +74,13 @@ export abstract class ColumnBalancer {
     const frame: Task.Frame<ColumnLayoutResult> = Task.newFrame(
       "ColumnBalancer#balanceColumns",
     );
+    // Suppress block-size adjustment during column balancing trials so trial
+    // break positions are not affected by block-end floats. (Issue #1787,
+    // #1826)
+    this.layoutContainer.element.setAttribute(
+      "data-vivliostyle-in-column-balancing",
+      "true",
+    );
     this.preBalance(layoutResult);
     this.savePageFloatLayoutContexts(layoutResult);
     this.layoutContainer.clear();
@@ -100,7 +108,11 @@ export abstract class ColumnBalancer {
           (prev, curr) => (curr.penalty < prev.penalty ? curr : prev),
           candidates[0],
         );
+        this.layoutContainer.element.removeAttribute(
+          "data-vivliostyle-in-column-balancing",
+        );
         this.restoreContents(result.layoutResult);
+        this.tightenColumnBlockSizes(result.layoutResult.columns);
         this.postBalance();
         frame.finish(result.layoutResult);
       });
@@ -128,6 +140,63 @@ export abstract class ColumnBalancer {
 
   protected postBalance() {
     setBlockSize(this.layoutContainer, this.originalContainerBlockSize);
+  }
+
+  /**
+   * After column balancing, the column elements' CSS block-size may be larger
+   * than the actual content (computedBlockSize) due to browser multi-column
+   * layout constraints. Tighten them to match the content so that column rules
+   * rendered in finishContainer use the correct, content-matching height.
+   */
+  private tightenColumnBlockSizes(columns: Layout.Column[]): void {
+    if (columns.length <= 1) {
+      return;
+    }
+    const maxComputedBlockSize = Math.max.apply(
+      null,
+      columns.map((c) => c.computedBlockSize),
+    );
+    if (maxComputedBlockSize <= 0) {
+      return;
+    }
+    for (const column of columns) {
+      if (column.vertical) {
+        // In vertical-rl, block-size = width, block-start = right edge.
+        // adjustColumnBlockSizeForBlockEndFloats may have already reduced
+        // CSS width without updating JS properties, so read CSS values.
+        const cssWidth = parseFloat(column.element.style.width);
+        const cssLeft = parseFloat(column.element.style.left);
+        if (
+          isFinite(cssWidth) &&
+          isFinite(cssLeft) &&
+          cssWidth > maxComputedBlockSize
+        ) {
+          // Preserve the right edge (block-start) while reducing width
+          const rightEdge = cssLeft + cssWidth;
+          const newLeft = rightEdge - maxComputedBlockSize;
+          Base.setCSSProperty(
+            column.element,
+            "width",
+            `${maxComputedBlockSize}px`,
+          );
+          Base.setCSSProperty(column.element, "left", `${newLeft}px`);
+          column.width = maxComputedBlockSize;
+          column.left = newLeft;
+        }
+      } else {
+        // In horizontal, block-size = height. Read CSS value because
+        // adjustColumnBlockSizeForBlockEndFloats may have reduced it.
+        const cssHeight = parseFloat(column.element.style.height);
+        if (isFinite(cssHeight) && cssHeight > maxComputedBlockSize) {
+          Base.setCSSProperty(
+            column.element,
+            "height",
+            `${maxComputedBlockSize}px`,
+          );
+          column.height = maxComputedBlockSize;
+        }
+      }
+    }
   }
 
   savePageFloatLayoutContexts(layoutResult: ColumnLayoutResult | null) {
@@ -200,10 +269,6 @@ export function reduceContainerSize(
     setBlockSize(container, newEdge);
   } else {
     setBlockSize(container, getBlockSize(container) - 1);
-  }
-  if (container.vertical) {
-    const outerWidth = parseFloat(container.element.style?.width);
-    container.originX = outerWidth - container.width;
   }
 }
 
@@ -298,12 +363,15 @@ function isLastColumnLongerThanAnyOtherColumn(
   const lastColumnBlockSize = columns[columns.length - 1].computedBlockSize;
   const otherColumns = columns.slice(0, columns.length - 1);
 
-  // The computedBlockSize of the last column may be a little larger than
-  // the others even though columns are balanced, because of the issue
-  // that only the last column's computedBlockSize includes the last
-  // half-leading space.
-  // To work around this, we add an error margin to the other columns.
-  const errorMargin = 6;
+  // When a column is broken mid-paragraph, its computedBlockSize is measured
+  // from line content-area edges (excluding trailing half-leading). But the
+  // last column, where a paragraph ends naturally, includes the trailing
+  // half-leading. This causes a discrepancy of up to half the line-height
+  // between columns with the same number of lines.
+  // Use the line stride (≈ line-height) from broken columns to compute a
+  // proper error margin. (Issue #1828)
+  const maxLineStride = Math.max(...columns.map((c) => c.lastLineStride || 0));
+  const errorMargin = maxLineStride > 0 ? maxLineStride / 2 : 6;
   return otherColumns.every(
     (c) => lastColumnBlockSize > c.computedBlockSize + errorMargin,
   );

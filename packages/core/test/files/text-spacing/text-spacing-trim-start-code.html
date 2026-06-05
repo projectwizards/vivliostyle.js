@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8">
+    <title>text-spacing-trim after code element</title>
+    <style>
+      p {
+        text-spacing-trim: trim-start;
+      }
+
+      code {
+        text-spacing: none;
+        hanging-punctuation: none;
+        background: #eee;
+      }
+
+      .frame {
+        border: 1px solid #999;
+        padding: 0.4em 0.6em;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>text-spacing-trim with inline code</h1>
+    <p>In the framed box below, the first line should keep spacing after <code>CODE</code>, while the second line should trim the opening quote at the true line start.</p>
+
+    <div class="frame">
+      <p id="after-code"><code>CODE</code>「コード」</p>
+      <p id="plain-start">「コード」</p>
+    </div>
+  </body>
+</html>

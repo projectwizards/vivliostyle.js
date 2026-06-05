@@ -1,5 +1,6 @@
 /**
  * Copyright 2017 Daishinsha Inc.
+ * Copyright 2026 Vivliostyle Foundation
  *
  * Vivliostyle.js is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
@@ -183,6 +184,62 @@ describe("page-floats", function () {
 
         expect(context.writingMode).toBe(adapt_css.ident.vertical_rl);
         expect(context.direction).toBe(adapt_css.ident.rtl);
+      });
+
+      it("falls back to parent values when CSS defaulting values (inherit, initial, revert, unset) are passed", function () {
+        var parentContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.PAGE,
+          null,
+          null,
+          null,
+          adapt_css.ident.vertical_rl,
+          adapt_css.ident.rtl,
+        );
+
+        var defaultingValues = [
+          adapt_css.ident.inherit,
+          adapt_css.ident.initial,
+          adapt_css.ident.revert,
+          adapt_css.ident.unset,
+        ];
+
+        defaultingValues.forEach(function (defaultingValue) {
+          var context = new PageFloatLayoutContext(
+            parentContext,
+            FloatReference.REGION,
+            null,
+            null,
+            null,
+            defaultingValue,
+            defaultingValue,
+          );
+          expect(context.writingMode).toBe(adapt_css.ident.vertical_rl);
+          expect(context.direction).toBe(adapt_css.ident.rtl);
+        });
+      });
+
+      it("uses default values when CSS defaulting values are passed and there is no parent", function () {
+        var defaultingValues = [
+          adapt_css.ident.inherit,
+          adapt_css.ident.initial,
+          adapt_css.ident.revert,
+          adapt_css.ident.unset,
+        ];
+
+        defaultingValues.forEach(function (defaultingValue) {
+          var context = new PageFloatLayoutContext(
+            null,
+            null,
+            null,
+            null,
+            null,
+            defaultingValue,
+            defaultingValue,
+          );
+          expect(context.writingMode).toBe(adapt_css.ident.horizontal_tb);
+          expect(context.direction).toBe(adapt_css.ident.ltr);
+        });
       });
 
       it("registers itself to the parent as a child", function () {
@@ -1440,6 +1497,67 @@ describe("page-floats", function () {
         expect(context.removePageFloatFragment).not.toHaveBeenCalled();
         expect(context.floatsDeferredToNext).toEqual([cont3, cont4]);
       });
+
+      it("forbids deferred line-policy footnotes on page contexts after the anchor appeared", function () {
+        var pageContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.PAGE,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        spyOn(pageContext, "invalidate").and.callThrough();
+        var float = new PageFloat(
+          dummyNodePosition(),
+          FloatReference.PAGE,
+          "block-end",
+          null,
+          "body",
+        );
+        float.footnotePolicy = adapt_css.ident.line;
+        pageContext.addPageFloat(float);
+        var continuation = new PageFloatContinuation(float, {});
+        pageContext.floatsDeferredToNext = [continuation];
+        pageContext.footnoteAnchorsSeen.add(float.getId());
+
+        pageContext.finish();
+
+        expect(pageContext.isForbidden(float)).toBe(true);
+        expect(pageContext.floatsDeferredToNext).toEqual([]);
+        expect(pageContext.invalidate).toHaveBeenCalled();
+      });
+
+      it("does not forbid deferred line-policy footnotes on region contexts", function () {
+        var regionContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.REGION,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        spyOn(regionContext, "invalidate").and.callThrough();
+        var float = new PageFloat(
+          dummyNodePosition(),
+          FloatReference.REGION,
+          "block-end",
+          null,
+          "body",
+        );
+        float.footnotePolicy = adapt_css.ident.line;
+        regionContext.addPageFloat(float);
+        var continuation = new PageFloatContinuation(float, {});
+        regionContext.floatsDeferredToNext = [continuation];
+        regionContext.footnoteAnchorsSeen.add(float.getId());
+
+        regionContext.finish();
+
+        expect(regionContext.isForbidden(float)).toBe(false);
+        expect(regionContext.invalidate).not.toHaveBeenCalled();
+      });
     });
 
     describe("#invalidate", function () {
@@ -1723,6 +1841,327 @@ describe("page-floats", function () {
           shape1,
           shape2,
         ]);
+      });
+    });
+
+    describe("float edge helpers", function () {
+      function container(vertical) {
+        return {
+          vertical: vertical,
+          clear: jasmine.createSpy("clear"),
+        };
+      }
+
+      function addFragment(context, floatReference, floatSide, rect) {
+        var float = new PageFloat(
+          dummyNodePosition(),
+          floatReference,
+          floatSide,
+          null,
+          "body",
+        );
+        context.addPageFloat(float);
+        var fragment = new PageFloatFragment(
+          float.floatReference,
+          float.floatSide,
+          null,
+          [new PageFloatContinuation(float, {})],
+          {
+            getOuterRect: jasmine
+              .createSpy("getOuterRect")
+              .and.returnValue(rect),
+          },
+          false,
+        );
+        context.addPageFloatFragment(fragment);
+      }
+
+      it("includes ancestor block-end floats when getting block-start edge of block-end floats", function () {
+        var pageContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.PAGE,
+          container(false),
+          null,
+          null,
+          null,
+          null,
+        );
+        var regionContext = new PageFloatLayoutContext(
+          pageContext,
+          FloatReference.REGION,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        var columnContext = new PageFloatLayoutContext(
+          regionContext,
+          FloatReference.COLUMN,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+
+        addFragment(pageContext, FloatReference.PAGE, "block-end", {
+          x1: 0,
+          x2: 0,
+          y1: 520,
+          y2: 600,
+        });
+        addFragment(regionContext, FloatReference.REGION, "block-end", {
+          x1: 0,
+          x2: 0,
+          y1: 480,
+          y2: 500,
+        });
+
+        expect(columnContext.getBlockStartEdgeOfBlockEndFloats()).toBe(480);
+      });
+
+      it("filters block-end floats by inlinePos when getting block-start edge", function () {
+        var pageContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.PAGE,
+          container(false),
+          null,
+          null,
+          null,
+          null,
+        );
+        var regionContext = new PageFloatLayoutContext(
+          pageContext,
+          FloatReference.REGION,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        var columnContext = new PageFloatLayoutContext(
+          regionContext,
+          FloatReference.COLUMN,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+
+        // Overlaps inlinePos=50 only
+        addFragment(pageContext, FloatReference.PAGE, "block-end", {
+          x1: 0,
+          x2: 100,
+          y1: 520,
+          y2: 600,
+        });
+        // Overlaps inlinePos=250 only
+        addFragment(regionContext, FloatReference.REGION, "block-end", {
+          x1: 200,
+          x2: 300,
+          y1: 480,
+          y2: 500,
+        });
+
+        expect(columnContext.getBlockStartEdgeOfBlockEndFloats()).toBe(480);
+        expect(columnContext.getBlockStartEdgeOfBlockEndFloats(50)).toBe(520);
+        expect(columnContext.getBlockStartEdgeOfBlockEndFloats(250)).toBe(480);
+      });
+
+      it("treats block-end inline-* floats as block-end floats", function () {
+        var pageContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.PAGE,
+          container(false),
+          null,
+          null,
+          null,
+          null,
+        );
+        var regionContext = new PageFloatLayoutContext(
+          pageContext,
+          FloatReference.REGION,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        var columnContext = new PageFloatLayoutContext(
+          regionContext,
+          FloatReference.COLUMN,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+
+        addFragment(pageContext, FloatReference.PAGE, "block-end inline-end", {
+          x1: 0,
+          x2: 150,
+          y1: 540,
+          y2: 600,
+        });
+        addFragment(
+          regionContext,
+          FloatReference.REGION,
+          "block-end inline-start",
+          {
+            x1: 200,
+            x2: 350,
+            y1: 500,
+            y2: 560,
+          },
+        );
+
+        expect(columnContext.getBlockStartEdgeOfBlockEndFloats()).toBe(500);
+        expect(columnContext.getBlockStartEdgeOfBlockEndFloats(50)).toBe(540);
+        expect(columnContext.getBlockStartEdgeOfBlockEndFloats(250)).toBe(500);
+      });
+
+      it("filters block-start floats by inlinePos when getting block-end edge", function () {
+        var pageContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.PAGE,
+          container(false),
+          null,
+          null,
+          null,
+          null,
+        );
+        var regionContext = new PageFloatLayoutContext(
+          pageContext,
+          FloatReference.REGION,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        var columnContext = new PageFloatLayoutContext(
+          regionContext,
+          FloatReference.COLUMN,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+
+        // Overlaps inlinePos=50 only
+        addFragment(pageContext, FloatReference.PAGE, "block-start", {
+          x1: 0,
+          x2: 100,
+          y1: 0,
+          y2: 80,
+        });
+        // Overlaps inlinePos=250 only
+        addFragment(regionContext, FloatReference.REGION, "block-start", {
+          x1: 200,
+          x2: 300,
+          y1: 0,
+          y2: 120,
+        });
+
+        expect(columnContext.getBlockEndEdgeOfBlockStartFloats()).toBe(120);
+        expect(columnContext.getBlockEndEdgeOfBlockStartFloats(50)).toBe(80);
+        expect(columnContext.getBlockEndEdgeOfBlockStartFloats(250)).toBe(120);
+      });
+
+      it("includes ancestor block-end floats in vertical contexts", function () {
+        var pageContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.PAGE,
+          container(true),
+          null,
+          null,
+          null,
+          null,
+        );
+        var regionContext = new PageFloatLayoutContext(
+          pageContext,
+          FloatReference.REGION,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        var columnContext = new PageFloatLayoutContext(
+          regionContext,
+          FloatReference.COLUMN,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+
+        addFragment(pageContext, FloatReference.PAGE, "block-end", {
+          x1: 100,
+          x2: 180,
+          y1: 0,
+          y2: 0,
+        });
+        addFragment(regionContext, FloatReference.REGION, "block-end", {
+          x1: 200,
+          x2: 260,
+          y1: 0,
+          y2: 0,
+        });
+
+        expect(columnContext.getBlockStartEdgeOfBlockEndFloats()).toBe(260);
+      });
+
+      it("filters block-start floats by inlinePos in vertical contexts", function () {
+        var pageContext = new PageFloatLayoutContext(
+          rootContext,
+          FloatReference.PAGE,
+          container(true),
+          null,
+          null,
+          null,
+          null,
+        );
+        var regionContext = new PageFloatLayoutContext(
+          pageContext,
+          FloatReference.REGION,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        var columnContext = new PageFloatLayoutContext(
+          regionContext,
+          FloatReference.COLUMN,
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+
+        // In vertical writing, inline axis is Y.
+        addFragment(pageContext, FloatReference.PAGE, "block-start", {
+          x1: 300,
+          x2: 360,
+          y1: 0,
+          y2: 120,
+        });
+        addFragment(regionContext, FloatReference.REGION, "block-start", {
+          x1: 260,
+          x2: 320,
+          y1: 200,
+          y2: 300,
+        });
+
+        expect(columnContext.getBlockEndEdgeOfBlockStartFloats()).toBe(260);
+        expect(columnContext.getBlockEndEdgeOfBlockStartFloats(50)).toBe(300);
+        expect(columnContext.getBlockEndEdgeOfBlockStartFloats(250)).toBe(260);
       });
     });
   });

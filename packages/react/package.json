@@ -1,11 +1,11 @@
 {
   "name": "@vivliostyle/react",
   "description": "React component for Vivliostyle",
-  "version": "2.40.0",
+  "version": "2.43.0",
   "author": "Yasuaki Uechi <y@uechi.io>",
   "scripts": {
-    "build": "microbundle --format modern,cjs && shx rm -rf dist/stories",
-    "build-dev": "microbundle --no-compress --format cjs",
+    "build": "yarn clean && node ../../node_modules/typescript/bin/tsc -p tsconfig.build.json && microbundle build -i .microbundle/index.js --tsconfig tsconfig.build.json --generateTypes false --format modern,cjs && shx rm -rf dist/stories .microbundle",
+    "build-dev": "yarn clean && node ../../node_modules/typescript/bin/tsc -p tsconfig.build.json && microbundle build -i .microbundle/index.js --tsconfig tsconfig.build.json --generateTypes false --no-compress --format cjs && shx rm -rf dist/stories .microbundle",
     "build-storybook": "storybook build",
     "clean": "shx rm -rf dist",
     "dev": "yarn storybook",
@@ -18,7 +18,7 @@
   "dependencies": {
     "@emotion/core": "^10.0.28",
     "@emotion/styled": "^10.0.27",
-    "@vivliostyle/core": "^2.40.0"
+    "@vivliostyle/core": "^2.43.0"
   },
   "peerDependencies": {
     "react": "^18.2.0 || ^19.0.0",
@@ -39,7 +39,8 @@
     "react-dom": "^19.1.1",
     "react-scripts": "^5.0.1",
     "shx": "^0.3.2",
-    "storybook": "^9.1.8"
+    "storybook": "^9.1.8",
+    "typescript": "^5.9.3"
   },
   "source": "src/index.tsx",
   "types": "dist/index.d.ts",

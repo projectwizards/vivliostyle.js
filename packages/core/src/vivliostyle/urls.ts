@@ -18,11 +18,24 @@
  * @fileoverview Urls - URL Utilities
  */
 
+import * as Base from "./base";
+import { escapeParse } from "./css-tokenizer";
+
 /**
  * transform all urls in attributeValue using documentURLTransformer.
  *
  * @returns transformed attributeValue
  */
+
+const escapeUrlForCssString = (url) =>
+  String(url).replace(/[\u0000-\u001F"\\\u2028\u2029]/g, Base.escapeChar);
+
+const serializeUrlForCssString = (url) => `"${escapeUrlForCssString(url)}"`;
+
+const transformUrlForCss = (url, baseUrl, documentURLTransformer) =>
+  serializeUrlForCssString(
+    documentURLTransformer.transformURL(escapeParse(String(url)), baseUrl),
+  );
 
 export const transformURIs = (
   attributeValue,
@@ -33,14 +46,15 @@ export const transformURIs = (
     .replace(
       /[uU][rR][lL]\(\s*"((\\([^0-9a-fA-F]+|[0-9a-fA-F]+\s*)|[^"\r\n])+)"/gm,
       (match, m1) =>
-        `url("${documentURLTransformer.transformURL(m1, baseUrl)}"`,
+        `url(${transformUrlForCss(m1, baseUrl, documentURLTransformer)}`,
     )
     .replace(
       /[uU][rR][lL]\(\s*'((\\([^0-9a-fA-F]+|[0-9a-fA-F]+\s*)|[^'\r\n])+)'/gm,
       (match, m1) =>
-        `url('${documentURLTransformer.transformURL(m1, baseUrl)}'`,
+        `url(${transformUrlForCss(m1, baseUrl, documentURLTransformer)}`,
     )
     .replace(
       /[uU][rR][lL]\(\s*((\\([^0-9a-fA-F]+|[0-9a-fA-F]+\s*)|[^"'\r\n\)\s])+)/gm,
-      (match, m1) => `url(${documentURLTransformer.transformURL(m1, baseUrl)}`,
+      (match, m1) =>
+        `url(${transformUrlForCss(m1, baseUrl, documentURLTransformer)}`,
     );

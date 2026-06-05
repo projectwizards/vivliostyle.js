@@ -89,6 +89,25 @@ export function setResourceBaseURL(value: string): void {
   resourceBaseURL = value;
 }
 
+function getWptRawRepoRootURL(url: string): string | null {
+  const matched = stripFragmentAndQuery(url).match(
+    /^(https?:\/\/raw\.githack\.com\/web-platform-tests\/wpt\/[^/]+)(?:\/|$)/,
+  );
+  return matched ? matched[1] : null;
+}
+
+/**
+ * Convert a WPT raw.githack.com URL to the equivalent wpt.live URL.
+ * Applied at DOM/CSS output points for resource URLs (images, fonts, etc.)
+ * so that dynamic WPT endpoints (e.g. `.py` scripts) work correctly.
+ */
+export function resolveWptResourceURL(url: string): string {
+  return url.replace(
+    /^(https?:)\/\/raw\.githack\.com\/web-platform-tests\/wpt\/[^/]+\//,
+    "$1//wpt.live/",
+  );
+}
+
 /**
  * @param relURL relative URL
  * @param baseURL base (absolute) URL
@@ -119,6 +138,10 @@ export function resolveURL(relURL: string, baseURL: string): string {
     return relURL;
   }
   if (relURL.match(/^\//)) {
+    const wptRawRepoRootURL = getWptRawRepoRootURL(baseURL);
+    if (wptRawRepoRootURL) {
+      return wptRawRepoRootURL + relURL;
+    }
     r = baseURL.match(/^(\w{2,}:\/\/[^\/]+)\//);
     if (r) {
       return r[1] + relURL;
@@ -159,6 +182,26 @@ export function resolveURL(relURL: string, baseURL: string): string {
 }
 
 /**
+ * Resolve a URL while preserving the document URL for fragment-only
+ * references. This is needed when the base URL is a data URL because
+ * resolveURL("#id", data:...) intentionally returns just "#id".
+ */
+export function resolveReferenceURL(relURL: string, baseURL: string): string {
+  if (relURL.match(/^#/) && baseURL) {
+    return stripFragment(baseURL) + relURL;
+  }
+  return resolveURL(relURL, baseURL);
+}
+
+/**
+ * Convert `about:blank` (with optional query/fragment, case-insensitive)
+ * to `data:text/html,` so the browser can load it natively.
+ */
+export function convertAboutBlankURL(url: string): string {
+  return /^about:blank($|[?#])/i.test(url) ? "data:text/html," : url;
+}
+
+/**
  * Convert special URLs (e.g. GitHub, Gist) to their raw equivalents.
  * This is useful for fetching content from these services in a format
  * that can be easily processed by Vivliostyle.js.
@@ -168,7 +211,18 @@ export function resolveURL(relURL: string, baseURL: string): string {
  */
 export function convertSpecialURL(url: string): string {
   let r: RegExpMatchArray;
-  if (
+
+  if ((url = convertAboutBlankURL(url)) !== url) {
+    // already converted
+  } else if (
+    (r =
+      /^(https?:)\/\/github\.com\/web-platform-tests\/wpt\/(blob\/|tree\/|raw\/)?(.*)$/.exec(
+        url,
+      ))
+  ) {
+    // Convert GitHub WPT URL to raw.githack.com URL (correct MIME types)
+    url = `${r[1]}//raw.githack.com/web-platform-tests/wpt/${r[2] ? "" : "master/"}${r[3]}`;
+  } else if (
     (r =
       /^(https?:)\/\/github\.com\/([^/]+\/[^/]+)\/(blob\/|tree\/|raw\/)?(.*)$/.exec(
         url,
@@ -178,6 +232,15 @@ export function convertSpecialURL(url: string): string {
     url = `${r[1]}//raw.githubusercontent.com/${r[2]}/${r[3] ? "" : "master/"}${
       r[4]
     }`;
+  } else if ((r = /^(https?:)\/\/wpt\.live\/(.*)$/.exec(url))) {
+    // Convert WPT live URL to raw.githack.com URL so it can be fetched without
+    // CORS issues and with correct MIME types for embedded resources (e.g.,
+    // <object data="..."> with type="text/html").
+    // Exception: .sub.* files require WPT server-side template substitution
+    // (e.g. {{hosts[alt][]}}) and must remain on wpt.live to be served correctly.
+    if (!/\.sub\.[^/]+(?:[?#].*)?$/.test(r[2])) {
+      url = `${r[1]}//raw.githack.com/web-platform-tests/wpt/master/${r[2]}`;
+    }
   } else if (
     (r =
       /^(https?:)\/\/www\.aozora\.gr\.jp\/(cards\/[^/]+\/files\/[^/.]+\.html)$/.exec(

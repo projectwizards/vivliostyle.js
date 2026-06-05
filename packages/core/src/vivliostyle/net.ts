@@ -72,8 +72,9 @@ export function fetchFromURL(
         .toLowerCase();
 
       if (!res.ok) {
-        // TODO: Handle error response
-        return res.text();
+        throw new Error(
+          `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`,
+        );
       }
       if (opt_type === FetchResponseType.BLOB) {
         return res.blob();
@@ -122,7 +123,15 @@ export function fetchFromURL(
       continuation.schedule(response);
     })
     .catch((e) => {
-      Logging.logger.warn(e, `Error fetching ${url}`);
+      if (response.status >= 400) {
+        Logging.logger.warn(
+          `Error fetching ${url} (${response.status}${
+            response.statusText ? " " + response.statusText : ""
+          })`,
+        );
+      } else {
+        Logging.logger.warn(e, `Error fetching ${url}`);
+      }
       continuation.schedule(response);
     });
   return frame.result();
@@ -352,6 +361,20 @@ export function loadElement(
           if (alt) {
             (elem as any).alt = alt;
           }
+        }
+      } else if (
+        elem.localName === "img" ||
+        elem.localName === "embed" ||
+        elem.localName === "object" ||
+        elem.localName === "iframe"
+      ) {
+        // No src provided: element already has its source attributes set
+        // (e.g., <img srcset="...">, <embed src="...">, <object data="...">).
+        // Check if already loaded and set a timeout as a safety net.
+        if ((elem as HTMLImageElement).complete) {
+          setTimeout(() => handler(new Event("load")), 0);
+        } else {
+          timeoutId = setTimeout(handler, 30000);
         }
       }
       return frame.result();

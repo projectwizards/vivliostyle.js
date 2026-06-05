@@ -6,6 +6,7 @@
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 
 - [Build Guideline](#build-guideline)
   - [Setup](#setup)
@@ -18,8 +19,6 @@
     - [3. Publish](#3-publish)
 - [Consistent Naming Guideline](#consistent-naming-guideline)
 - [Commit Message Guideline](#commit-message-guideline)
-- [Troubleshooting](#troubleshooting)
-  - [Cannot find `node_modules/@vivliostyle/core`](#cannot-find-node_modulesvivliostylecore)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -65,7 +64,7 @@ yarn build
 
 #### 1. Pre-release
 
-Run `yarn version:prerelease` to create pre-release. And run `yarn version:prerelease` to increment pre-release count.
+Run `yarn version:prerelease` to create pre-release. And run `yarn version:bump` to increment pre-release count.
 
 #### 2. Stable release
 
@@ -83,7 +82,7 @@ yarn version:bump
 
 #### 3. Publish
 
-After running `yarn version:*` command above, just `git push` and CI will do the rest of publishing process.
+After running `yarn version:*` command above, you can edit `CHANGELOG.md` if needed, then run `yarn version:push`. This amends the release commit, updates the tag, and pushes to GitHub. CI will then publish to npm and create the GitHub Release.
 
 ## Consistent Naming Guideline
 
@@ -97,9 +96,3 @@ After running `yarn version:*` command above, just `git push` and CI will do the
 
 All notable changes to this project will be documented in `CHANGELOG.md`.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
-
-## Troubleshooting
-
-### Cannot find `node_modules/@vivliostyle/core`
-
-This occurs after `yarn add`. Run `lerna link` to recreate symlinks after the installation, otherwise use `lerna add` instead of `yarn add`.

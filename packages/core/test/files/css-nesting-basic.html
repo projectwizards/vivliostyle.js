@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<!-- Test case for Issue #1032: CSS Nesting basic selectors and mixed declarations -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>CSS Nesting Basic</title>
+    <style>
+      @page {
+        size: 160mm 120mm;
+        margin: 10mm;
+      }
+
+      body {
+        font: 16px/1.4 Georgia, serif;
+      }
+
+      .note {
+        margin: 0 0 8mm;
+      }
+
+      .card {
+        color: #000;
+        margin: 0 0 6mm;
+        padding: 4mm;
+        border: 1px solid #555;
+        background: #f3f3f3;
+
+        .child {
+          color: green;
+          font-weight: 700;
+        }
+
+        &:hover {
+          color: #000;
+        }
+
+        .wrap & {
+          border-color: green;
+        }
+
+        @media print {
+          background: #dff6df;
+
+          .grandchild {
+            color: green;
+          }
+        }
+
+        background-image: linear-gradient(#dff6df, #dff6df);
+        background-repeat: no-repeat;
+      }
+    </style>
+  </head>
+  <body>
+    <p class="note">Tests pass if the texts below are green and the card border/background are green-tinted.</p>
+    <div class="wrap">
+      <section class="card">
+        <div class="child">Nested descendant selector</div>
+        <div class="grandchild">Nested conditional selector</div>
+      </section>
+    </div>
+  </body>
+  </html>

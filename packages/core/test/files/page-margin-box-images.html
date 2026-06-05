@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Page Margin Box Images</title>
+    <style>
+      @page {
+        size: A4;
+        margin: 80mm 20mm 20mm;
+
+        @top-left {
+          content: url("./img/45x45.png");
+          padding: 2mm;
+          border: 1px solid #c33;
+          background: rgba(255, 224, 224, 0.8);
+        }
+
+        @top-right {
+          content: url("./img/200x200.png");
+          padding: 2mm;
+          border: 1px solid #369;
+          background: rgba(224, 240, 255, 0.8);
+        }
+      }
+
+      body {
+        margin: 0;
+        font: 16px/1.5 sans-serif;
+      }
+
+      main {
+        padding: 12mm;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>
+        The left and right top margin boxes should have different widths that
+        match the intrinsic widths of the two images.
+      </p>
+    </main>
+  </body>
+</html>

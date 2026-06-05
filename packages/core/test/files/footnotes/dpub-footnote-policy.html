@@ -1,0 +1,88 @@
+<!-- Test case for Issue #1884: semantic footnote-policy comparison -->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>DPUB footnotes with and without footnote-policy: line</title>
+    <style>
+      @page {
+        size: 500px 260px;
+        margin: 40px;
+
+        @bottom-center {
+          content: "Page " counter(page);
+        }
+      }
+      :root {
+        font-size: 16px;
+        font-family: Arial, sans-serif;
+        line-height: 20px;
+        widows: 2;
+        orphans: 2;
+      }
+      body,
+      p,
+      section,
+      h1,
+      h2,
+      div {
+        margin: 0;
+      }
+      section + section {
+        break-before: page;
+      }
+      h1 {
+        font-size: 16px;
+        line-height: 20px;
+        margin-bottom: 10px;
+      }
+      h2 {
+        font-size: 16px;
+        line-height: 20px;
+        margin-bottom: 10px;
+      }
+      .expected {
+        font-style: italic;
+        min-block-size: 40px;
+      }
+      .spacer-no-policy {
+        block-size: 30px;
+      }
+      .spacer-policy {
+        block-size: 50px;
+      }
+      .policy-line {
+        footnote-policy: line;
+      }
+    </style>
+  </head>
+  <body>
+    <section>
+      <h1>DPUB footnote-policy test</h1>
+      <h2>Without footnote-policy: line</h2>
+      <p class="expected">
+        The anchor paragraph should stay on page 1 while only the footnote body moves to page 2.
+      </p>
+      <div class="spacer-no-policy"></div>
+      <p>Filler paragraph near the bottom of page 1.</p>
+      <p>
+        Anchor paragraph for footnote 1<a id="fnref1" href="#fn1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+      </p>
+      <p>Paragraph after the anchor should appear on the next page.</p>
+      <aside id="fn1" class="footnote" role="doc-footnote"><a href="#fnref1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>Footnote 1 should appear on page 2 while its anchor paragraph remains on page 1.</aside>
+    </section>
+    <section>
+      <h2>With footnote-policy: line</h2>
+      <p class="expected">
+        The anchor paragraph and the footnote body should both move to the next page together.
+      </p>
+      <div class="spacer-policy"></div>
+      <p>Filler paragraph near the bottom of the policy-line page.</p>
+      <p>
+        Anchor paragraph for footnote 2<a id="fnref2" href="#fn2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+      </p>
+      <p>Paragraph after the policy-line anchor should remain on the following page.</p>
+      <aside id="fn2" class="footnote policy-line" role="doc-footnote"><a href="#fnref2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>Footnote 2 and its anchor paragraph should both move to the next page.</aside>
+    </section>
+  </body>
+</html>

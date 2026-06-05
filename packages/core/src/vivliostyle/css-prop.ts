@@ -208,7 +208,7 @@ export function toShape(
 }
 
 export class CountersVisitor extends Css.Visitor {
-  counters: { [key: string]: number } = {};
+  counters: { [key: string]: number } = Object.create(null);
   name: string | null = null;
 
   constructor(
@@ -267,6 +267,10 @@ export class UrlTransformVisitor extends Css.FilterVisitor {
   }
 
   override visitURL(url: Css.URL): Css.Val {
-    return new Css.URL(this.transformer.transformURL(url.url, this.baseUrl));
+    return new Css.URL(
+      Base.resolveWptResourceURL(
+        this.transformer.transformURL(url.url, this.baseUrl),
+      ),
+    );
   }
 }

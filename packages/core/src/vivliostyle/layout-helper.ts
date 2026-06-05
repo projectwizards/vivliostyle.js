@@ -52,8 +52,12 @@ export function setBrowserColumnBreaking(column: Vtree.Container): void {
  * Disable the browser's multi-column feature for page/column breaking.
  * This function resets the CSS properties set by `setBrowserColumnBreaking`.
  */
-export function unsetBrowserColumnBreaking(column: Vtree.Container): void {
-  const style = column.element.style;
+export function unsetBrowserColumnBreaking(
+  columnOrElement: Vtree.Container | HTMLElement,
+): void {
+  const columnElement =
+    "element" in columnOrElement ? columnOrElement.element : columnOrElement;
+  const style = columnElement.style;
   style.columnWidth = "";
   style.columnCount = "";
   style.columnGap = "";
@@ -72,13 +76,6 @@ export function isUsingBrowserColumnBreaking(column: Vtree.Container): boolean {
  */
 export function setAsRootColumn(column: Vtree.Container): void {
   column.element.setAttribute("data-vivliostyle-column", "true");
-}
-
-/**
- * Check if the column is marked as a root column for Vivliostyle layout processing.
- */
-export function isRootColumn(column: Vtree.Container): boolean {
-  return column.element.hasAttribute("data-vivliostyle-column");
 }
 
 /**
@@ -183,53 +180,31 @@ export function getElementClientRectAdjusted(
   const rect = clientLayout.getElementClientRect(element);
   const columnOver = adjustRectForColumnBreaking(rect, vertical);
 
-  // Workaround for Chromium bug on table fragmentation:
-  //   https://issues.chromium.org/issues/458852795
-  // To prevent the table cell from moving to the next column without breaking inside the cell due to the bug,
-  // we try to reduce the column height so that a column break inside the cell can occur.
-  if (columnOver === 1) {
+  if (columnOver > 0) {
     let style = clientLayout.getElementComputedStyle(element);
     if (
-      style.display === "table-cell" ||
-      (element.className === "-vivliostyle-table-cell-container" &&
-        element.parentElement?.parentElement &&
-        (style = clientLayout.getElementComputedStyle(
-          element.parentElement.parentElement,
-        )).display === "table-cell")
+      style.display.startsWith("table") &&
+      !findAncestorNonRootMultiColumn(element)
     ) {
+      // For now, browser's column breaking for tables does not work well,
+      // so we disable it and use our own fragmentation logic for tables
+      // unless the table is inside a non-root multi-column element, which
+      // requires the browser's column breaking.
+      //
+      // Firefox bug: Tables do not break (fragment) in CSS Multi-column Layout
+      //   https://bugzilla.mozilla.org/show_bug.cgi?id=888257
+      //
+      // Chromium also has a bug on table fragmentation:
+      //   https://issues.chromium.org/issues/458852795
+
       const columnElem = element.closest(
         "[data-vivliostyle-column]",
       ) as HTMLElement;
-      const columnStyle = columnElem?.style;
-      const blockSizeP = vertical ? "width" : "height";
-      const columnHeight = columnStyle && parseFloat(columnStyle[blockSizeP]);
-      if (columnHeight) {
-        let columnHeight2 = columnHeight;
-        let columnOver2 = columnOver;
-        const paddingBlockEnd = parseFloat(style.paddingBlockEnd);
-        const borderBlockEndWidth = parseFloat(style.borderBlockEndWidth);
-        let count = Math.ceil(paddingBlockEnd + borderBlockEndWidth);
-        while (
-          count-- > 0 &&
-          columnOver2 === columnOver &&
-          --columnHeight2 > 0
-        ) {
-          columnStyle[blockSizeP] = `${columnHeight2}px`;
-          const rect2 = clientLayout.getElementClientRect(element);
-          columnOver2 = adjustRectForColumnBreaking(rect2, vertical);
-          if (
-            columnOver2 < columnOver ||
-            (columnOver2 === columnOver &&
-              (vertical ? rect2.right > rect.right : rect2.top < rect.top))
-          ) {
-            columnElem.setAttribute(
-              "data-vivliostyle-column-height-adjusted",
-              "true",
-            );
-            return rect2;
-          }
-        }
-        columnStyle[blockSizeP] = `${columnHeight}px`;
+      if (columnElem) {
+        unsetBrowserColumnBreaking(columnElem);
+
+        const rect2 = clientLayout.getElementClientRect(element);
+        return rect2;
       }
     }
   }
@@ -256,6 +231,44 @@ export function clearForcedColumnBreaks(prevNode: Node, currNode: Node): void {
 }
 
 /**
+ * Check if an element has non-root multi-column styles (column-count or
+ * column-width) set on its inline style.
+ *
+ * NOTE: Do not use `instanceof HTMLElement` for the check because it does
+ * not work when the node is inside an iframe. (Issue #1000)
+ */
+export function hasNonRootMultiColumnStyle(element: Element): boolean {
+  const style = (element as HTMLElement).style;
+  if (!style) return false;
+  return (
+    !isNaN(parseFloat(style.columnCount)) ||
+    !isNaN(parseFloat(style.columnWidth))
+  );
+}
+
+/**
+ * Check if the given element or any of its descendants establishes a
+ * non-root multi-column layout (via inline style).
+ */
+export function containsNonRootMultiColumn(element: Element): boolean {
+  if (
+    !element.hasAttribute("data-vivliostyle-column") &&
+    hasNonRootMultiColumnStyle(element)
+  ) {
+    return true;
+  }
+  for (const descendant of element.querySelectorAll("*")) {
+    if (
+      !descendant.hasAttribute("data-vivliostyle-column") &&
+      hasNonRootMultiColumnStyle(descendant)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Find the nearest ancestor element that establishes a multi-column
  * layout but is not the root column element.
  */
@@ -273,10 +286,7 @@ export function findAncestorNonRootMultiColumn(node: Node): Element | null {
       // This is the root column element.
       break;
     }
-    if (
-      !isNaN(parseFloat(style.columnCount)) ||
-      !isNaN(parseFloat(style.columnWidth))
-    ) {
+    if (hasNonRootMultiColumnStyle(elem as HTMLElement)) {
       return elem;
     }
     if (style.position === "absolute") {
@@ -337,6 +347,113 @@ export function fixOverflowAtForcedColumnBreak(node: Node): void {
 }
 
 /**
+ * Check if the root column's content overflows.
+ *
+ * Note: This check is based on the root column's trailing content
+ * (lastElementChild), not only on a specific target element.
+ */
+export function checkRootColumnOverflow(column: Layout.Column): number {
+  const element = column.element.lastElementChild;
+  const rect = element && column.clientLayout.getElementClientRect(element);
+  if (!rect) {
+    return 0;
+  }
+  const columnOver = checkIfBeyondColumnBreaks(rect, column.vertical);
+  return columnOver;
+}
+
+/**
+ * Fix multi-column box with `column-fill: auto` that was changed to `column-fill: balance`
+ * for layout processing, by restoring `column-fill: auto` and setting block-size to prevent overflow.
+ */
+export function fixAutoFillMultiColumnBox(
+  element: HTMLElement,
+  column: Layout.Column,
+): void {
+  if (element.getAttribute("data-viv-saved-column-fill") !== "auto") {
+    return;
+  }
+  if (checkRootColumnOverflow(column)) {
+    // Do not restore `column-fill: auto` if root-column overflow already exists
+    // even with `column-fill: balance`.
+    return;
+  }
+  const computedStyle = column.clientLayout.getElementComputedStyle(element);
+  const blockSize1 = parseFloat(computedStyle.blockSize);
+
+  // Restore `column-fill: auto` and check if it overflows.
+  // If it overflows, find a non-overflow block-size by binary search.
+  element.style.columnFill = "auto";
+  const blockSize2 = parseFloat(computedStyle.blockSize);
+  if (
+    blockSize2 <= 0 ||
+    (element.parentElement &&
+      findAncestorNonRootMultiColumn(element.parentElement))
+  ) {
+    // When the multicol has no in-flow content or is nested inside another
+    // multicol container, skip setting an explicit block-size. Setting one
+    // overrides the browser's natural height and prevents proper sizing in
+    // the parent multicol's fragmentation context. (Issue #1916)
+    element.removeAttribute("data-viv-saved-column-fill");
+    return;
+  }
+  let blockSize = NaN;
+  element.style.blockSize = `${blockSize2}px`;
+  if (!checkRootColumnOverflow(column)) {
+    blockSize = parseFloat(computedStyle.blockSize);
+    if (blockSize < blockSize2) {
+      // `computedStyle.blockSize` may return a smaller value than the set `blockSize2` due to rounding,
+      // which can cause unexpected column breaking in the multi-column box. So we need to adjust it.
+      // (Issue #1773)
+      const layoutUnitAdj = 1 / column.clientLayout.layoutUnitPerPixel;
+      blockSize = blockSize2 + layoutUnitAdj;
+      element.style.blockSize = `${blockSize}px`;
+    }
+  } else {
+    element.style.blockSize = `${blockSize1}px`;
+    if (!checkRootColumnOverflow(column)) {
+      // `blockSize1` is non-overflow and `blockSize2` is overflow.
+      // Search the largest non-overflow value in [blockSize1, blockSize2].
+      const delta = 1 / (column.clientLayout.pixelRatio || 1);
+      let ok = blockSize1;
+      let ng = blockSize2;
+      while (ng - ok > delta) {
+        const mid = (ok + ng) / 2;
+        element.style.blockSize = `${mid}px`;
+        if (checkRootColumnOverflow(column)) {
+          ng = mid;
+        } else {
+          ok = mid;
+        }
+      }
+      blockSize = ok;
+      element.style.blockSize = `${blockSize}px`;
+    }
+  }
+  if (isNaN(blockSize)) {
+    // Fallback for unexpected cases where overflow is not resolved while reducing
+    // block-size down to the original balanced size.
+    // Restore the stable `balance` state and keep data-viv-saved-column-fill="auto"
+    // for diagnostics and possible later retry.
+    element.style.blockSize = "";
+    element.style.columnFill = "balance";
+    return;
+  }
+  // Successfully restored `column-fill: auto`.
+  element.removeAttribute("data-viv-saved-column-fill");
+}
+
+export function fixAutoFillMultiColumnBoxes(column: Layout.Column): void {
+  // Restore `column-fill: auto` and set block-size for elements with data-viv-saved-column-fill="auto"
+  const elements = column.element.querySelectorAll(
+    '[data-viv-saved-column-fill="auto"]',
+  );
+  for (const element of elements) {
+    fixAutoFillMultiColumnBox(element as HTMLElement, column);
+  }
+}
+
+/**
  * Calculate the position of the "after" edge in the block-progression.
  * Returns the edge position in pixels if it was determined successfully,
  * and returns NaN if the position could not be determined and the node
@@ -360,18 +477,42 @@ export function calculateEdge(
   if (element && element.namespaceURI === Base.NS.XHTML) {
     const style = (element as HTMLElement).style;
     if (
-      element.localName === "br" ||
       element.localName === "wbr" ||
       (style &&
         Display.isInlineLevel(style.display) &&
         /^([\d\.]|super|(text-)?top)/.test(style.verticalAlign))
     ) {
-      // Avoid incorrect edge calculation at BR or WBR element,
+      // Avoid incorrect edge calculation at WBR element,
       // or inline element with positive vertical-align (issue #811).
       return NaN;
     }
   }
   if (node === element) {
+    // For BR elements, measure the line position by inserting a temporary
+    // marker element BEFORE the BR. This is necessary because
+    // getBoundingClientRect() on consecutive BRs reports the same rect
+    // (the line they're ON), so the binary search can't distinguish them.
+    // By measuring before each BR, we get the after-edge of the line
+    // the BR is on, which correctly differentiates consecutive BRs:
+    // the first BR's line fits while the second BR's blank line overflows.
+    // (issue #1685)
+    if (element.localName === "br") {
+      const doc = element.ownerDocument;
+      const marker = doc.createElement("span");
+      element.parentNode.insertBefore(marker, element);
+      const markerRect = clientLayout.getElementClientRect(marker);
+      marker.remove();
+      if (markerRect) {
+        const rects = [markerRect];
+        adjustRectsForColumnBreaking(rects, vertical);
+        const adjustedRect = rects[0];
+        const edge = vertical ? adjustedRect.left : adjustedRect.bottom;
+        if (!isNaN(edge) && edge !== 0) {
+          return edge;
+        }
+      }
+      return NaN;
+    }
     if (nodeContext.after || !nodeContext.inline) {
       if (
         nodeContext.after &&
@@ -428,7 +569,29 @@ export function calculateEdge(
     // Adjust boxes' positions for column breaking
     adjustRectsForColumnBreaking(boxes, vertical);
 
-    boxes = boxes.filter((box) => box.right > box.left && box.bottom > box.top);
+    // Prefer non-zero-area rects for stable edge calculation.
+    // Fallback to block-direction-only rects only in preformatted contexts
+    // for blank lines (issue #1685).
+    const boxesWithArea = boxes.filter(
+      (box) => box.right > box.left && box.bottom > box.top,
+    );
+    if (boxesWithArea.length > 0) {
+      boxes = boxesWithArea;
+    } else {
+      const whiteSpace = element
+        ? clientLayout.getElementComputedStyle(element).whiteSpace
+        : "";
+      const canUseZeroInlineSizeRect =
+        whiteSpace === "pre" ||
+        whiteSpace === "pre-wrap" ||
+        whiteSpace === "pre-line" ||
+        whiteSpace === "break-spaces";
+      boxes = canUseZeroInlineSizeRect
+        ? boxes.filter((box) =>
+            vertical ? box.right > box.left : box.bottom > box.top,
+          )
+        : [];
+    }
     if (!boxes.length) {
       return NaN;
     }
@@ -514,8 +677,37 @@ export function isOutOfFlow(node: Node): boolean {
   if (!(node?.nodeType === 1)) return false;
   const e = node as HTMLElement;
   if (isSpecial(e)) return true;
+  return isCssOutOfFlow(node);
+}
+
+/**
+ * Check if element is out-of-flow due to CSS positioning or float.
+ * Unlike isOutOfFlow(), this does not check for special marker elements.
+ */
+export function isCssOutOfFlow(node: Node): boolean {
+  if (!(node?.nodeType === 1)) return false;
+  const e = node as HTMLElement;
   const position = e.style?.position;
-  return position === "absolute" || position === "fixed";
+  if (position === "absolute" || position === "fixed") {
+    return true;
+  }
+  const float = e.style?.float;
+  return (
+    float === "left" ||
+    float === "right" ||
+    float === "inline-start" ||
+    float === "inline-end"
+  );
+}
+
+/**
+ * Check if element has position:fixed. Used to identify running elements
+ * (position:running() rendered as position:fixed) without matching
+ * position:absolute elements. (Issue #1833, #1869, #1870)
+ */
+export function isFixedPositioned(node: Node): boolean {
+  if (!(node?.nodeType === 1)) return false;
+  return (node as HTMLElement).style?.position === "fixed";
 }
 
 export function isSpecialNodeContext(nodeContext: Vtree.NodeContext): boolean {

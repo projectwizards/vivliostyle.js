@@ -34,6 +34,7 @@ import * as Logging from "./logging";
 import * as Net from "./net";
 import * as OPS from "./ops";
 import * as Plugin from "./plugin";
+import * as SemanticFootnote from "./semantic-footnote";
 import * as Task from "./task";
 import * as Toc from "./toc";
 import * as Vgen from "./vgen";
@@ -48,6 +49,27 @@ function cloneCounterValues(
     result[name] = Array.from(counters[name]);
   });
   return result;
+}
+
+function clonePageGroupPageCounts(source: {
+  [pageType: string]: Map<Element, number>;
+}): {
+  [pageType: string]: Map<Element, number>;
+} {
+  const cloned = Object.create(null) as {
+    [pageType: string]: Map<Element, number>;
+  };
+  Object.keys(source).forEach((pageType) => {
+    cloned[pageType] = new Map(source[pageType]);
+  });
+  return cloned;
+}
+
+function shouldSkipHeadForWebPub(url: string): boolean {
+  return (
+    /\.(x?html?|xht|svg)(?:[#?]|$)/i.test(url) ||
+    /^(?:about:|data:|blob:)/i.test(Base.stripFragment(url))
+  );
 }
 
 export type Position = {
@@ -103,86 +125,110 @@ export class EPUBDocStore extends OPS.OPSDocStore {
     return this.jsonStore.load(url, opt_required, opt_message);
   }
 
+  loadWebPubManifest(url: string, frame: Task.Frame<OPFDoc>): void {
+    this.loadAsJSON(url, true).then((manifestObj) => {
+      if (!manifestObj) {
+        this.reportLoadError(url);
+        frame.finish(null);
+        return;
+      }
+      const opf = new OPFDoc(this, url);
+      opf.initWithWebPubManifest(manifestObj, undefined, url).then(() => {
+        frame.finish(opf);
+      });
+    });
+  }
+
   loadPubDoc(url: string): Task.Result<OPFDoc> {
     const frame: Task.Frame<OPFDoc> = Task.newFrame("loadPubDoc");
 
-    Net.fetchFromURL(url, null, "HEAD").then((response) => {
-      if (response.status >= 400) {
-        // This url can be the root of an unzipped EPUB.
-        this.loadEPUBDoc(url).then((opf) => {
-          if (opf) {
-            frame.finish(opf);
-            return;
-          }
-          Logging.logger.error(
-            `Failed to fetch a source document from ${url} (${response.status}${
-              response.statusText ? " " + response.statusText : ""
-            })`,
-          );
-          frame.finish(null);
-        });
-      } else {
-        if (
-          !response.status &&
-          !response.responseXML &&
-          !response.responseText &&
-          !response.responseBlob &&
-          !response.contentType
-        ) {
-          // Empty response
-          if (/\/[^/.]+(?:[#?]|$)/.test(url)) {
-            // Adding trailing "/" may solve the problem.
-            url = url.replace(/([#?]|$)/, "/$1");
-          } else {
-            // Ignore empty response of HEAD request, it may become OK with GET request.
-          }
+    if (/\.opf(?:[#?]|$)/i.test(url)) {
+      // EPUB OPF
+      const [, pubURL, root] = url.match(/^((?:.*\/)?)([^/]*)$/);
+      this.loadOPF(pubURL, root).thenFinish(frame);
+    } else if (/\.json(?:ld)?(?:[#?]|$)/i.test(url)) {
+      // Web Publication Manifest
+      this.loadWebPubManifest(url, frame);
+    } else if (shouldSkipHeadForWebPub(url)) {
+      // Web Publication primary entry (X)HTML
+      // Skip HEAD request for known document URLs and special schemes.
+      // Browsers reject non-GET methods for data: and blob: URLs.
+      this.loadWebPub(url).then((opf) => {
+        if (opf) {
+          frame.finish(opf);
+          return;
         }
-        if (
-          response.contentType == "application/oebps-package+xml" ||
-          /\.opf(?:[#?]|$)/.test(url)
-        ) {
-          // EPUB OPF
-          const [, pubURL, root] = url.match(/^((?:.*\/)?)([^/]*)$/);
-          this.loadOPF(pubURL, root).thenFinish(frame);
-        } else if (
-          response.contentType == "application/ld+json" ||
-          response.contentType == "application/webpub+json" ||
-          response.contentType == "application/audiobook+json" ||
-          response.contentType == "application/json" ||
-          /\.json(?:ld)?(?:[#?]|$)/.test(url)
-        ) {
-          // Web Publication Manifest
-          this.loadAsJSON(url, true).then((manifestObj) => {
-            if (!manifestObj) {
-              this.reportLoadError(url);
-              frame.finish(null);
-              return;
-            }
-            const opf = new OPFDoc(this, url);
-            opf.initWithWebPubManifest(manifestObj, undefined, url).then(() => {
-              frame.finish(opf);
-            });
-          });
-        } else {
-          // Web Publication primary entry (X)HTML
-          this.loadWebPub(url).then((opf) => {
+        // These URLs cannot be the root of an unzipped EPUB container.
+        this.reportLoadError(url);
+        frame.finish(null);
+      });
+    } else {
+      // For ambiguous URLs (no recognized extension), use HEAD to check
+      // content type and availability before loading.
+      Net.fetchFromURL(url, null, "HEAD").then((response) => {
+        if (response.status >= 400) {
+          // This url can be the root of an unzipped EPUB.
+          this.loadEPUBDoc(url).then((opf) => {
             if (opf) {
               frame.finish(opf);
               return;
             }
-            // This url can be the root of an unzipped EPUB.
-            this.loadEPUBDoc(url).then((opf) => {
+            Logging.logger.error(
+              `Failed to fetch a source document from ${url} (${response.status}${
+                response.statusText ? " " + response.statusText : ""
+              })`,
+            );
+            frame.finish(null);
+          });
+        } else {
+          if (
+            !response.status &&
+            !response.responseXML &&
+            !response.responseText &&
+            !response.responseBlob &&
+            !response.contentType
+          ) {
+            // Empty response
+            if (/\/[^/.]+(?:[#?]|$)/.test(url)) {
+              // Adding trailing "/" may solve the problem.
+              url = url.replace(/([#?]|$)/, "/$1");
+            } else {
+              // Ignore empty response of HEAD request, it may become OK with GET request.
+            }
+          }
+          if (response.contentType == "application/oebps-package+xml") {
+            // EPUB OPF (served with OPF content type but without .opf extension)
+            const [, pubURL, root] = url.match(/^((?:.*\/)?)([^/]*)$/);
+            this.loadOPF(pubURL, root).thenFinish(frame);
+          } else if (
+            response.contentType == "application/ld+json" ||
+            response.contentType == "application/webpub+json" ||
+            response.contentType == "application/audiobook+json" ||
+            response.contentType == "application/json"
+          ) {
+            // Web Publication Manifest (served with JSON content type)
+            this.loadWebPubManifest(url, frame);
+          } else {
+            // Web Publication primary entry (X)HTML
+            this.loadWebPub(url).then((opf) => {
               if (opf) {
                 frame.finish(opf);
                 return;
               }
-              Logging.logger.error(`Failed to load ${url}.`);
-              frame.finish(null);
+              // This url can be the root of an unzipped EPUB.
+              this.loadEPUBDoc(url).then((opf) => {
+                if (opf) {
+                  frame.finish(opf);
+                  return;
+                }
+                this.reportLoadError(url);
+                frame.finish(null);
+              });
             });
-          });
+          }
         }
-      }
-    });
+      });
+    }
     return frame.result();
   }
 
@@ -256,6 +302,7 @@ export class EPUBDocStore extends OPS.OPSDocStore {
     this.load(url).then((xmldoc) => {
       if (!xmldoc) {
         this.reportLoadError(url);
+        frame.finish(null);
       } else if (
         xmldoc.document.querySelector(
           "a[href='META-INF/'],a[href$='/META-INF/']",
@@ -364,14 +411,19 @@ export class EPUBDocStore extends OPS.OPSDocStore {
       Logging.logger.error(`Failed to load ${docURL}. Invalid data.`);
     } else if (
       docURL.startsWith("http:") &&
-      Base.baseURL.startsWith("https:")
+      Base.baseURL.startsWith("https:") &&
+      // Browsers allow http://localhost from https:// (no mixed content block);
+      // the real error there is CORS, handled by likelyCorsProblem() below.
+      !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(?:[/?#]|$)/.test(
+        docURL,
+      )
     ) {
       Logging.logger.error(
         `Failed to load ${docURL}. Mixed Content ("http:" content on "https:" context) is not allowed.`,
       );
     } else if (likelyCorsProblem()) {
       Logging.logger.error(
-        `Failed to load ${docURL}. This may be caused by the server not allowing cross-origin resource sharing (CORS).`,
+        `Failed to load ${docURL}. This may be caused by network error, incorrect URL, or the server not allowing cross-origin resource sharing (CORS).`,
       );
     } else {
       Logging.logger.error(
@@ -1155,9 +1207,20 @@ export class OPFDoc {
     }
     // TODO: other metadata...
 
-    const primaryEntryPath = this.getPathFromURL(this.pubURL);
-    if (!manifestObj["readingOrder"] && doc && primaryEntryPath !== null) {
-      manifestObj["readingOrder"] = [encodeURI(primaryEntryPath)];
+    const primaryEntryURL = Base.stripFragment(this.pubURL);
+    const primaryEntryPath = this.getPathFromURL(primaryEntryURL);
+    const primaryEntryReadingOrderURL =
+      primaryEntryPath !== null
+        ? encodeURI(primaryEntryPath)
+        : /^(?:about:|blob:)/i.test(primaryEntryURL)
+          ? primaryEntryURL
+          : null;
+    if (
+      !manifestObj["readingOrder"] &&
+      doc &&
+      primaryEntryReadingOrderURL !== null
+    ) {
+      manifestObj["readingOrder"] = [primaryEntryReadingOrderURL];
 
       // Find TOC in the primary entry (X)HTML
       for (const anchorElem of Toc.findTocAnchorElements(doc)) {
@@ -1419,7 +1482,7 @@ export type OPFViewItem = {
   item: OPFItem;
   xmldoc: XmlDoc.XMLDocHolder;
   instance: OPS.StyleInstance;
-  layoutPositions: Vtree.LayoutPosition[];
+  layoutPositions: Array<Vtree.LayoutPosition | null>;
   pages: Vtree.Page[];
   complete: boolean;
   pageCounterStarts: CssCascade.CounterValues[];
@@ -1453,11 +1516,15 @@ export class OPFView implements Vgen.CustomRendererFactory {
       p3: number,
       p4: number,
     ) => any,
+    cmykReserveMap?: CmykStore.CmykReserveMapEntry[],
   ) {
     this.pref = Exprs.clonePreferences(pref);
     this.clientLayout = new Vgen.DefaultClientLayout(viewport);
     this.counterStore = new Counters.CounterStore(opf.documentURLTransformer);
     this.cmykStore = new CmykStore.CmykStore();
+    if (cmykReserveMap?.length) {
+      this.cmykStore.registerCmykReserveMap(cmykReserveMap);
+    }
   }
 
   private getPage(position: Position): Vtree.Page {
@@ -1608,6 +1675,21 @@ export class OPFView implements Vgen.CustomRendererFactory {
     return count;
   }
 
+  /**
+   * Mark a spine item as complete if all layout positions have corresponding
+   * rendered pages (Issue #1498).  When the item becomes complete, clean up
+   * inherited CSS properties that were propagated to the layout box during
+   * page float rendering so they don't leak into the next spine item or
+   * remain in the DOM after layout (Issue #1752).
+   */
+  private markSpineItemCompleteIfReady(viewItem: OPFViewItem): void {
+    viewItem.complete =
+      viewItem.layoutPositions.length === viewItem.pages.length;
+    if (viewItem.complete) {
+      viewItem.instance.viewport.layoutBox.removeAttribute("style");
+    }
+  }
+
   private getTotalOffsetForViewItem(viewItem: OPFViewItem): number {
     const spineIndex = viewItem.item.spineIndex;
     let totalOffset = this.paginationProgress.totalOffsetsBySpine[spineIndex];
@@ -1698,19 +1780,148 @@ export class OPFView implements Vgen.CustomRendererFactory {
     }
   }
 
-  /**
-   * Render a single page. If the new page contains elements with ids that are
-   * referenced from other pages by 'target-counter()', those pages are rendered
-   * too (calling `renderSinglePage` recursively).
-   */
-  private renderSinglePage(
-    viewItem: OPFViewItem,
-    pos: Vtree.LayoutPosition,
-  ): Task.Result<RenderSinglePageResult> {
-    const frame: Task.Frame<RenderSinglePageResult> =
-      Task.newFrame("renderSinglePage");
+  private isInCounterResolveScope(): boolean {
+    return this.counterStore.currentPageCountersStack.length > 0;
+  }
 
-    const pageIndexToRender = pos ? Math.max(pos.page, 0) : 0;
+  private hasNonEmptyPageType(page: Vtree.Page | null | undefined): boolean {
+    return !!page?.pageType && page.pageType !== "";
+  }
+
+  private hasPageTypeBoundaryBetween(
+    previousPage: Vtree.Page | null,
+    currentPage: Vtree.Page | null,
+  ): boolean {
+    return (
+      previousPage?.pageType != null &&
+      currentPage?.pageType != null &&
+      previousPage.pageType !== currentPage.pageType
+    );
+  }
+
+  private resolvePageTypeForRenderSlot(
+    viewItem: OPFViewItem,
+    page: Vtree.Page,
+    pageIndexToRender: number,
+    oldPage: Vtree.Page | null,
+    prevPage: Vtree.Page | null,
+    nextExistingPage: Vtree.Page | null,
+    inCounterResolveScopeAtStart: boolean,
+  ): void {
+    let shouldKeepOldPageType = false;
+    if (oldPage) {
+      const hasBoundaryBetweenPrevAndOld = this.hasPageTypeBoundaryBetween(
+        prevPage,
+        oldPage,
+      );
+      const nextPageContinuesOldPageType =
+        nextExistingPage?.pageType === oldPage.pageType;
+      const isOldPageOffsetStale = oldPage.offset !== page.offset;
+
+      // If the old page exists, keep the pageType (named page).
+      // This is necessary for named page with target-counter() to work.
+      // (fix for issue #1136)
+      const shouldKeepOldPageTypeInCounterResolveScope =
+        // In target-counter resolution rerender, preserve the existing
+        // pageType only when the old page is still layout-consistent.
+        inCounterResolveScopeAtStart &&
+        !isOldPageOffsetStale &&
+        pageIndexToRender > 0;
+      shouldKeepOldPageType =
+        oldPage.pageType != null &&
+        (shouldKeepOldPageTypeInCounterResolveScope ||
+          pageIndexToRender === 0 ||
+          oldPage.pageType === prevPage?.pageType);
+      page.pageType = shouldKeepOldPageType ? oldPage.pageType : null;
+
+      if (inCounterResolveScopeAtStart) {
+        // Re-resolve the page-start type during target-counter rerender so a
+        // stale named page is not reused when the new start is actually default.
+        const pageStartPageType =
+          viewItem.instance.getPageStartPageTypeOverride(page.position);
+        if (pageStartPageType === "") {
+          page.pageType = "";
+        } else if (pageStartPageType) {
+          page.pageType = pageStartPageType;
+        }
+      }
+
+      if (!inCounterResolveScopeAtStart && !shouldKeepOldPageType) {
+        const shouldUsePrevPageTypeToFixEarlyBoundary =
+          pageIndexToRender > 1 &&
+          hasBoundaryBetweenPrevAndOld &&
+          nextPageContinuesOldPageType;
+        // For a suspected one-page-early boundary, start from previous pageType
+        // so the continuation page remains in the expected named-page run.
+        const currentPageType = shouldUsePrevPageTypeToFixEarlyBoundary
+          ? prevPage.pageType
+          : null;
+        viewItem.instance.styler.cascade.currentPageType = currentPageType;
+        viewItem.instance.pageManager.pageCascadeInstance.currentPageType =
+          currentPageType;
+      }
+    }
+
+    const shouldSeedFromPrevPageType =
+      !inCounterResolveScopeAtStart &&
+      this.hasNonEmptyPageType(prevPage) &&
+      this.hasNonEmptyPageType(nextExistingPage) &&
+      prevPage.pageType !== nextExistingPage.pageType &&
+      (!oldPage || oldPage.pageType == null);
+    if (shouldSeedFromPrevPageType) {
+      // If this slot has no reliable pageType yet, tentatively continue from
+      // the previous named page to avoid early boundary drift during rerender.
+      page.pageType = prevPage.pageType;
+    }
+  }
+
+  private evaluateNextPageRelayout(
+    oldPage: Vtree.Page | null,
+    nextPage: Vtree.Page | null,
+    positionChanged: boolean,
+    offsetChanged: boolean,
+    inCounterResolveScope: boolean,
+  ): { needsRelayout: boolean; shouldCascade: boolean } {
+    if (!oldPage || (!!nextPage && !positionChanged)) {
+      return { needsRelayout: false, shouldCascade: false };
+    }
+
+    const shouldCascadeInCounterResolveScope =
+      !!nextPage &&
+      (oldPage.pageType === nextPage.pageType || !nextPage.pageType);
+    const shouldResetNextPageTypeFromPositionChange =
+      !!nextPage &&
+      offsetChanged &&
+      (!inCounterResolveScope || shouldCascadeInCounterResolveScope) &&
+      (nextPage.pageType == null ||
+        oldPage.pageType == null ||
+        oldPage.pageType !== nextPage.pageType);
+    if (shouldResetNextPageTypeFromPositionChange) {
+      // If the previous page break position changed, the existing next
+      // page may now start in a different named-page context.
+      // Reset pageType so layoutNextPage() recalculates it.
+      // (fix for issue #1497)
+      nextPage.pageType = null;
+    }
+
+    // When inside a target-counter/target-text resolution scope
+    // (pushPageCounters/popPageCounters), do not cascade to render
+    // pages that have not been rendered yet. Creating new pages
+    // inside the push/pop scope causes currentPageCounters to
+    // advance, but popPageCounters then restores stale values,
+    // leading to wrong page counter numbers on subsequently
+    // rendered pages.
+    const shouldCascadeToNextPage = !!nextPage || !inCounterResolveScope;
+    return {
+      needsRelayout: true,
+      shouldCascade: shouldCascadeToNextPage,
+    };
+  }
+
+  private preparePageCountersForRender(
+    viewItem: OPFViewItem,
+    pageIndexToRender: number,
+  ): Vtree.Page | null {
     const oldPage = viewItem.pages[pageIndexToRender];
     // Restore page counter starts when re-rendering a page so target-counter()
     // and page-based counters stay stable across relayouts.
@@ -1725,13 +1936,357 @@ export class OPFView implements Vgen.CustomRendererFactory {
     if (!storedCounters || !oldPage) {
       viewItem.pageCounterStarts[pageIndexToRender] = startCounters;
     }
-    let page = this.makePage(viewItem, pos);
-    if (oldPage) {
-      // If the old page exists, keep the pageType (named page).
-      // This is necessary for named page with target-counter() to work.
-      // (fix for issue #1136)
-      page.pageType = oldPage.pageType;
+    return oldPage;
+  }
+
+  private maybeRelayoutFollowingPage(
+    viewItem: OPFViewItem,
+    nextLayoutPosition: Vtree.LayoutPosition | null,
+    oldPage: Vtree.Page | null,
+    renderedPage: Vtree.Page,
+  ): Task.Result<any> {
+    if (!nextLayoutPosition) {
+      return Task.newResult(true);
     }
+
+    const previousLayoutPosition =
+      viewItem.layoutPositions[nextLayoutPosition.page];
+    viewItem.layoutPositions[nextLayoutPosition.page] = nextLayoutPosition;
+    const nextPage = viewItem.pages[nextLayoutPosition.page];
+    const offsetChanged = !!oldPage && renderedPage.offset !== oldPage.offset;
+    const positionChanged =
+      !previousLayoutPosition ||
+      !nextLayoutPosition.isSamePosition(previousLayoutPosition) ||
+      nextLayoutPosition.highestSeenOffset !==
+        previousLayoutPosition.highestSeenOffset ||
+      offsetChanged;
+    const inCounterResolveScope = this.isInCounterResolveScope();
+    const relayoutDecision = this.evaluateNextPageRelayout(
+      oldPage,
+      nextPage,
+      positionChanged,
+      offsetChanged,
+      inCounterResolveScope,
+    );
+    if (!relayoutDecision.needsRelayout) {
+      return Task.newResult(true);
+    }
+
+    viewItem.complete = false;
+    if (!relayoutDecision.shouldCascade) {
+      return Task.newResult(true);
+    }
+    return this.renderSinglePage(viewItem, nextLayoutPosition);
+  }
+
+  private resolveUnresolvedReferencesForPage(
+    viewItem: OPFViewItem,
+    page: Vtree.Page,
+    pageIndex: number,
+    nextLayoutPosition: Vtree.LayoutPosition | null,
+  ): Task.Result<Vtree.Page> {
+    const frame: Task.Frame<Vtree.Page> = Task.newFrame(
+      "resolveUnresolvedReferencesForPage",
+    );
+    // When inside a target-counter/target-text resolution scope
+    // (pushPageCounters/popPageCounters), skip processing unresolved
+    // references on cascaded pages to prevent infinite re-layout loops.
+    // References that remain unresolved will be resolved when their
+    // target pages are rendered in the normal (non-cascade) flow.
+    // (fix for issue #1686)
+    const inCounterResolveScope = this.isInCounterResolveScope();
+    const unresolvedRefs = inCounterResolveScope
+      ? []
+      : this.counterStore.getUnresolvedRefsToPage(page);
+    let unresolvedRefIndex = 0;
+    let currentPage = page;
+
+    frame
+      .loopWithFrame((loopFrame) => {
+        unresolvedRefIndex++;
+        if (unresolvedRefIndex > unresolvedRefs.length) {
+          loopFrame.breakLoop();
+          return;
+        }
+        const refs = unresolvedRefs[unresolvedRefIndex - 1];
+        refs.refs = refs.refs.filter((ref) => !ref.isResolved());
+        if (refs.refs.length === 0) {
+          loopFrame.continueLoop();
+          return;
+        }
+        this.getPageViewItem(refs.spineIndex).then((targetViewItem) => {
+          if (!targetViewItem) {
+            loopFrame.continueLoop();
+            return;
+          }
+          // Save page type states and restore them after re-rendering page.
+          // This is necessary for named page with target-counter() to work.
+          // (fix for issues #1272 and #1497)
+          const stylerCascade = targetViewItem.instance.styler.cascade;
+          const pageCascade =
+            targetViewItem.instance.pageManager.pageCascadeInstance;
+          const savedStylerPageTypeState = {
+            currentPageType: stylerCascade.currentPageType,
+            previousPageType: stylerCascade.previousPageType,
+          };
+          const savedPageCascadePageTypeState = {
+            currentPageType: pageCascade.currentPageType,
+            previousPageType: pageCascade.previousPageType,
+          };
+          const savedPageGroupPageCounts = clonePageGroupPageCounts(
+            targetViewItem.instance.pageGroupPageCounts,
+          );
+          const savedCurrentPageGroupDocument =
+            targetViewItem.instance.currentPageGroupDocument;
+
+          // Save the scopes and restore them after re-rendering page.
+          // This is necessary for :blank page selector to work.
+          // (fix for issues #1131 and #1513)
+          const scopes = targetViewItem.instance.scopes;
+          targetViewItem.instance.scopes = {};
+
+          // Isolate root page-float layout context only when re-rendering an
+          // already rendered target page. For first-time rendering of the
+          // target page, keep the normal context so deferred page-floats can
+          // continue to subsequent pages.
+          // (fix for issue #1094 and regression in
+          // target-counter-and-page-floats.html)
+          const hasRenderedFollowingPage =
+            refs.pageIndex < targetViewItem.pages.length - 1;
+          const hasRenderedTargetPage = !!targetViewItem.pages[refs.pageIndex];
+          const shouldIsolateRootPageFloatLayoutContext =
+            hasRenderedTargetPage && hasRenderedFollowingPage;
+          const originalRootPageFloatLayoutContext =
+            shouldIsolateRootPageFloatLayoutContext
+              ? targetViewItem.instance.beginIsolatedRootPageFloatLayoutContext()
+              : null;
+
+          this.counterStore.pushPageCounters(refs.pageCounters);
+          this.counterStore.pushReferencesToSolve(refs.refs);
+          const pos = targetViewItem.layoutPositions[refs.pageIndex];
+          if (hasRenderedTargetPage) {
+            // Same-page rerenders should recompute :nth(... of <page-type>)
+            // from the page-group state of earlier pages only.
+            targetViewItem.instance.preparePageGroupPageIndicesForRerender(
+              targetViewItem.layoutPositions,
+              refs.pageIndex,
+            );
+          }
+
+          this.renderSinglePage(targetViewItem, pos).then((result) => {
+            if (shouldIsolateRootPageFloatLayoutContext) {
+              targetViewItem.instance.endIsolatedRootPageFloatLayoutContext(
+                originalRootPageFloatLayoutContext,
+              );
+            }
+            const beforeRestoreStylerCurrentPageType =
+              stylerCascade.currentPageType;
+            stylerCascade.currentPageType =
+              savedStylerPageTypeState.currentPageType;
+            stylerCascade.previousPageType =
+              savedStylerPageTypeState.previousPageType;
+
+            pageCascade.currentPageType =
+              savedPageCascadePageTypeState.currentPageType;
+            pageCascade.previousPageType =
+              savedPageCascadePageTypeState.previousPageType;
+            targetViewItem.instance.pageGroupPageCounts =
+              savedPageGroupPageCounts;
+            targetViewItem.instance.currentPageGroupDocument =
+              savedCurrentPageGroupDocument;
+            targetViewItem.instance.scopes = scopes;
+            // Save the counter state BEFORE popping. After renderSinglePage,
+            // currentPageCounters reflects the correct end state for the
+            // target page within the pushed scope. This is the correct
+            // starting state for any pending page created by cascade blocking.
+            // After popPageCounters, this state is lost (restored to the
+            // source spine's counters), so save it now.
+            const counterStateAfterTargetRender = cloneCounterValues(
+              this.counterStore.currentPageCounters,
+            );
+            this.counterStore.popPageCounters();
+            this.counterStore.popReferencesToSolve();
+            if (
+              result.pageAndPosition.position.spineIndex ===
+                currentPage.spineIndex &&
+              result.pageAndPosition.position.pageIndex === pageIndex
+            ) {
+              currentPage = result.pageAndPosition.page;
+            }
+            // Keep the current pageType aligned when recursive rerender of
+            // target-counter() shifts this page's named-page context.
+            // Guard with previous value checks to avoid leaking unrelated
+            // pageType updates from other rerender targets.
+            const shouldSyncStylerCurrentPageType =
+              !!currentPage.pageType &&
+              currentPage.pageType !==
+                savedStylerPageTypeState.currentPageType &&
+              beforeRestoreStylerCurrentPageType !==
+                result.pageAndPosition.page.pageType;
+            if (shouldSyncStylerCurrentPageType) {
+              stylerCascade.currentPageType = currentPage.pageType;
+            }
+            // Issue #1498: target-counter() resolution can leave one pending
+            // layout slot (layoutPositions has next page) without an actual
+            // rendered page in pages[]. Materialize that pending page here so
+            // later navigation/render loops do not stop one page early.
+            const isCrossSpine = targetViewItem !== viewItem;
+            const firstPendingPageIndex = targetViewItem.pages.length;
+            const pendingLayoutPosition =
+              targetViewItem.layoutPositions[firstPendingPageIndex];
+            // Recompute root page-float layout context state after rerender and
+            // context restoration to avoid using stale pre-rerender state.
+            const hasActiveRootPageFloatLayoutContextAfterRerender =
+              targetViewItem.instance.hasActiveRootPageFloatLayoutContext();
+            if (
+              pendingLayoutPosition &&
+              !hasActiveRootPageFloatLayoutContextAfterRerender
+            ) {
+              // For cross-spine cases, save/restore counter state around the
+              // pending page render and use the counter state saved before
+              // popPageCounters, because the global state after pop reflects
+              // the source spine, not the target spine.
+              const savedCountersBeforePending = isCrossSpine
+                ? cloneCounterValues(this.counterStore.currentPageCounters)
+                : null;
+              if (isCrossSpine) {
+                this.counterStore.currentPageCounters =
+                  counterStateAfterTargetRender;
+              }
+              const pageCountBeforePending = firstPendingPageIndex;
+              this.renderSinglePage(targetViewItem, pendingLayoutPosition).then(
+                () => {
+                  if (isCrossSpine) {
+                    this.markSpineItemCompleteIfReady(targetViewItem);
+                  }
+                  // After the pending page expanded the target spine,
+                  // pageCountersById snapshots for elements in later spines
+                  // are stale (page counter is off by the added pages).
+                  // Adjust those snapshots, shift the saved source-spine
+                  // counter state so subsequent pages start from the
+                  // corrected offset, and patch already-rendered
+                  // target-counter DOM nodes in the expanded spine's pages.
+                  const pageDelta =
+                    targetViewItem.pages.length - pageCountBeforePending;
+                  if (isCrossSpine && pageDelta > 0) {
+                    this.counterStore.adjustPageCountersOfLaterSpines(
+                      targetViewItem.item.spineIndex,
+                      pageDelta,
+                    );
+                    this.counterStore.updateTargetCounterNodesInPages(
+                      targetViewItem.pages,
+                    );
+                    // Adjust pageCounterStarts and page-counter DOM nodes
+                    // for all already-rendered later-spine viewItems so
+                    // their counter(page) margins show the corrected value
+                    // and future re-renders start from the right offset.
+                    const expandedIdx = targetViewItem.item.spineIndex;
+                    for (
+                      let si = expandedIdx + 1;
+                      si < this.spineItems.length;
+                      si++
+                    ) {
+                      const laterItem = this.spineItems[si];
+                      if (!laterItem) continue;
+                      laterItem.item.epage += pageDelta;
+                      for (const pcs of laterItem.pageCounterStarts) {
+                        if (pcs?.["page"]) {
+                          pcs["page"] = pcs["page"].map((v) => v + pageDelta);
+                        }
+                      }
+                      this.counterStore.updatePageCounterNodesInPages(
+                        laterItem.pages,
+                        laterItem.pageCounterStarts,
+                      );
+                    }
+                    // Shift the saved source-spine counter state so that
+                    // when it is restored below, subsequent pages of the
+                    // source spine continue with the corrected page offset.
+                    if (savedCountersBeforePending) {
+                      const srcPage = savedCountersBeforePending["page"];
+                      if (srcPage) {
+                        savedCountersBeforePending["page"] = srcPage.map(
+                          (v) => v + pageDelta,
+                        );
+                      }
+                    }
+                  }
+                  if (savedCountersBeforePending) {
+                    this.counterStore.currentPageCounters =
+                      savedCountersBeforePending;
+                  }
+                  loopFrame.continueLoop();
+                },
+              );
+              return;
+            }
+            // The target spine's re-render (or cascade inside the resolve
+            // scope) may have set complete=false even when no pending page
+            // was created. Re-check completeness so navigation can advance
+            // past this spine. Only for cross-spine cases.
+            if (isCrossSpine) {
+              this.markSpineItemCompleteIfReady(targetViewItem);
+            }
+            loopFrame.continueLoop();
+          });
+        });
+      })
+      .then(() => {
+        if (!currentPage.container.parentElement) {
+          // page is replaced
+          currentPage = viewItem.pages[pageIndex];
+        }
+        currentPage.isLastPage =
+          !nextLayoutPosition &&
+          viewItem.item.spineIndex === this.opf.spine.length - 1;
+        if (currentPage.isLastPage) {
+          Asserts.assert(this.viewport);
+          this.counterStore.finishLastPage(this.viewport);
+        }
+        currentPage.container.setAttribute(
+          "data-vivliostyle-page-index",
+          pageIndex,
+        );
+        currentPage.container.setAttribute(
+          "data-vivliostyle-spine-index",
+          currentPage.spineIndex,
+        );
+        frame.finish(currentPage);
+      });
+    return frame.result();
+  }
+
+  /**
+   * Render a single page. If the new page contains elements with ids that are
+   * referenced from other pages by 'target-counter()', those pages are rendered
+   * too (calling `renderSinglePage` recursively).
+   */
+  private renderSinglePage(
+    viewItem: OPFViewItem,
+    pos: Vtree.LayoutPosition,
+  ): Task.Result<RenderSinglePageResult> {
+    const frame: Task.Frame<RenderSinglePageResult> =
+      Task.newFrame("renderSinglePage");
+
+    const pageIndexToRender = pos ? Math.max(pos.page, 0) : 0;
+    const inCounterResolveScopeAtStart = this.isInCounterResolveScope();
+    const oldPage = this.preparePageCountersForRender(
+      viewItem,
+      pageIndexToRender,
+    );
+    const prevPage =
+      pageIndexToRender > 0 ? viewItem.pages[pageIndexToRender - 1] : null;
+    const nextExistingPage = viewItem.pages[pageIndexToRender + 1];
+    let page = this.makePage(viewItem, pos);
+    this.resolvePageTypeForRenderSlot(
+      viewItem,
+      page,
+      pageIndexToRender,
+      oldPage,
+      prevPage,
+      nextExistingPage,
+      inCounterResolveScopeAtStart,
+    );
 
     viewItem.instance.layoutNextPage(page, pos).then((posParam) => {
       pos = posParam as Vtree.LayoutPosition;
@@ -1742,108 +2297,23 @@ export class OPFView implements Vgen.CustomRendererFactory {
       this.counterStore.finishPage(page.spineIndex, pageIndex);
       this.reportPaginationProgress(viewItem, pos);
 
-      // If the position of the page break change, we should re-layout the next
-      // page too.
-      let cont: Task.Result<any> = null;
-      if (pos) {
-        const prevPos = viewItem.layoutPositions[pos.page];
-        viewItem.layoutPositions[pos.page] = pos;
-        const nextPage = viewItem.pages[pos.page];
-        const offsetChanged = oldPage && page.offset !== oldPage.offset;
-        const positionChanged =
-          !prevPos ||
-          !pos.isSamePosition(prevPos) ||
-          pos.highestSeenOffset !== prevPos.highestSeenOffset ||
-          offsetChanged;
-        if (oldPage && (!nextPage || positionChanged)) {
-          viewItem.complete = false;
-          cont = this.renderSinglePage(viewItem, pos);
-        }
-      }
-      if (!cont) {
-        cont = Task.newResult(true);
-      }
-      cont.then(() => {
-        const unresolvedRefs = this.counterStore.getUnresolvedRefsToPage(page);
-        let index = 0;
-        frame
-          .loopWithFrame((loopFrame) => {
-            index++;
-            if (index > unresolvedRefs.length) {
-              loopFrame.breakLoop();
-              return;
-            }
-            const refs = unresolvedRefs[index - 1];
-            refs.refs = refs.refs.filter((ref) => !ref.isResolved());
-            if (refs.refs.length === 0) {
-              loopFrame.continueLoop();
-              return;
-            }
-            this.getPageViewItem(refs.spineIndex).then((viewItem) => {
-              if (!viewItem) {
-                loopFrame.continueLoop();
-                return;
-              }
-              // Save the page type and restore it after re-rendering page.
-              // This is necessary for named page with target-counter() to work.
-              // (fix for issue #1272)
-              const { currentPageType, previousPageType } =
-                viewItem.instance.styler.cascade;
-
-              // Save the scopes and restore them after re-rendering page.
-              // This is necessary for :blank page selector to work.
-              // (fix for issues #1131 and #1513)
-              const scopes = viewItem.instance.scopes;
-              viewItem.instance.scopes = {};
-
-              this.counterStore.pushPageCounters(refs.pageCounters);
-              this.counterStore.pushReferencesToSolve(refs.refs);
-              const pos = viewItem.layoutPositions[refs.pageIndex];
-
-              this.renderSinglePage(viewItem, pos).then((result) => {
-                viewItem.instance.styler.cascade.currentPageType =
-                  currentPageType;
-                viewItem.instance.styler.cascade.previousPageType =
-                  previousPageType;
-                viewItem.instance.scopes = scopes;
-                this.counterStore.popPageCounters();
-                this.counterStore.popReferencesToSolve();
-                const resultPosition = result.pageAndPosition.position;
-                if (
-                  resultPosition.spineIndex === page.spineIndex &&
-                  resultPosition.pageIndex === pageIndex
-                ) {
-                  page = result.pageAndPosition.page;
-                }
-                loopFrame.continueLoop();
-              });
-            });
-          })
-          .then(() => {
-            if (!page.container.parentElement) {
-              // page is replaced
-              page = viewItem.pages[pageIndex];
-            }
-            page.isLastPage =
-              !pos && viewItem.item.spineIndex === this.opf.spine.length - 1;
-            if (page.isLastPage) {
-              Asserts.assert(this.viewport);
-              this.counterStore.finishLastPage(this.viewport);
-            }
-            page.container.setAttribute(
-              "data-vivliostyle-page-index",
-              pageIndex,
-            );
-            page.container.setAttribute(
-              "data-vivliostyle-spine-index",
-              page.spineIndex,
-            );
-            frame.finish({
-              pageAndPosition: makePageAndPosition(page, pageIndex),
-              nextLayoutPosition: pos,
-            });
+      // If the position of the page break changed, re-layout the following
+      // page when needed.
+      this.maybeRelayoutFollowingPage(viewItem, pos, oldPage, page)
+        .thenAsync(() =>
+          this.resolveUnresolvedReferencesForPage(
+            viewItem,
+            page,
+            pageIndex,
+            pos,
+          ),
+        )
+        .then((resolvedPage) => {
+          frame.finish({
+            pageAndPosition: makePageAndPosition(resolvedPage, pageIndex),
+            nextLayoutPosition: pos,
           });
-      });
+        });
     });
     return frame.result();
   }
@@ -1857,7 +2327,6 @@ export class OPFView implements Vgen.CustomRendererFactory {
     if (pageIndex < 0) {
       seekOffset = position.offsetInItem;
 
-      // page with offset higher than seekOffset
       const seekOffsetPageIndex = Base.binarySearch(
         viewItem.layoutPositions.length,
         (pageIndex) => {
@@ -1937,6 +2406,22 @@ export class OPFView implements Vgen.CustomRendererFactory {
                 }
                 loopFrame.breakLoop();
               });
+            } else if (
+              pageIndex < viewItem.layoutPositions.length &&
+              !viewItem.pages[pageIndex]
+            ) {
+              // The page has a pending layout position that was never
+              // materialized (e.g. created during target-text resolution
+              // but blocked from cascading, or the spine was recreated
+              // during navigation). Render it now instead of polling
+              // forever waiting for a nonexistent concurrent task.
+              this.renderPage(normalizedPosition).then((result) => {
+                if (result) {
+                  resultPage = result.page;
+                  pageIndex = result.position.pageIndex;
+                }
+                loopFrame.breakLoop();
+              });
             } else {
               // Wait for the layout task and retry
               frame.sleep(100).then(() => {
@@ -2003,7 +2488,10 @@ export class OPFView implements Vgen.CustomRendererFactory {
             } else {
               resultPage = page;
               pageIndex = result.pageAndPosition.position.pageIndex;
-              viewItem.complete = true;
+              // Issue #1498: do not mark complete if layoutPositions and pages
+              // are out of sync. A pending layout position means additional
+              // page rendering is still required.
+              this.markSpineItemCompleteIfReady(viewItem);
               loopFrame.breakLoop();
             }
           });
@@ -2017,7 +2505,9 @@ export class OPFView implements Vgen.CustomRendererFactory {
           }
           this.renderSinglePage(viewItem, pos).then((result) => {
             if (!result.nextLayoutPosition) {
-              viewItem.complete = true;
+              // Issue #1498: keep complete=false while there are pending
+              // layout positions without corresponding rendered pages.
+              this.markSpineItemCompleteIfReady(viewItem);
             }
             frame.finish(result.pageAndPosition);
           });
@@ -2371,6 +2861,38 @@ export class OPFView implements Vgen.CustomRendererFactory {
     return frame.result();
   }
 
+  private resolveSemanticFootnoteNavigationOffset(
+    viewItem: OPFViewItem,
+    target: Element,
+  ): number | null {
+    if (!SemanticFootnote.isSemanticFootnoteElement(target)) {
+      return null;
+    }
+    const targetId = target.getAttribute("id");
+    if (!targetId) {
+      return null;
+    }
+    const targetURL = Base.resolveURL(`#${targetId}`, viewItem.xmldoc.url);
+    const anchors = viewItem.xmldoc.document.getElementsByTagName("a");
+    for (let i = 0; i < anchors.length; i++) {
+      const anchor = anchors.item(i);
+      if (!SemanticFootnote.isSemanticFootnoteNoterefElement(anchor)) {
+        continue;
+      }
+      const anchorHref =
+        anchor.getAttribute("href") ||
+        anchor.getAttributeNS(Base.NS.XLINK, "href");
+      if (!anchorHref) {
+        continue;
+      }
+      if (Base.resolveURL(anchorHref, viewItem.xmldoc.url) !== targetURL) {
+        continue;
+      }
+      return viewItem.xmldoc.getElementOffset(anchor);
+    }
+    return null;
+  }
+
   /**
    * Move to the page specified by the given URL and render it.
    */
@@ -2429,11 +2951,20 @@ export class OPFView implements Vgen.CustomRendererFactory {
           return;
         }
         const target = viewItem.xmldoc.getElement(href);
+        const semanticFootnoteOffset =
+          target &&
+          this.resolveSemanticFootnoteNavigationOffset(viewItem, target);
+        const targetOffset =
+          semanticFootnoteOffset != null
+            ? semanticFootnoteOffset
+            : target
+              ? viewItem.xmldoc.getElementOffset(target)
+              : 0;
         this.findPage(
           {
             spineIndex: item.spineIndex,
             pageIndex: -1,
-            offsetInItem: target ? viewItem.xmldoc.getElementOffset(target) : 0,
+            offsetInItem: targetOffset,
           },
           sync,
         ).thenFinish(frame);
@@ -2553,7 +3084,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
     if (!result) {
       result = this.viewport.document.createElement("object");
       if (data) {
-        result.setAttribute("data", data);
+        result.setAttribute("data", Base.resolveWptResourceURL(data));
       }
       result.setAttribute("data-adapt-process-children", "true");
     }
@@ -2729,11 +3260,36 @@ export class OPFView implements Vgen.CustomRendererFactory {
             ? previousViewItem.instance.pageNumberOffset +
               previousViewItem.pages.length
             : 0;
-          const counters = this.counterStore.currentPageCounters["page"];
-          pageCounterOffset =
-            !counters || !counters.length
-              ? pageNumberOffset
-              : counters[counters.length - 1];
+          // Derive the page counter offset from the previous spine's last
+          // rendered page counter start rather than the global
+          // currentPageCounters, which may reflect stale state from a later
+          // spine that has been destroyed and is being recreated (e.g. after
+          // target-text reflow expanded an earlier spine).
+          // Note: pageCounterStarts is captured BEFORE updatePageCounters()
+          // applies counter-increment, so +1 is added for the standard page
+          // auto-increment. Using pageCounterStarts instead of
+          // pageCountersById because the latter can be overwritten during
+          // resolve-scope cascade re-renders (finishPage), making it
+          // unreliable for offset derivation.
+          const prevLastPageCounterStarts =
+            previousViewItem &&
+            previousViewItem.pageCounterStarts[
+              previousViewItem.pages.length - 1
+            ];
+          const prevLastPageCounters =
+            prevLastPageCounterStarts && prevLastPageCounterStarts["page"];
+          if (prevLastPageCounters && prevLastPageCounters.length) {
+            // pageCounterStarts stores the counter BEFORE auto-increment,
+            // so add 1 for the page's own increment.
+            pageCounterOffset =
+              prevLastPageCounters[prevLastPageCounters.length - 1] + 1;
+          } else {
+            const counters = this.counterStore.currentPageCounters["page"];
+            pageCounterOffset =
+              !counters || !counters.length
+                ? pageNumberOffset
+                : counters[counters.length - 1];
+          }
 
           // Note: The "page" counter value differs to the "page-number" value
           // if the "page" counter has been reset by counter-reset/increment.
@@ -2785,6 +3341,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
           pageCounterStarts: [],
         };
         this.spineItems[spineIndex] = viewItem;
+
         frame.finish(viewItem);
         loadingContinuations.forEach((c) => {
           c.schedule(viewItem);

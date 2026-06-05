@@ -3,6 +3,36 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [2.43.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.42.1...v2.43.0) (2026-05-22)
+
+**Note:** Version bump only for package @vivliostyle/viewer
+
+## [2.42.1](https://github.com/vivliostyle/vivliostyle.js/compare/v2.42.0...v2.42.1) (2026-05-13)
+
+### Bug Fixes
+
+- Improve Local dev server and WPT test URLs ([8c2bb0e](https://github.com/vivliostyle/vivliostyle.js/commit/8c2bb0ed22d1420e009ef32faa9d491a0e3c2ac0))
+
+# [2.42.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.41.0...v2.42.0) (2026-04-25)
+
+### Bug Fixes
+
+- Improve error messages for load failures and enable CORS on dev server ([58aefeb](https://github.com/vivliostyle/vivliostyle.js/commit/58aefeba711d8314488dcfdf4366ae6aa4cf9085))
+
+# [2.41.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.40.0...v2.41.0) (2026-04-11)
+
+### Features
+
+- Add Vivliostyle.js layout regression test tool ([2f007af](https://github.com/vivliostyle/vivliostyle.js/commit/2f007af96e3cba5739df71450a6dbfbcfcb49bae))
+- Add cmykReserveMap for pre-registering RGB to CMYK mappings ([90cd706](https://github.com/vivliostyle/vivliostyle.js/commit/90cd706a34e1071a7de6efd6c39fca5da4891fb3))
+
+### Bug Fixes
+
+- update react tsconfig and viewer computed types ([e66203c](https://github.com/vivliostyle/vivliostyle.js/commit/e66203ce904d1094a2c7ee05f4247c763636e0bb))
+- **viewer:** skip watch when dev server already running ([9c04a3e](https://github.com/vivliostyle/vivliostyle.js/commit/9c04a3e887d3e06cb75619aa5a004a47266cdf41))
+- prevent duplicate dev server startup ([1d8d0f3](https://github.com/vivliostyle/vivliostyle.js/commit/1d8d0f3011f2dfd3f5e65d10d111e1c383850b8f))
+- **viewer:** remove deprecated css causing firefox devtools warnings ([b4746e9](https://github.com/vivliostyle/vivliostyle.js/commit/b4746e95687995268536e80039845bf84a6223f3))
+
 # [2.40.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.39.1...v2.40.0) (2026-01-11)
 
 **Note:** Version bump only for package @vivliostyle/viewer

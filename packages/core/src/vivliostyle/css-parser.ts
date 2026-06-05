@@ -20,6 +20,7 @@
  */
 import * as Base from "./base";
 import * as Css from "./css";
+import { expandNesting } from "./css-nesting";
 import * as CssTokenizer from "./css-tokenizer";
 import * as Exprs from "./exprs";
 import * as Logging from "./logging";
@@ -71,6 +72,8 @@ export enum StylesheetFlavor {
   AUTHOR = "Author",
 }
 
+export type AttributeSelectorCaseSensitivity = "i" | "s" | null;
+
 export class ParserHandler implements CssTokenizer.TokenizerHandler {
   flavor: StylesheetFlavor;
 
@@ -103,10 +106,11 @@ export class ParserHandler implements CssTokenizer.TokenizerHandler {
   idSelector(id: string): void {}
 
   attributeSelector(
-    ns: string,
+    ns: string | null,
     name: string,
     op: TokenType,
     value: string | null,
+    modifier?: AttributeSelectorCaseSensitivity,
   ): void {}
 
   descendantSelector(): void {}
@@ -288,12 +292,13 @@ export class DispatchParserHandler extends ParserHandler {
   }
 
   override attributeSelector(
-    ns: string,
+    ns: string | null,
     name: string,
     op: TokenType,
     value: string | null,
+    modifier?: AttributeSelectorCaseSensitivity,
   ): void {
-    this.slave.attributeSelector(ns, name, op, value);
+    this.slave.attributeSelector(ns, name, op, value, modifier);
   }
 
   override descendantSelector(): void {
@@ -888,6 +893,7 @@ export class Parser {
         if (token.type !== TokenType.EOF) {
           this.handler.error("E_CSS_MISMATCHED_C_PAR", token);
           this.actions = actionsErrorDecl;
+          return null;
         }
       }
       const func = new Css.Func(
@@ -899,7 +905,7 @@ export class Parser {
       // Check invalid var()
       if (func.name === "var") {
         const name = func.values[0] instanceof Css.Ident && func.values[0].name;
-        if (!Css.isCustomPropName(name) || name === this.propName) {
+        if (!Css.isCustomPropName(name)) {
           this.handler.error(`E_CSS_INVALID_VAR ${func.toString()}`, token);
           this.actions = actionsErrorDecl;
         }
@@ -1168,10 +1174,13 @@ export class Parser {
     }
     tokenizer.consume();
     const endPosition = tokenN.position;
+    const rawValue = tokenizer.input.substring(startPosition, endPosition);
     const value =
       isFunc && name === "selector" && commaCount > 0
         ? "" // selector() with multiple selectors doesn't work
-        : tokenizer.input.substring(startPosition, endPosition).trim();
+        : Css.isCustomPropName(name)
+          ? rawValue
+          : rawValue.trim();
     const supportsTest = new Exprs.SupportsTest(
       this.handler.getScope(),
       name,
@@ -1198,6 +1207,28 @@ export class Parser {
           break;
         default:
           return arr;
+      }
+      this.tokenizer.consume();
+    }
+  }
+
+  skipPseudoFunctionContents(): boolean {
+    let depth = 0;
+    while (true) {
+      const token = this.tokenizer.token();
+      switch (token.type) {
+        case TokenType.EOF:
+          return false;
+        case TokenType.C_PAR:
+          if (depth === 0) {
+            return true;
+          }
+          depth--;
+          break;
+        case TokenType.O_PAR:
+        case TokenType.FUNC:
+          depth++;
+          break;
       }
       this.tokenizer.consume();
     }
@@ -1690,12 +1721,14 @@ export class Parser {
                   continue;
                 case "lang":
                 case "href-epub-type":
+                case "href-role-type":
                   token = tokenizer.token();
                   if (token.type === TokenType.IDENT) {
                     params = [token.text];
                     tokenizer.consume();
                     if (
-                      text === "href-epub-type" &&
+                      (text === "href-epub-type" ||
+                        text === "href-role-type") &&
                       tokenizer.token().type === TokenType.COMMA
                     ) {
                       tokenizer.consume();
@@ -1775,8 +1808,10 @@ export class Parser {
                     break;
                   }
                 default:
-                  // TODO
-                  params = this.readPseudoParams();
+                  params = [];
+                  if (!this.skipPseudoFunctionContents()) {
+                    break pseudoclassType;
+                  }
               }
               token = tokenizer.token();
               if (token.type == TokenType.C_PAR) {
@@ -1846,7 +1881,7 @@ export class Parser {
           }
 
         // fall through
-        case Action.SELECTOR_ATTR:
+        case Action.SELECTOR_ATTR: {
           tokenizer.consume();
           token = tokenizer.token();
           if (token.type == TokenType.IDENT) {
@@ -1900,9 +1935,10 @@ export class Parser {
               break;
             case TokenType.C_BRK:
               handler.attributeSelector(
-                ns as string,
+                ns as string | null,
                 text as string,
                 TokenType.EOF,
+                null,
                 null,
               );
               if (parsingFunctionParam) {
@@ -1917,18 +1953,31 @@ export class Parser {
               handler.error("E_CSS_ATTR_OP_EXPECTED", token);
               continue;
           }
+          const attributeName = text as string;
+          let valueModifier: AttributeSelectorCaseSensitivity = null;
           switch (token.type) {
             case TokenType.IDENT:
-            case TokenType.STR:
-              handler.attributeSelector(
-                ns as string,
-                text as string,
-                num,
-                token.text,
-              );
+            case TokenType.STR: {
+              const attributeValue = token.text;
               tokenizer.consume();
               token = tokenizer.token();
+              if (token.type == TokenType.IDENT) {
+                const modifier = token.text.toLowerCase();
+                if (modifier == "i" || modifier == "s") {
+                  valueModifier = modifier as AttributeSelectorCaseSensitivity;
+                  tokenizer.consume();
+                  token = tokenizer.token();
+                }
+              }
+              handler.attributeSelector(
+                ns as string | null,
+                attributeName,
+                num,
+                attributeValue,
+                valueModifier,
+              );
               break;
+            }
             default:
               this.actions = actionsErrorSelector;
               handler.error("E_CSS_ATTR_VAL_EXPECTED", token);
@@ -1946,6 +1995,7 @@ export class Parser {
           }
           tokenizer.consume();
           continue;
+        }
         case Action.SELECTOR_CHILD:
           handler.childSelector();
           this.actions = actionsSelectorCont;
@@ -2666,6 +2716,17 @@ export class Parser {
           tokenizer.consume();
           continue;
         case Action.ERROR_SEMICOL:
+          if (
+            parsingFunctionParam &&
+            this.errorBrackets.length == 0 &&
+            token.type == TokenType.COMMA
+          ) {
+            handler.nextSelector();
+            this.actions = actionsSelectorStart;
+            selectorStartPosition = token.position + 1;
+            tokenizer.consume();
+            continue;
+          }
           if (this.errorBrackets.length == 0) {
             this.actions = actionsBase;
           }
@@ -2682,6 +2743,57 @@ export class Parser {
             return false;
           }
           if (parsingFunctionParam) {
+            if (this.actions === actionsErrorSelector) {
+              switch (token.type) {
+                case TokenType.COMMA:
+                  if (this.errorBrackets.length == 0) {
+                    handler.nextSelector();
+                    selectorStartPosition = token.position + 1;
+                    this.actions = actionsSelectorStart;
+                  }
+                  tokenizer.consume();
+                  continue;
+                case TokenType.C_PAR:
+                  if (this.errorBrackets.length == 0) {
+                    handler.endFuncWithSelector();
+                    tokenizer.consume();
+                    return true;
+                  }
+                  if (
+                    this.errorBrackets.length > 0 &&
+                    this.errorBrackets[this.errorBrackets.length - 1] ==
+                      token.type
+                  ) {
+                    this.errorBrackets.pop();
+                  }
+                  tokenizer.consume();
+                  continue;
+                case TokenType.O_BRC:
+                case TokenType.O_BRK:
+                case TokenType.O_PAR:
+                  this.errorBrackets.push(token.type + 1);
+                  tokenizer.consume();
+                  continue;
+                case TokenType.FUNC:
+                  this.errorBrackets.push(TokenType.C_PAR);
+                  tokenizer.consume();
+                  continue;
+                case TokenType.C_BRC:
+                case TokenType.C_BRK:
+                  if (
+                    this.errorBrackets.length > 0 &&
+                    this.errorBrackets[this.errorBrackets.length - 1] ==
+                      token.type
+                  ) {
+                    this.errorBrackets.pop();
+                  }
+                  tokenizer.consume();
+                  continue;
+                default:
+                  tokenizer.consume();
+                  continue;
+              }
+            }
             switch (token.type) {
               case TokenType.COMMA:
               case TokenType.C_PAR:
@@ -2804,6 +2916,33 @@ export function parseStylesheet(
   classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
+  const parserHandler = normalizeParserHandler(handler);
+  const expandedText = expandNesting(tokenizer.input);
+  if (expandedText !== tokenizer.input) {
+    return parseStylesheetInternal(
+      new CssTokenizer.Tokenizer(expandedText, parserHandler),
+      parserHandler,
+      baseURL,
+      classes,
+      media,
+    );
+  }
+  return parseStylesheetInternal(
+    tokenizer,
+    parserHandler,
+    baseURL,
+    classes,
+    media,
+  );
+}
+
+function parseStylesheetInternal(
+  tokenizer: CssTokenizer.Tokenizer,
+  handler: ParserHandler,
+  baseURL: string,
+  classes: string | null,
+  media: string | null,
+): Task.Result<boolean> {
   const frame: Task.Frame<boolean> = Task.newFrame("parseStylesheet");
   const parser = new Parser(actionsBase, tokenizer, handler, baseURL);
   let condition: Css.Expr = null;
@@ -2868,17 +3007,40 @@ export function parseStylesheetFromText(
   classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
+  const parserHandler = normalizeParserHandler(handler);
   return Task.handle(
     "parseStylesheetFromText",
     (frame) => {
-      const tok = new CssTokenizer.Tokenizer(text, handler);
-      parseStylesheet(tok, handler, baseURL, classes, media).thenFinish(frame);
+      const tok = new CssTokenizer.Tokenizer(text, parserHandler);
+      parseStylesheet(tok, parserHandler, baseURL, classes, media).thenFinish(
+        frame,
+      );
     },
     (frame, err) => {
       Logging.logger.warn(err, `Failed to parse stylesheet text: ${text}`);
       frame.finish(false);
     },
   );
+}
+
+function normalizeParserHandler(handler: ParserHandler): ParserHandler {
+  if (handler instanceof DispatchParserHandler) {
+    return handler;
+  }
+  if (handler instanceof SlaveParserHandler) {
+    if (handler.owner) {
+      return handler.owner;
+    }
+    // Some parser entry points are passed a top-level slave handler. Wrap it in
+    // a dispatch handler once so selector functions parse through the normal
+    // dispatch path and the slave retains a stable owner reference.
+    const dispatchHandler = new DispatchParserHandler();
+    dispatchHandler.flavor = handler.flavor;
+    dispatchHandler.slave = handler;
+    handler.owner = dispatchHandler;
+    return dispatchHandler;
+  }
+  return handler;
 }
 
 export function parseStylesheetFromURL(

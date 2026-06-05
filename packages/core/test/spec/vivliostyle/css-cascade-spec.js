@@ -1,5 +1,6 @@
 /**
  * Copyright 2017 Daishinsha Inc.
+ * Copyright 2026 Vivliostyle Foundation
  *
  * Vivliostyle.js is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
@@ -17,6 +18,9 @@
 
 import * as adapt_css from "../../../src/vivliostyle/css";
 import * as adapt_csscasc from "../../../src/vivliostyle/css-cascade";
+import * as adapt_cssvalid from "../../../src/vivliostyle/css-validator";
+import * as adapt_exprs from "../../../src/vivliostyle/exprs";
+import * as adapt_cssparse from "../../../src/vivliostyle/css-parser";
 import * as adapt_csstok from "../../../src/vivliostyle/css-tokenizer";
 import * as vivliostyle_plugin from "../../../src/vivliostyle/plugin";
 import * as vivliostyle_test_util_mock_plugin from "../../util/mock/vivliostyle/plugin-mock";
@@ -874,6 +878,24 @@ describe("css-cascade", function () {
           expect(action.ns).toBe("ns");
           expect(action.name).toBe("foo");
           expect(action.value).toBe("bar");
+          expect(action.caseSensitivity).toBeNull();
+        });
+
+        it("stores the attribute selector modifier when present", function () {
+          handler.attributeSelector(
+            "ns",
+            "foo",
+            adapt_csstok.TokenType.EQ,
+            "bar",
+            "i",
+          );
+
+          expect(handler.chain.length).toBe(1);
+          var action = handler.chain[0];
+          expect(action).toEqual(
+            jasmine.any(adapt_csscasc.CheckAttributeEqAction),
+          );
+          expect(action.caseSensitivity).toBe("i");
         });
       });
 
@@ -1000,6 +1022,42 @@ describe("css-cascade", function () {
           expect("a-bar-b".match(regexp)).toBeFalsy();
         });
 
+        it("creates an ASCII-case-insensitive regexp when the i modifier is passed", function () {
+          handler.attributeSelector(
+            "ns",
+            "foo",
+            adapt_csstok.TokenType.HAT_EQ,
+            "bar",
+            "i",
+          );
+
+          expect(handler.chain.length).toBe(1);
+          var action = handler.chain[0];
+          expect(action).toEqual(
+            jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
+          );
+          expect("BAR".match(action.regexp)).toBeTruthy();
+          expect("Bar-baz".match(action.regexp)).toBeTruthy();
+        });
+
+        it("does not use Unicode case folding for the i modifier", function () {
+          handler.attributeSelector(
+            "ns",
+            "foo",
+            adapt_csstok.TokenType.HAT_EQ,
+            "ä",
+            "i",
+          );
+
+          expect(handler.chain.length).toBe(1);
+          var action = handler.chain[0];
+          expect(action).toEqual(
+            jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
+          );
+          expect("äbc".match(action.regexp)).toBeTruthy();
+          expect("Äbc".match(action.regexp)).toBeFalsy();
+        });
+
         it("represents nothing when the value is an empty string", function () {
           handler.attributeSelector(
             "ns",
@@ -1105,6 +1163,453 @@ describe("css-cascade", function () {
         expect(action).toEqual(jasmine.any(adapt_csscasc.CheckConditionAction));
         expect(action.condition).toBe("");
       });
+    });
+  });
+
+  describe("CascadeInstance", function () {
+    describe("attribute selectors", function () {
+      it("matches XML attribute names case-sensitively", function () {
+        var doc = new DOMParser().parseFromString(
+          "<root data-Case='value' />",
+          "text/xml",
+        );
+        var element = doc.documentElement;
+        var action = new adapt_csscasc.CheckAttributePresentAction(
+          "",
+          "data-Case",
+        );
+        var chained = (action.chained = jasmine.createSpyObj("chained", [
+          "apply",
+        ]));
+
+        action.apply({ currentElement: element });
+        expect(chained.apply).toHaveBeenCalled();
+
+        action = new adapt_csscasc.CheckAttributePresentAction("", "data-case");
+        chained = action.chained = jasmine.createSpyObj("chained", ["apply"]);
+
+        action.apply({ currentElement: element });
+        expect(chained.apply).not.toHaveBeenCalled();
+      });
+
+      it("matches attribute values ASCII-case-insensitively with the i flag", function () {
+        var doc = new DOMParser().parseFromString(
+          "<!DOCTYPE html><html><body><div data-state='OPEN'></div></body></html>",
+          "text/html",
+        );
+        var element = doc.body.firstElementChild;
+        var action = new adapt_csscasc.CheckAttributeEqAction(
+          "",
+          "data-state",
+          "open",
+          "i",
+        );
+        var chained = (action.chained = jasmine.createSpyObj("chained", [
+          "apply",
+        ]));
+
+        action.apply({ currentElement: element });
+        expect(chained.apply).toHaveBeenCalled();
+      });
+
+      it("does not use Unicode case folding for the i flag", function () {
+        var doc = new DOMParser().parseFromString(
+          "<!DOCTYPE html><html><body><div data-state='Ä'></div></body></html>",
+          "text/html",
+        );
+        var element = doc.body.firstElementChild;
+        var action = new adapt_csscasc.CheckAttributeEqAction(
+          "",
+          "data-state",
+          "ä",
+          "i",
+        );
+        var chained = (action.chained = jasmine.createSpyObj("chained", [
+          "apply",
+        ]));
+
+        action.apply({ currentElement: element });
+        expect(chained.apply).not.toHaveBeenCalled();
+      });
+
+      it("keeps exact attribute value matching with the s flag", function () {
+        var doc = new DOMParser().parseFromString(
+          "<!DOCTYPE html><html><body><div data-state='OPEN'></div></body></html>",
+          "text/html",
+        );
+        var element = doc.body.firstElementChild;
+        var action = new adapt_csscasc.CheckAttributeEqAction(
+          "",
+          "data-state",
+          "open",
+          "s",
+        );
+        var chained = (action.chained = jasmine.createSpyObj("chained", [
+          "apply",
+        ]));
+
+        action.apply({ currentElement: element });
+        expect(chained.apply).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("markerAllowedProps", function () {
+      it("includes text-orientation for vertical writing mode support", function () {
+        expect(adapt_csscasc.CascadeInstance.markerAllowedProps).toContain(
+          "text-orientation",
+        );
+      });
+
+      it("includes all required marker properties", function () {
+        const expectedProps = [
+          "color",
+          "font-family",
+          "font-size",
+          "font-style",
+          "font-weight",
+          "font-variant",
+          "unicode-bidi",
+          "direction",
+          "white-space",
+          "text-transform",
+          "text-combine-upright",
+          "text-orientation",
+        ];
+        expectedProps.forEach((prop) => {
+          expect(adapt_csscasc.CascadeInstance.markerAllowedProps).toContain(
+            prop,
+          );
+        });
+      });
+    });
+  });
+
+  describe("VarFilterVisitor regression coverage", function () {
+    function parseValue(cssText) {
+      return adapt_cssparse.parseValue(
+        new adapt_exprs.LexicalScope(null),
+        new adapt_csstok.Tokenizer(cssText, null),
+        "",
+      );
+    }
+
+    function createCascadeValue(cssText) {
+      return new adapt_csscasc.CascadeValue(parseValue(cssText), 1);
+    }
+
+    function applyVarFilter(style, element, ancestorEntries, validatorSet) {
+      var styleMap = new Map();
+      styleMap.set(element, style);
+      (ancestorEntries || []).forEach(function (entry) {
+        styleMap.set(entry.element, entry.style);
+      });
+
+      validatorSet = validatorSet || {
+        getShorthand: function () {
+          return null;
+        },
+        defaultValues: {},
+      };
+
+      var styler = {
+        root: element,
+        validatorSet: validatorSet,
+        scope: validatorSet.scope,
+        getStyle: function (currentElement) {
+          return styleMap.get(currentElement) || null;
+        },
+      };
+      var cascadeInstance = {
+        context: {},
+      };
+      cascadeInstance.applyVarFilter =
+        adapt_csscasc.CascadeInstance.prototype.applyVarFilter;
+      cascadeInstance.applyVarFilter([style], styler, element);
+    }
+
+    it("keeps self-referential custom properties guaranteed-invalid instead of using their fallback", function () {
+      var element = document.createElement("div");
+      var style = {
+        "--a": createCascadeValue("var(--a, red)"),
+        color: createCascadeValue("var(--a, green)"),
+      };
+
+      applyVarFilter(style, element);
+
+      expect(style["--a"].value).toBe(adapt_css.ident.initial);
+      expect(style.color.value.toString()).toBe("green");
+    });
+
+    it("keeps cross-cyclic custom properties guaranteed-invalid regardless of declaration order", function () {
+      [
+        {
+          "--a": createCascadeValue("var(--b)"),
+          "--b": createCascadeValue("var(--a, green)"),
+          color: createCascadeValue("var(--b, blue)"),
+        },
+        {
+          "--b": createCascadeValue("var(--a, green)"),
+          "--a": createCascadeValue("var(--b)"),
+          color: createCascadeValue("var(--b, blue)"),
+        },
+      ].forEach(function (style) {
+        var element = document.createElement("div");
+
+        applyVarFilter(style, element);
+
+        expect(style["--a"].value).toBe(adapt_css.ident.initial);
+        expect(style["--b"].value).toBe(adapt_css.ident.initial);
+        expect(style.color.value.toString()).toBe("blue");
+      });
+    });
+
+    it("keeps fallback available for properties that only reference a cyclic custom property", function () {
+      var element = document.createElement("div");
+      var style = {
+        "--a": createCascadeValue("var(--b)"),
+        "--b": createCascadeValue("var(--a)"),
+        "--x": createCascadeValue("var(--a, green)"),
+        color: createCascadeValue("var(--x, blue)"),
+      };
+
+      applyVarFilter(style, element);
+
+      expect(style["--a"].value).toBe(adapt_css.ident.initial);
+      expect(style["--b"].value).toBe(adapt_css.ident.initial);
+      expect(style["--x"].value.toString()).toBe("green");
+      expect(style.color.value.toString()).toBe("green");
+    });
+
+    it("treats fallback references as part of the custom property dependency cycle", function () {
+      var element = document.createElement("div");
+      var style = {
+        "--a": createCascadeValue("var(--b, var(--c))"),
+        "--b": createCascadeValue("green"),
+        "--c": createCascadeValue("var(--a)"),
+        color: createCascadeValue("var(--a, blue)"),
+      };
+
+      applyVarFilter(style, element);
+
+      expect(style["--a"].value).toBe(adapt_css.ident.initial);
+      expect(style["--c"].value).toBe(adapt_css.ident.initial);
+      expect(style.color.value.toString()).toBe("blue");
+    });
+
+    it("resolves ordinary properties after marking cyclic custom properties invalid", function () {
+      var element = document.createElement("div");
+      var style = {
+        color: createCascadeValue("var(--a, blue)"),
+        "--a": createCascadeValue("var(--b, var(--c))"),
+        "--b": createCascadeValue("green"),
+        "--c": createCascadeValue("var(--a)"),
+      };
+
+      applyVarFilter(style, element);
+
+      expect(style["--a"].value).toBe(adapt_css.ident.initial);
+      expect(style["--c"].value).toBe(adapt_css.ident.initial);
+      expect(style.color.value.toString()).toBe("blue");
+    });
+
+    it("propagates fallback-cycle membership back to the calling custom property", function () {
+      var element = document.createElement("div");
+      var style = {
+        "--a": createCascadeValue("var(--b, red)"),
+        "--b": createCascadeValue("var(--c, var(--a))"),
+        "--c": createCascadeValue("green"),
+        color: createCascadeValue("var(--a, blue)"),
+      };
+
+      applyVarFilter(style, element);
+
+      expect(style["--a"].value).toBe(adapt_css.ident.initial);
+      expect(style["--b"].value).toBe(adapt_css.ident.initial);
+      expect(style.color.value.toString()).toBe("blue");
+    });
+
+    it("keeps fallback-only cycle dependencies invalid even when the substituted branch is otherwise valid", function () {
+      var element = document.createElement("div");
+      var style = {
+        "--a": createCascadeValue("var(--c, var(--b))"),
+        "--b": createCascadeValue("var(--a)"),
+        "--c": createCascadeValue("red"),
+        color: createCascadeValue("var(--a, blue)"),
+      };
+
+      applyVarFilter(style, element);
+
+      expect(style["--a"].value).toBe(adapt_css.ident.initial);
+      expect(style["--b"].value).toBe(adapt_css.ident.initial);
+      expect(style.color.value.toString()).toBe("blue");
+    });
+
+    it("preserves originating element custom property context for pseudo-elements", function () {
+      var element = document.createElement("div");
+      var beforeStyle = {
+        color: createCascadeValue("var(--x)"),
+        "--x": createCascadeValue("var(--y)"),
+      };
+      var style = {
+        "--y": createCascadeValue("green"),
+        _pseudos: {
+          before: beforeStyle,
+        },
+      };
+
+      applyVarFilter(style, element);
+
+      expect(beforeStyle["--x"].value.toString()).toBe("green");
+      expect(beforeStyle.color.value.toString()).toBe("green");
+    });
+
+    it("does not treat owner-element fallback references as pseudo-element cycles", function () {
+      var element = document.createElement("div");
+      var style = {
+        _pseudos: {
+          before: {
+            "--a": createCascadeValue("var(--c, var(--b))"),
+            color: createCascadeValue("var(--a, blue)"),
+          },
+        },
+        "--b": createCascadeValue("var(--a, green)"),
+      };
+
+      applyVarFilter(style, element);
+
+      expect(style["--b"].value.toString()).toBe("green");
+      expect(style._pseudos.before["--a"].value.toString()).toBe("green");
+      expect(style._pseudos.before.color.value.toString()).toBe("green");
+    });
+
+    it("uses fallback when a custom property references an invalid inherited variable", function () {
+      var body = document.createElement("body");
+      var element = document.createElement("p");
+      body.appendChild(element);
+      var bodyStyle = {
+        "--c": createCascadeValue("var(--a)"),
+      };
+      var style = {
+        "--a": createCascadeValue("var(--b)"),
+        "--b": createCascadeValue("var(--c, green)"),
+        color: createCascadeValue("var(--a)"),
+      };
+
+      applyVarFilter(style, element, [{ element: body, style: bodyStyle }]);
+
+      expect(style["--b"].value.toString()).toBe("green");
+      expect(style["--a"].value.toString()).toBe("green");
+      expect(style.color.value.toString()).toBe("green");
+    });
+
+    it("expands all with var-substituted CSS-wide values into browser-backed longhands", function () {
+      var element = document.createElement("div");
+      var validatorSet = adapt_cssvalid.baseValidatorSet();
+      var style = {
+        all: createCascadeValue("var(--reset, initial)"),
+        transition: createCascadeValue("opacity 1s ease"),
+      };
+
+      applyVarFilter(style, element, null, validatorSet);
+
+      expect(style.all).toBeUndefined();
+      expect(style.transition).toBeDefined();
+      expect(style["transition-property"]).toBeDefined();
+      expect(style["transition-duration"]).toBeDefined();
+      expect(style["transition-property"].value).toBe(adapt_css.ident.initial);
+      expect(style["transition-duration"].value).toBe(adapt_css.ident.initial);
+    });
+  });
+
+  describe("AttrValueFilterVisitor regression coverage", function () {
+    function parseValue(cssText) {
+      return adapt_cssparse.parseValue(
+        new adapt_exprs.LexicalScope(null),
+        new adapt_csstok.Tokenizer(cssText, null),
+        "",
+      );
+    }
+
+    function createCascadeValue(cssText) {
+      return new adapt_csscasc.CascadeValue(parseValue(cssText), 1);
+    }
+
+    function applyAttrFilter(style, element, validatorSet) {
+      validatorSet = validatorSet || adapt_cssvalid.baseValidatorSet();
+
+      var styler = {
+        root: element,
+        validatorSet: validatorSet,
+        scope: validatorSet.scope,
+        getStyle: function () {
+          return style;
+        },
+      };
+      var cascadeInstance = {
+        currentStyle: style,
+      };
+      cascadeInstance.applyAttrFilter =
+        adapt_csscasc.CascadeInstance.prototype.applyAttrFilter;
+      cascadeInstance.applyAttrFilterInner =
+        adapt_csscasc.CascadeInstance.prototype.applyAttrFilterInner;
+      cascadeInstance.applyAttrFilter(element, styler);
+    }
+
+    it("treats missing typed attr() without fallback as unset", function () {
+      var element = document.createElement("div");
+      var style = {
+        opacity: createCascadeValue("attr(data-opacity number)"),
+      };
+
+      applyAttrFilter(style, element);
+
+      expect(style.opacity.value).toBe(adapt_css.ident.unset);
+    });
+
+    it("invalidates attr() fallback when the property validator rejects it", function () {
+      var element = document.createElement("div");
+      element.setAttribute("data-opacity", "not-a-number");
+      var style = {
+        opacity: createCascadeValue("attr(data-opacity number, red)"),
+      };
+
+      applyAttrFilter(style, element);
+
+      expect(style.opacity.value).toBe(adapt_css.ident.unset);
+    });
+
+    it("invalidates the whole property when nested attr() makes the final value invalid", function () {
+      var element = document.createElement("div");
+      var style = {
+        transform: createCascadeValue("translateX(attr(data-x px, red))"),
+      };
+
+      applyAttrFilter(style, element);
+
+      expect(style.transform.value).toBe(adapt_css.ident.unset);
+    });
+
+    it("keeps the whole property when nested attr() fallback yields a valid value", function () {
+      var element = document.createElement("div");
+      var style = {
+        transform: createCascadeValue("translateX(attr(data-x px, 5px))"),
+      };
+
+      applyAttrFilter(style, element);
+
+      expect(style.transform.value.toString()).toBe("translatex(5px)");
+    });
+
+    it("trims attribute whitespace before appending unit keywords", function () {
+      var element = document.createElement("div");
+      element.setAttribute("data-size", "50 ");
+      var style = {
+        "font-size": createCascadeValue("attr(data-size px, 10px)"),
+      };
+
+      applyAttrFilter(style, element);
+
+      expect(style["font-size"].value.toString()).toBe("50px");
     });
   });
 });

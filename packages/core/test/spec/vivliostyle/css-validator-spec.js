@@ -1,5 +1,6 @@
 /**
  * Copyright 2017 Daishinsha Inc.
+ * Copyright 2026 Vivliostyle Foundation
  *
  * Vivliostyle.js is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
@@ -16,12 +17,358 @@
  */
 
 import * as adapt_csscasc from "../../../src/vivliostyle/css-cascade";
+import * as adapt_css from "../../../src/vivliostyle/css";
+import * as adapt_exprs from "../../../src/vivliostyle/exprs";
 import * as adapt_cssparse from "../../../src/vivliostyle/css-parser";
 import * as adapt_cssvalid from "../../../src/vivliostyle/css-validator";
 import * as adapt_task from "../../../src/vivliostyle/task";
 import * as vivliostyle_logging from "../../../src/vivliostyle/logging";
 
 describe("css-validator", function () {
+  function parseCascade(cssText, done, callback) {
+    var handler = new adapt_csscasc.CascadeParserHandler(
+      null,
+      null,
+      null,
+      null,
+      null,
+      adapt_cssvalid.baseValidatorSet(),
+      true,
+    );
+    handler.startStylesheet(adapt_cssparse.StylesheetFlavor.AUTHOR);
+    adapt_task.start(function () {
+      adapt_cssparse
+        .parseStylesheetFromText(cssText, handler, null, null, null)
+        .then(function (result) {
+          expect(result).toBe(true);
+          callback(handler.finish(), handler);
+          done();
+        });
+      return adapt_task.newResult(true);
+    });
+  }
+
+  describe("background shorthand regression", function () {
+    it("keeps color in cascade for a semicolonless declaration", function (done) {
+      parseCascade("h1 { color: blue }", done, function (cascade) {
+        expect(cascade.tags.h1).toBeDefined();
+        expect(cascade.tags.h1.style.color).toBeDefined();
+      });
+    });
+
+    it("keeps background-color in cascade for a semicolonless declaration", function (done) {
+      parseCascade("ul { background: green }", done, function (cascade) {
+        expect(cascade.tags.ul).toBeDefined();
+        expect(cascade.tags.ul.style["background-color"]).toBeDefined();
+      });
+    });
+
+    it("keeps background-color in cascade when semicolonless declarations precede nested rules", function (done) {
+      parseCascade(
+        "ul { background: green } li:has(strong) { display: none; :has(> &) { background: red; } }",
+        done,
+        function (cascade) {
+          expect(cascade.tags.ul).toBeDefined();
+          expect(cascade.tags.ul.style["background-color"]).toBeDefined();
+        },
+      );
+    });
+  });
+
+  describe("browser shorthand expansion", function () {
+    it("expands place-items into longhands", function (done) {
+      parseCascade(
+        "div { place-items: center start; }",
+        done,
+        function (cascade) {
+          expect(cascade.tags.div).toBeDefined();
+          expect(cascade.tags.div.style["align-items"]).toBeDefined();
+          expect(cascade.tags.div.style["justify-items"]).toBeDefined();
+          expect(cascade.tags.div.style["align-items"].value.toString()).toBe(
+            "center",
+          );
+          expect(cascade.tags.div.style["justify-items"].value.toString()).toBe(
+            "start",
+          );
+        },
+      );
+    });
+
+    it("preserves cascade order when longhands override browser shorthand expansion", function (done) {
+      parseCascade(
+        "div { place-items: center start; justify-items: stretch; }",
+        done,
+        function (cascade) {
+          expect(cascade.tags.div).toBeDefined();
+          expect(cascade.tags.div.style["align-items"]).toBeDefined();
+          expect(cascade.tags.div.style["justify-items"]).toBeDefined();
+          expect(cascade.tags.div.style["align-items"].value.toString()).toBe(
+            "center",
+          );
+          expect(cascade.tags.div.style["justify-items"].value.toString()).toBe(
+            "stretch",
+          );
+        },
+      );
+    });
+
+    it("propagates CSS-wide values from browser shorthands to their longhands", function (done) {
+      parseCascade("div { place-items: initial; }", done, function (cascade) {
+        expect(cascade.tags.div).toBeDefined();
+        expect(cascade.tags.div.style["align-items"]).toBeDefined();
+        expect(cascade.tags.div.style["justify-items"]).toBeDefined();
+        expect(cascade.tags.div.style["align-items"].value).toBe(
+          adapt_css.ident.initial,
+        );
+        expect(cascade.tags.div.style["justify-items"].value).toBe(
+          adapt_css.ident.initial,
+        );
+      });
+    });
+
+    it("caches non-shorthand properties after the first browser probe miss", function () {
+      var validatorSet = adapt_cssvalid.baseValidatorSet();
+      spyOn(validatorSet, "expandBrowserShorthand").and.callThrough();
+
+      expect(validatorSet.getShorthand("color", "red")).toBeNull();
+      expect(validatorSet.getShorthand("color", "blue")).toBeNull();
+      expect(validatorSet.expandBrowserShorthand).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not cache a browser shorthand miss for unresolved var values", function () {
+      var validatorSet = adapt_cssvalid.baseValidatorSet();
+      spyOn(validatorSet, "expandBrowserShorthand").and.callFake(
+        function (name, value) {
+          if (name !== "place-items") {
+            return null;
+          }
+          if (value === "var(--items)") {
+            return null;
+          }
+          if (value === "center start") {
+            return {
+              propList: ["align-items", "justify-items"],
+              values: {
+                "align-items": "center",
+                "justify-items": "start",
+              },
+            };
+          }
+          return null;
+        },
+      );
+
+      expect(
+        validatorSet.getShorthand("place-items", "var(--items)"),
+      ).toBeNull();
+      expect(
+        validatorSet.getShorthand("place-items", "center start"),
+      ).not.toBeNull();
+      expect(validatorSet.expandBrowserShorthand).toHaveBeenCalledTimes(2);
+    });
+
+    it("accepts browser shorthands with comma-list syntax", function (done) {
+      parseCascade(
+        "div { transition: opacity 1s ease, transform 2s linear; }",
+        done,
+        function (cascade) {
+          expect(cascade.tags.div).toBeDefined();
+          expect(cascade.tags.div.style["transition-property"]).toBeDefined();
+          expect(cascade.tags.div.style["transition-duration"]).toBeDefined();
+          expect(
+            cascade.tags.div.style["transition-property"].value.toString(),
+          ).toBe("opacity,transform");
+          expect(
+            cascade.tags.div.style["transition-duration"].value.toString(),
+          ).toBe("1s,2s");
+        },
+      );
+    });
+
+    it("lets all reset browser shorthand longhands that are not in ValidationTxt", function (done) {
+      parseCascade(
+        "div { transition: opacity 1s ease; all: initial; }",
+        done,
+        function (cascade) {
+          expect(cascade.tags.div).toBeDefined();
+          expect(cascade.tags.div.style["transition-property"]).toBeDefined();
+          expect(cascade.tags.div.style["transition-duration"]).toBeDefined();
+          expect(cascade.tags.div.style["transition-property"].value).toBe(
+            adapt_css.ident.initial,
+          );
+          expect(cascade.tags.div.style["transition-duration"].value).toBe(
+            adapt_css.ident.initial,
+          );
+        },
+      );
+    });
+
+    it("does not enumerate browser properties while creating the base validator set", function () {
+      spyOn(window, "getComputedStyle").and.callThrough();
+
+      adapt_cssvalid.baseValidatorSet();
+
+      expect(window.getComputedStyle).not.toHaveBeenCalled();
+    });
+
+    it("reuses cached browser property names for repeated all lookups", function () {
+      var validatorSet = adapt_cssvalid.baseValidatorSet();
+      spyOn(validatorSet, "getBrowserPropertyNamesForAll").and.callThrough();
+
+      expect(validatorSet.getShorthand("all")).not.toBeNull();
+      expect(validatorSet.getShorthand("all")).not.toBeNull();
+      expect(validatorSet.getBrowserPropertyNamesForAll).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
+    it("filters cached browser property names against later shorthand registrations", function () {
+      var validatorSet = adapt_cssvalid.baseValidatorSet();
+
+      validatorSet.allPropertyNames = null;
+      validatorSet.browserPropertyNamesForAll = [
+        "inset",
+        "transition-property",
+      ];
+
+      expect(validatorSet.getPropertiesForAll()).not.toContain("inset");
+      expect(validatorSet.getPropertiesForAll()).toContain(
+        "transition-property",
+      );
+    });
+
+    it("does not keep browser shorthand names in all after refresh", function (done) {
+      parseCascade(
+        "div { all: initial; position: absolute; top: 0; right: 0; }",
+        done,
+        function (cascade) {
+          expect(cascade.tags.div).toBeDefined();
+          expect(cascade.tags.div.style["inset"]).toBeUndefined();
+          expect(cascade.tags.div.style["inset-block-start"]).toBeUndefined();
+          expect(cascade.tags.div.style["inset-block-end"]).toBeUndefined();
+          expect(cascade.tags.div.style["inset-inline-start"]).toBeUndefined();
+          expect(cascade.tags.div.style["inset-inline-end"]).toBeUndefined();
+          expect(cascade.tags.div.style["position"].value.toString()).toBe(
+            "absolute",
+          );
+          expect(cascade.tags.div.style["top"].value.toString()).toBe("0");
+          expect(cascade.tags.div.style["right"].value.toString()).toBe("0");
+        },
+      );
+    });
+
+    it("keeps self-referential custom property declarations through the parser path", function (done) {
+      parseCascade("div { --a: var(--a, red); }", done, function (cascade) {
+        expect(cascade.tags.div).toBeDefined();
+        expect(cascade.tags.div.style["--a"]).toBeDefined();
+        expect(cascade.tags.div.style["--a"].value.toString()).toBe(
+          "var(--a,red)",
+        );
+      });
+    });
+  });
+
+  describe("invalid selector list recovery", function () {
+    it("drops an invalid selector list instead of salvaging later selectors", function (done) {
+      parseCascade(
+        "p { background: lime; } foo % address, p { background: red; }",
+        done,
+        function (cascade) {
+          expect(cascade.tags.p).toBeDefined();
+          expect(cascade.tags.p.style["background-color"]).toBeDefined();
+          expect(
+            cascade.tags.p.style["background-color"].value.toString(),
+          ).toBe("lime");
+        },
+      );
+    });
+
+    it("drops an invalid selector list even when it uses !important", function (done) {
+      parseCascade(
+        "foo % address, p { background: red ! important; } p { background: lime; }",
+        done,
+        function (cascade) {
+          expect(cascade.tags.p).toBeDefined();
+          expect(cascade.tags.p.style["background-color"]).toBeDefined();
+          expect(
+            cascade.tags.p.style["background-color"].value.toString(),
+          ).toBe("lime");
+        },
+      );
+    });
+  });
+
+  describe("contextually invalid selectors", function () {
+    it("invalidates selectors continued after pseudo-elements inside :is()", function (done) {
+      parseCascade(
+        ":is(*, ::before) * { color: purple; }",
+        done,
+        function (_cascade, handler) {
+          expect(handler.invalid).toBe(true);
+        },
+      );
+    });
+
+    it("invalidates pseudo-elements continued after pseudo-elements inside :is()", function (done) {
+      parseCascade(
+        ":is(*, ::before)::after { color: purple; }",
+        done,
+        function (_cascade, handler) {
+          expect(handler.invalid).toBe(true);
+        },
+      );
+    });
+  });
+
+  describe("typed attr() nested grammar regression", function () {
+    it("accepts typed attr() inside string-set content lists", function (done) {
+      parseCascade(
+        'div { string-set: chapter attr(data-title type(<string>), "fallback"); }',
+        done,
+        function (cascade) {
+          expect(cascade.tags.div).toBeDefined();
+          expect(cascade.tags.div.style["string-set"]).toBeDefined();
+        },
+      );
+    });
+
+    it("rejects unsupported attr() type() syntax inside string-set content lists", function (done) {
+      parseCascade(
+        'div { string-set: chapter attr(data-title type(<transform-list>), "fallback"); }',
+        done,
+        function (cascade, handler) {
+          expect(handler.invalid).toBe(true);
+          expect(cascade.tags.div).toBeDefined();
+          expect(cascade.tags.div.style["string-set"]).toBeUndefined();
+        },
+      );
+    });
+  });
+
+  describe("typed attr() helper regression", function () {
+    it("returns null for unsupported type() syntax", function () {
+      expect(
+        adapt_cssvalid.parseAttrValue(
+          new adapt_exprs.LexicalScope(null),
+          "rotate(30deg)",
+          { kind: "syntax", syntax: "<transform-list>" },
+        ),
+      ).toBeNull();
+    });
+
+    it("parses frequency syntax using lowercase normalized units", function () {
+      var value = adapt_cssvalid.parseAttrValue(
+        new adapt_exprs.LexicalScope(null),
+        "1kHz",
+        {
+          kind: "syntax",
+          syntax: "<frequency>",
+        },
+      );
+      expect(value && value.toString()).toBe("1khz");
+    });
+  });
+
   describe("ValidatorSet", function () {
     it("should parse simple validator and simple rule", function (done) {
       var validatorSet = new adapt_cssvalid.ValidatorSet();
@@ -58,6 +405,31 @@ describe("css-validator", function () {
         return adapt_task.newResult(true);
       });
     });
+
+    it("rejects invalid single values for text-autospace-like nested alternates", function () {
+      var validatorSet = new adapt_cssvalid.ValidatorSet();
+      validatorSet.initBuiltInValidators();
+      validatorSet.parse(
+        "foo = normal | auto | no-autospace | [[ ideograph-alpha || ideograph-numeric || punctuation ] || [ insert | replace ]];",
+      );
+
+      expect(adapt_css.getName("x").visit(validatorSet.validators.foo)).toBe(
+        null,
+      );
+    });
+
+    it("accepts valid single values for text-autospace-like nested alternates", function () {
+      var validatorSet = new adapt_cssvalid.ValidatorSet();
+      validatorSet.initBuiltInValidators();
+      validatorSet.parse(
+        "foo = normal | auto | no-autospace | [[ ideograph-alpha || ideograph-numeric || punctuation ] || [ insert | replace ]];",
+      );
+
+      expect(
+        adapt_css.getName("punctuation").visit(validatorSet.validators.foo),
+      ).not.toBe(null);
+    });
+
     it("should parse simple validator that compare values case-insensitively.", function (done) {
       var validatorSet = new adapt_cssvalid.ValidatorSet();
       validatorSet.initBuiltInValidators();
@@ -87,6 +459,75 @@ describe("css-validator", function () {
               ".test6 { foo: BAZ; }" +
               ".test6 { foo: biz; }" +
               "",
+            handler,
+            null,
+            null,
+            null,
+          )
+          .then(function (result) {
+            expect(result).toBe(true);
+            expect(warnListener).not.toHaveBeenCalled();
+            done();
+          });
+        return adapt_task.newResult(true);
+      });
+    });
+
+    it("should parse selector functions with a top-level cascade handler", function (done) {
+      var validatorSet = adapt_cssvalid.baseValidatorSet();
+      var handler = new adapt_csscasc.CascadeParserHandler(
+        null,
+        null,
+        null,
+        null,
+        null,
+        validatorSet,
+        true,
+      );
+      handler.startStylesheet(adapt_cssparse.StylesheetFlavor.USER_AGENT);
+      var warnListener = jasmine.createSpy("warn listener");
+      vivliostyle_logging.logger.addListener(
+        vivliostyle_logging.LogLevel.WARN,
+        warnListener,
+      );
+      adapt_task.start(function () {
+        adapt_cssparse
+          .parseStylesheetFromText(
+            '@namespace epub "http://www.idpf.org/2007/ops";\n:not(a[epub|type~="noteref"], a[epub\\:type~="noteref"], a[role~="doc-noteref"])::footnote-call { content: counter(footnote); }',
+            handler,
+            null,
+            null,
+            null,
+          )
+          .then(function (result) {
+            expect(result).toBe(true);
+            expect(warnListener).not.toHaveBeenCalled();
+            done();
+          });
+        return adapt_task.newResult(true);
+      });
+    });
+    it("should parse semantic footnote noteref default selectors", function (done) {
+      var validatorSet = adapt_cssvalid.baseValidatorSet();
+      var handler = new adapt_csscasc.CascadeParserHandler(
+        null,
+        null,
+        null,
+        null,
+        null,
+        validatorSet,
+        true,
+      );
+      handler.startStylesheet(adapt_cssparse.StylesheetFlavor.USER_AGENT);
+      var warnListener = jasmine.createSpy("warn listener");
+      vivliostyle_logging.logger.addListener(
+        vivliostyle_logging.LogLevel.WARN,
+        warnListener,
+      );
+      adapt_task.start(function () {
+        adapt_cssparse
+          .parseStylesheetFromText(
+            '@namespace epub "http://www.idpf.org/2007/ops";\na[epub|type="noteref"]:not(sup > *, :has(> sup)),\na[epub\\:type="noteref"]:not(sup > *, :has(> sup)),\na[role="doc-noteref"]:not(sup > *, :has(> sup)) { font-size: 0.75em; vertical-align: super; line-height: 0; }',
             handler,
             null,
             null,

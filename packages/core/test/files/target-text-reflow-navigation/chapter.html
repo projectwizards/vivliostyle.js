@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Target-text Reflow Navigation Repro - Chapter</title>
+    <style>
+      @page {
+        size: 105mm 148mm;
+        margin: 14mm 12mm 16mm;
+
+        @bottom-center {
+          font-size: 9px;
+          content: counter(page);
+        }
+      }
+
+      html {
+        font: 14px/1.35 serif;
+        widows: 1;
+        orphans: 1;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      h1 {
+        margin: 0 0 0.8em;
+        font-size: 22px;
+      }
+
+      h2 {
+        margin: 1.15em 0 0.35em;
+        font-size: 17px;
+      }
+
+      p {
+        margin: 0 0 0.75em;
+        text-align: justify;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Chapter</h1>
+
+    <h2 id="s1">A deliberately long heading for the first referenced section</h2>
+    <p>
+      This paragraph exists only to keep this section from collapsing.
+    </p>
+
+    <h2 id="s2">Another heading whose resolved text is much longer than two question marks</h2>
+    <p>
+      The exact wording is not important. The reflow is.
+    </p>
+
+    <h2 id="s3">A third heading that continues the reflow pressure in the TOC spine</h2>
+    <p>
+      This fixture is intentionally small.
+    </p>
+
+    <h2 id="s4">A fourth heading with another line-length-expanding title for the TOC</h2>
+    <p>
+      Viewer navigation used to stop at the spine boundary.
+    </p>
+
+    <h2 id="s5">A fifth heading used only to keep the TOC longer than its unresolved form</h2>
+    <p>
+      The second spine still needs more than one page.
+    </p>
+
+    <h2 id="s6">A sixth heading that keeps the target-text values visibly distinct</h2>
+    <p>
+      The headings remain long on purpose.
+    </p>
+
+    <h2 id="s7">A seventh heading so the chapter reliably spans more than one page</h2>
+    <p>
+      This paragraph exists for pagination only.
+    </p>
+
+    <h2 id="s8">An eighth heading to make the total page count settle at four pages</h2>
+    <p>
+      The expected stable state is a small multi-page publication.
+    </p>
+  </body>
+</html>

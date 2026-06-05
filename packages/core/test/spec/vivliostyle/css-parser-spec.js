@@ -1,5 +1,6 @@
 /**
  * Copyright 2017 Daishinsha Inc.
+ * Copyright 2026 Vivliostyle Foundation
  *
  * Vivliostyle.js is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
@@ -16,6 +17,7 @@
  */
 
 import * as adapt_cssparse from "../../../src/vivliostyle/css-parser";
+import * as adapt_cssnesting from "../../../src/vivliostyle/css-nesting";
 import * as adapt_csstok from "../../../src/vivliostyle/css-tokenizer";
 import * as adapt_task from "../../../src/vivliostyle/task";
 
@@ -25,9 +27,12 @@ describe("css-parser", function () {
 
     beforeEach(function () {
       spyOn(handler, "error");
+      spyOn(handler, "attributeSelector");
+      spyOn(handler, "idSelector");
       spyOn(handler, "pseudoclassSelector");
       spyOn(handler, "startFuncWithSelector");
       spyOn(handler, "endFuncWithSelector");
+      spyOn(handler, "pushSelectorText");
       spyOn(handler, "pseudoelementSelector");
     });
 
@@ -45,6 +50,266 @@ describe("css-parser", function () {
         return adapt_task.newResult(true);
       });
     }
+
+    function parseSupports(done, text, fn) {
+      spyOn(handler, "startWhenRule").and.callThrough();
+      parse(done, text, function () {
+        expect(handler.startWhenRule).toHaveBeenCalled();
+        fn(handler.startWhenRule.calls.mostRecent().args[0]);
+      });
+    }
+
+    function tokenize(text) {
+      var tokenizer = new adapt_csstok.Tokenizer(text, handler);
+      var tokens = [];
+      while (true) {
+        var token = tokenizer.token();
+        tokens.push({
+          type: token.type,
+          text: token.text,
+          position: token.position,
+        });
+        if (token.type === adapt_csstok.TokenType.EOF) {
+          return tokens;
+        }
+        tokenizer.consume();
+      }
+    }
+
+    describe("css nesting", function () {
+      it("expands nested selectors using :is() semantics", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            ".foo, #bar { > .baz, &.qux { color: red; } }",
+          ),
+        ).toBe(":is(.foo, #bar) > .baz, :is(.foo, #bar).qux { color: red; }");
+      });
+
+      it("keeps mixed declarations ordered around nested rules", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            ".foo, .foo::before { color: black; @media screen { color: white; } background: silver; }",
+          ),
+        ).toBe(
+          ".foo, .foo::before { color: black; }\n@media screen { .foo, .foo::before { color: white; } }\n.foo, .foo::before { background: silver; }",
+        );
+      });
+
+      it("wraps complex parent selectors with :is() when replacing &", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            "span > b { .test-4 section > & { color: red; } }",
+          ),
+        ).toBe(".test-4 section > :is(span > b) { color: red; }");
+      });
+
+      it("wraps compound-position ampersands with :is()", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            "div.test-14 { div& { color: green; } }",
+          ),
+        ).toBe("div:is(div.test-14) { color: green; }");
+      });
+
+      it("does not turn nested :has() replacements into matching selectors", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            "li:has(strong) { :has(> &) { background: red; } }",
+          ),
+        ).toBe(":has(> :where(:not(*))) { background: red; }");
+      });
+
+      it("parses nested rules without reporting syntax errors", function (done) {
+        spyOn(handler, "property");
+        parse(done, ".foo { .bar { color: red; } }", function () {
+          expect(handler.error).not.toHaveBeenCalled();
+          expect(handler.property).toHaveBeenCalled();
+          expect(handler.property.calls.mostRecent().args[0]).toBe("color");
+          expect(handler.property.calls.mostRecent().args[2]).toBe(false);
+        });
+      });
+
+      it("parses forgiving nested selectors with unknown functions", function (done) {
+        parse(
+          done,
+          ".does-not-exist { :is(.test-2, :unknown(div,&)) { color: green; } }",
+          function () {
+            expect(handler.error).not.toHaveBeenCalled();
+          },
+        );
+      });
+
+      it("captures recovered :has selector text after invalid selector items", function (done) {
+        parse(done, ".foo:has(!, > .bar) {}", function () {
+          var selectorTexts = handler.pushSelectorText.calls
+            .allArgs()
+            .map(function (args) {
+              return args[0].trim();
+            });
+          expect(selectorTexts).toContain("> .bar");
+          expect(
+            selectorTexts.some(function (text) {
+              return text.indexOf("!") >= 0;
+            }),
+          ).toBe(false);
+        });
+      });
+
+      it("preserves invalid forgiving items during expansion", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            ".does-not-exist { :is(.test-1, !&) { color: green; } }",
+          ),
+        ).toBe(":is(.test-1, !:is(.does-not-exist)) { color: green; }");
+      });
+
+      it("does not replace escaped ampersands in nested selectors", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            ".foo { .bar\\&baz { color: green; } }",
+          ),
+        ).toBe(":is(.foo) .bar\\&baz { color: green; }");
+      });
+
+      it("does not split selector lists on escaped commas", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            ".foo { .bar\\,.baz { color: green; } }",
+          ),
+        ).toBe(":is(.foo) .bar\\,.baz { color: green; }");
+      });
+
+      it("returns declaration-only stylesheets unchanged", function () {
+        expect(adapt_cssnesting.expandNesting("ul { background: green }")).toBe(
+          "ul { background: green }",
+        );
+      });
+
+      it("returns simple non-nested rules unchanged", function () {
+        expect(adapt_cssnesting.expandNesting("h1 { color: blue }")).toBe(
+          "h1 { color: blue }",
+        );
+      });
+
+      it("preserves ideographic spaces inside string literals during expansion", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            '.toc::after { content: target-text(attr(href url), before) "　" target-text(attr(href url), content); }',
+          ),
+        ).toBe(
+          '.toc::after { content: target-text(attr(href url), before) "　" target-text(attr(href url), content); }',
+        );
+      });
+
+      it("preserves ASCII whitespace inside string literals during expansion", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            '.label::after { content: "  spaced   text  "; }',
+          ),
+        ).toBe('.label::after { content: "  spaced   text  "; }');
+      });
+
+      it("still expands nested rules with semicolonless declarations", function () {
+        expect(
+          adapt_cssnesting.expandNesting(
+            ".foo { color: blue; .bar { background: green } }",
+          ),
+        ).toBe(".foo { color: blue; }\n:is(.foo) .bar { background: green; }");
+      });
+
+      it("still expands type selectors followed by pseudo-classes", function () {
+        expect(
+          adapt_cssnesting.expandNesting(".foo { a:hover { color: red; } }"),
+        ).toBe(":is(.foo) a:hover { color: red; }");
+      });
+
+      it("still expands namespace-prefixed type selectors", function () {
+        expect(
+          adapt_cssnesting.expandNesting(".foo { |a { color: red; } }"),
+        ).toBe(":is(.foo) |a { color: red; }");
+      });
+
+      it("parses semicolonless declarations after preprocessing", function (done) {
+        spyOn(handler, "property");
+        parse(done, "ul { background: green }", function () {
+          expect(handler.error).not.toHaveBeenCalled();
+          expect(handler.property).toHaveBeenCalled();
+          expect(handler.property.calls.mostRecent().args[0]).toBe(
+            "background",
+          );
+        });
+      });
+
+      it("parses simple semicolonless declarations after preprocessing", function (done) {
+        spyOn(handler, "property");
+        parse(done, "h1 { color: blue }", function () {
+          expect(handler.error).not.toHaveBeenCalled();
+          expect(handler.property).toHaveBeenCalled();
+          expect(handler.property.calls.mostRecent().args[0]).toBe("color");
+        });
+      });
+    });
+
+    describe("tokenizer recovery", function () {
+      it("advances past standalone invalid delimiter characters after previous tokens", function () {
+        var tokens = tokenize("a `");
+
+        expect(
+          tokens.map(function (token) {
+            return token.type;
+          }),
+        ).toEqual([
+          adapt_csstok.TokenType.IDENT,
+          adapt_csstok.TokenType.INVALID,
+          adapt_csstok.TokenType.EOF,
+        ]);
+        expect(tokens[0].text).toBe("a");
+        expect(tokens[1].text).toBe("`");
+        expect(tokens[2].position).toBe(3);
+      });
+
+      it("advances past repeated NUL bytes in misdecoded stylesheets", function () {
+        var tokens = tokenize("@\u0000c\u0000h");
+
+        expect(
+          tokens
+            .filter(function (token) {
+              return token.type === adapt_csstok.TokenType.INVALID;
+            })
+            .map(function (token) {
+              return token.text;
+            }),
+        ).toEqual(["\u0000", "\u0000"]);
+        expect(
+          tokens
+            .filter(function (token) {
+              return token.type === adapt_csstok.TokenType.IDENT;
+            })
+            .map(function (token) {
+              return token.text;
+            }),
+        ).toEqual(["c", "h"]);
+        expect(
+          tokens.map(function (token) {
+            return token.type;
+          }),
+        ).toEqual([
+          adapt_csstok.TokenType.AT,
+          adapt_csstok.TokenType.INVALID,
+          adapt_csstok.TokenType.IDENT,
+          adapt_csstok.TokenType.INVALID,
+          adapt_csstok.TokenType.IDENT,
+          adapt_csstok.TokenType.EOF,
+        ]);
+        expect(tokens[tokens.length - 1].position).toBe(5);
+      });
+
+      it("lets parser recovery reach the next selector after an invalid at-rule delimiter", function (done) {
+        parse(done, "@foo `; #pass { color: green; }", function () {
+          expect(handler.idSelector).toHaveBeenCalledWith("pass");
+        });
+      });
+    });
 
     describe("pseudoclass", function () {
       describe(":lang", function () {
@@ -561,6 +826,19 @@ describe("css-parser", function () {
             expect(handler.error).not.toHaveBeenCalled();
             expect(handler.startFuncWithSelector).toHaveBeenCalledWith("not");
             expect(handler.endFuncWithSelector).toHaveBeenCalled();
+          });
+        });
+
+        it("accepts ASCII-case-insensitive attribute selector flags", function (done) {
+          parse(done, ":not([attr='OPEN' I]) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.attributeSelector).toHaveBeenCalledWith(
+              "",
+              "attr",
+              adapt_csstok.TokenType.EQ,
+              "OPEN",
+              "i",
+            );
           });
         });
         it("can take class selector", function (done) {
@@ -1081,6 +1359,24 @@ describe("css-parser", function () {
             expect(handler.error).toHaveBeenCalled();
             expect(handler.pseudoelementSelector).not.toHaveBeenCalled();
           });
+        });
+      });
+    });
+
+    describe("supports parsing", function () {
+      it("preserves whitespace-only custom property values in @supports tests", function (done) {
+        parseSupports(done, "@supports (--a: ) {}", function (expr) {
+          expect(expr.expr.name).toBe("--a");
+          expect(expr.expr.value).toBe(" ");
+          expect(expr.expr.toString()).toBe("(--a: )");
+        });
+      });
+
+      it("preserves leading and trailing whitespace in custom property @supports values", function (done) {
+        parseSupports(done, "@supports (--a:  red ) {}", function (expr) {
+          expect(expr.expr.name).toBe("--a");
+          expect(expr.expr.value).toBe("  red ");
+          expect(expr.expr.toString()).toBe("(--a:  red )");
         });
       });
     });

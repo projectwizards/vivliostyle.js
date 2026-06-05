@@ -21,8 +21,10 @@
  */
 import * as CounterStyle from "./counter-style";
 import * as Css from "./css";
+import * as CssParser from "./css-parser";
 import * as CssTokenizer from "./css-tokenizer";
 import * as CmykStore from "./cmyk-store";
+import * as Exprs from "./exprs";
 import * as Base from "./base";
 import { ValidationTxt } from "./assets";
 import { TokenType } from "./css-tokenizer";
@@ -512,8 +514,17 @@ export class PrimitiveValidator extends PropertyValidator {
   }
 
   override visitFunc(func: Css.Func): Css.Val {
+    if (func.name.toLowerCase() === "attr") {
+      const attr = parseAttrFunction(func);
+      if (
+        attr &&
+        validatorSupportsAttrType(attr.type, this.allowed, this.units)
+      ) {
+        return func;
+      }
+    }
     if (this.allowed & ALLOW_COLOR) {
-      if (func.name === "device-cmyk") {
+      if (func.name === "device-cmyk" || func.name === "cmyk") {
         if (
           CSS.supports("color", "color(srgb 0 0 0)") &&
           CmykStore.parseDeviceCmyk(func) !== null
@@ -576,7 +587,345 @@ export class PrimitiveValidator extends PropertyValidator {
   }
 }
 
-const NO_IDENTS: ValueMap = {};
+const NO_IDENTS: ValueMap = Object.create(null);
+
+const ATTR_ANY_NUMBER = ALLOW_POS_NUM | ALLOW_NEGATIVE | ALLOW_ZERO;
+
+const ATTR_ANY_INTEGER = ALLOW_POS_INT | ALLOW_NEGATIVE | ALLOW_ZERO;
+
+const ATTR_ANY_NUMERIC =
+  ALLOW_POS_NUMERIC | ALLOW_NEGATIVE | ALLOW_ZERO | ALLOW_ZERO_PERCENT;
+
+function makeUnitMap(unitNames: string[]): ValueMap {
+  const units: ValueMap = Object.create(null);
+  for (const unit of unitNames) {
+    units[unit] = Css.empty;
+  }
+  return units;
+}
+
+const PERCENTAGE_UNITS = makeUnitMap(["%"]);
+
+const LENGTH_UNITS = makeUnitMap([
+  "em",
+  "ex",
+  "ch",
+  "rem",
+  "lh",
+  "rlh",
+  "vw",
+  "vh",
+  "vi",
+  "vb",
+  "vmin",
+  "vmax",
+  "pvw",
+  "pvh",
+  "pvi",
+  "pvb",
+  "pvmin",
+  "pvmax",
+  "cm",
+  "mm",
+  "in",
+  "px",
+  "pt",
+  "pc",
+  "q",
+]);
+
+const LENGTH_PERCENTAGE_UNITS = {
+  ...LENGTH_UNITS,
+  ...PERCENTAGE_UNITS,
+};
+
+const ANGLE_UNITS = makeUnitMap(["deg", "grad", "rad", "turn"]);
+
+const TIME_UNITS = makeUnitMap(["s", "ms"]);
+
+const FREQUENCY_UNITS = makeUnitMap(["hz", "khz"]);
+
+export type AttrType =
+  | { kind: "string" }
+  | { kind: "url" }
+  | { kind: "syntax"; syntax: string }
+  | { kind: "unit"; unit: string };
+
+export type AttrFunction = {
+  attributeName: string;
+  type: AttrType;
+  fallback: Css.Val | null;
+};
+
+function normalizeAttrSyntax(syntax: string): string {
+  return syntax.replace(/\s+/g, "").toLowerCase();
+}
+
+function canonicalAttrUnit(unit: string): string {
+  return unit.toLowerCase();
+}
+
+function parseAttrTypeValue(value: Css.Val): AttrType | null {
+  if (value instanceof Css.Ident) {
+    switch (value.name.toLowerCase()) {
+      case "string":
+      case "raw-string":
+        return { kind: "string" };
+      case "url":
+        return { kind: "url" };
+      case "color":
+      case "integer":
+      case "number":
+      case "length":
+      case "angle":
+      case "time":
+      case "frequency":
+        return { kind: "syntax", syntax: `<${value.name.toLowerCase()}>` };
+      default:
+        return { kind: "unit", unit: canonicalAttrUnit(value.name) };
+    }
+  }
+  if (value instanceof Css.Func && value.name.toLowerCase() === "type") {
+    if (value.values.length !== 1) {
+      return null;
+    }
+    const syntax = normalizeAttrSyntax(value.values[0].stringValue());
+    return syntax ? { kind: "syntax", syntax } : null;
+  }
+  return null;
+}
+
+export function parseAttrFunction(func: Css.Func): AttrFunction | null {
+  if (func.name.toLowerCase() !== "attr") {
+    return null;
+  }
+  if (func.values.length < 1 || func.values.length > 2) {
+    return null;
+  }
+
+  let attributeName: string;
+  let type: AttrType = { kind: "string" };
+  const attributeArg = func.values[0];
+  if (attributeArg instanceof Css.Ident) {
+    attributeName = attributeArg.name;
+  } else if (attributeArg instanceof Css.SpaceList) {
+    const values = attributeArg.values;
+    if (
+      values.length < 1 ||
+      values.length > 2 ||
+      !(values[0] instanceof Css.Ident)
+    ) {
+      return null;
+    }
+    attributeName = values[0].name;
+    if (values.length === 2) {
+      type = parseAttrTypeValue(values[1]);
+      if (!type) {
+        return null;
+      }
+    }
+  } else {
+    return null;
+  }
+
+  return {
+    attributeName,
+    type,
+    fallback: func.values[1] ?? null,
+  };
+}
+
+function hasAttrUnit(units: ValueMap, unit: string): boolean {
+  return !!units[canonicalAttrUnit(unit)];
+}
+
+function hasAnyAttrUnit(units: ValueMap, candidates: ValueMap): boolean {
+  return Object.keys(candidates).some((unit) => hasAttrUnit(units, unit));
+}
+
+function validatorSupportsAttrType(
+  type: AttrType,
+  allowed: number,
+  units: ValueMap,
+): boolean {
+  switch (type.kind) {
+    case "string":
+      return !!(allowed & ALLOW_STR);
+    case "url":
+      return !!(allowed & (ALLOW_URL | ALLOW_IMAGE));
+    case "unit":
+      return hasAttrUnit(units, type.unit);
+    case "syntax":
+      switch (type.syntax) {
+        case "<string>":
+          return !!(allowed & ALLOW_STR);
+        case "<url>":
+          return !!(allowed & (ALLOW_URL | ALLOW_IMAGE));
+        case "<color>":
+          return !!(allowed & ALLOW_COLOR);
+        case "<integer>":
+          return !!(
+            allowed &
+            (ALLOW_POS_INT | ALLOW_POS_NUM | ALLOW_NEGATIVE | ALLOW_ZERO)
+          );
+        case "<number>":
+          return !!(
+            allowed &
+            (ALLOW_POS_NUM | ALLOW_POS_INT | ALLOW_NEGATIVE | ALLOW_ZERO)
+          );
+        case "<length>":
+          return hasAnyAttrUnit(units, LENGTH_UNITS);
+        case "<length-percentage>":
+          return hasAnyAttrUnit(units, LENGTH_PERCENTAGE_UNITS);
+        case "<percentage>":
+          return hasAnyAttrUnit(units, PERCENTAGE_UNITS);
+        case "<angle>":
+          return hasAnyAttrUnit(units, ANGLE_UNITS);
+        case "<time>":
+          return hasAnyAttrUnit(units, TIME_UNITS);
+        case "<frequency>":
+          return hasAnyAttrUnit(units, FREQUENCY_UNITS);
+        default:
+          return false;
+      }
+  }
+  return false;
+}
+
+function createAttrPrimitiveValidator(
+  type: AttrType,
+): PrimitiveValidator | null {
+  switch (type.kind) {
+    case "string":
+      return null;
+    case "url":
+      return null;
+    case "unit":
+      return new PrimitiveValidator(ATTR_ANY_NUMERIC, NO_IDENTS, {
+        [canonicalAttrUnit(type.unit)]: Css.empty,
+      });
+    case "syntax":
+      switch (type.syntax) {
+        case "<color>":
+          return new PrimitiveValidator(ALLOW_COLOR, NO_IDENTS, NO_IDENTS);
+        case "<integer>":
+          return new PrimitiveValidator(ATTR_ANY_INTEGER, NO_IDENTS, NO_IDENTS);
+        case "<number>":
+          return new PrimitiveValidator(ATTR_ANY_NUMBER, NO_IDENTS, NO_IDENTS);
+        case "<length>":
+          return new PrimitiveValidator(
+            ATTR_ANY_NUMERIC,
+            NO_IDENTS,
+            LENGTH_UNITS,
+          );
+        case "<length-percentage>":
+          return new PrimitiveValidator(
+            ATTR_ANY_NUMERIC,
+            NO_IDENTS,
+            LENGTH_PERCENTAGE_UNITS,
+          );
+        case "<percentage>":
+          return new PrimitiveValidator(
+            ATTR_ANY_NUMERIC,
+            NO_IDENTS,
+            PERCENTAGE_UNITS,
+          );
+        case "<angle>":
+          return new PrimitiveValidator(
+            ATTR_ANY_NUMERIC,
+            NO_IDENTS,
+            ANGLE_UNITS,
+          );
+        case "<time>":
+          return new PrimitiveValidator(
+            ATTR_ANY_NUMERIC,
+            NO_IDENTS,
+            TIME_UNITS,
+          );
+        case "<frequency>":
+          return new PrimitiveValidator(
+            ATTR_ANY_NUMERIC,
+            NO_IDENTS,
+            FREQUENCY_UNITS,
+          );
+        default:
+          return null;
+      }
+  }
+  return null;
+}
+
+function isSupportedAttrType(type: AttrType): boolean {
+  switch (type.kind) {
+    case "string":
+    case "url":
+    case "unit":
+      return true;
+    case "syntax":
+      return (
+        type.syntax === "<string>" ||
+        type.syntax === "<url>" ||
+        !!createAttrPrimitiveValidator(type)
+      );
+  }
+  return false;
+}
+
+export function getImplicitAttrFallback(type: AttrType): Css.Val {
+  switch (type.kind) {
+    case "url":
+      return new Css.URL("about:invalid");
+    case "string":
+      return new Css.Str("");
+    default:
+      return Css.ident.unset;
+  }
+}
+
+export function parseAttrValue(
+  scope: Exprs.LexicalScope,
+  value: string | null,
+  type: AttrType,
+): Css.Val | null {
+  if (value == null) {
+    return null;
+  }
+
+  switch (type.kind) {
+    case "string":
+      return new Css.Str(value);
+    case "url":
+      return value ? new Css.URL(value) : new Css.URL("about:invalid");
+    case "unit": {
+      const parsed = CssParser.parseValue(
+        scope,
+        new CssTokenizer.Tokenizer(
+          `${value.trim()}${canonicalAttrUnit(type.unit)}`,
+          null,
+        ),
+        "",
+      );
+      const validator = createAttrPrimitiveValidator(type);
+      return parsed && validator ? parsed.visit(validator) : null;
+    }
+    case "syntax": {
+      if (type.syntax === "<string>") {
+        return new Css.Str(value);
+      }
+      if (type.syntax === "<url>") {
+        return value ? new Css.URL(value) : new Css.URL("about:invalid");
+      }
+      const parsed = CssParser.parseValue(
+        scope,
+        new CssTokenizer.Tokenizer(value, null),
+        "",
+      );
+      const validator = createAttrPrimitiveValidator(type);
+      return parsed && validator ? parsed.visit(validator) : null;
+    }
+  }
+  return null;
+}
 
 export const ALWAYS_FAIL = new PrimitiveValidator(0, NO_IDENTS, NO_IDENTS);
 
@@ -689,33 +1038,8 @@ export class ListValidator extends PropertyValidator {
   }
 
   validateSingle(inval: Css.Val): Css.Val {
-    // no need to worry about "specials"
-    let outval: Css.Val = null;
-    let current = this.first;
-    while (
-      current !== this.successTerminal &&
-      current !== this.failureTerminal
-    ) {
-      if (!inval) {
-        current = current.failure;
-        continue;
-      }
-      if (current.isSpecial()) {
-        current = current.success;
-        continue;
-      }
-      outval = inval.visit(current.validator);
-      if (!outval) {
-        current = current.failure;
-        continue;
-      }
-      inval = null;
-      current = current.success;
-    }
-    if (current === this.successTerminal) {
-      return outval;
-    }
-    return null;
+    const out = this.validateList([inval], false, 0);
+    return out ? out[0] : null;
   }
 
   override visitEmpty(empty: Css.Val): Css.Val {
@@ -878,6 +1202,17 @@ export class FuncValidator extends ListValidator {
       return null;
     }
     return new Css.Func(func.name, arr);
+  }
+}
+
+class AttrFuncValidator extends PropertyValidator {
+  validateSingle(_inval: Css.Val): Css.Val {
+    return null;
+  }
+
+  override visitFunc(func: Css.Func): Css.Val {
+    const attr = parseAttrFunction(func);
+    return attr && isSupportedAttrType(attr.type) ? func : null;
   }
 }
 
@@ -1290,8 +1625,22 @@ export class FontShorthandValidator extends SimpleShorthandValidator {
     this.error = false;
     const validators = this.validatorSet.validators;
     if (!list[index].visit(validators["font-size"])) {
-      this.error = true;
-      return index;
+      // If font-size validation fails and a calc() was incorrectly consumed
+      // as font-weight by super.validateList (calc() is ambiguous between
+      // font-weight <number> and font-size <length>), backtrack to the
+      // calc() token's position and re-validate as font-size. (Issue #1955)
+      const fontWeight = this.values["font-weight"];
+      const calcIndex =
+        fontWeight instanceof Css.Func && fontWeight.name === "calc"
+          ? list.indexOf(fontWeight)
+          : -1;
+      if (calcIndex >= 0 && list[calcIndex].visit(validators["font-size"])) {
+        delete this.values["font-weight"];
+        index = calcIndex;
+      } else {
+        this.error = true;
+        return index;
+      }
     }
     this.values["font-size"] = list[index++];
     if (list[index] === Css.slash) {
@@ -1373,6 +1722,74 @@ export class TextSpacingShorthandValidator extends SimpleShorthandValidator {
   }
 }
 
+export class BrowserShorthandValidator extends ShorthandValidator {
+  // Browser-supported shorthands that Vivliostyle does not model explicitly
+  // still need to participate in shorthand/longhand cascade resolution.
+  // This validator reuses the browser's own shorthand expansion instead of
+  // requiring one dedicated validator class per shorthand.
+  constructor(
+    public readonly name: string,
+    propList: string[] = [],
+  ) {
+    super();
+    this.propList = propList;
+  }
+
+  override clone(): this {
+    const other = new (this.constructor as any)(this.name, [...this.propList]);
+    other.validatorSet = this.validatorSet;
+    return other;
+  }
+
+  private validateValueText(valueText: string): boolean {
+    const expanded = this.validatorSet.expandBrowserShorthand(
+      this.name,
+      valueText,
+    );
+    if (!expanded) {
+      this.error = true;
+      return false;
+    }
+
+    this.propList = expanded.propList;
+    this.values = {};
+    for (const name of expanded.propList) {
+      const valueText = expanded.values[name];
+      if (!valueText) {
+        continue;
+      }
+      const parsed = CssParser.parseValue(
+        this.validatorSet.scope,
+        new CssTokenizer.Tokenizer(valueText, null),
+        "",
+      );
+      if (!parsed) {
+        this.error = true;
+        return false;
+      }
+      this.values[name] = parsed;
+    }
+    this.error = false;
+    return true;
+  }
+
+  override validateList(list: Css.Val[]): number {
+    const value =
+      list.length === 1
+        ? list[0].toString()
+        : new Css.SpaceList(list).toString();
+    if (!this.validateValueText(value)) {
+      return 0;
+    }
+    return list.length;
+  }
+
+  override visitCommaList(list: Css.CommaList): Css.Val {
+    this.validateValueText(list.toString());
+    return null;
+  }
+}
+
 const propsExcludedFromAll = [
   "unicode-bidi",
   "direction",
@@ -1402,6 +1819,10 @@ const propsExcludedFromAll = [
   "block-end",
   "inline-start",
   "inline-end",
+  "inset-block-start",
+  "inset-block-end",
+  "inset-inline-start",
+  "inset-inline-end",
   "block-size",
   "inline-size",
   "max-block-size",
@@ -1437,6 +1858,7 @@ const propsExcludedFromAll = [
   "shape-inside",
   "snap-height",
   "snap-width",
+  "src", // @font-face descriptor
   "template",
   "text-decoration-skip",
   "text-justify",
@@ -1451,13 +1873,12 @@ export class AllShorthandValidator extends SimpleShorthandValidator {
     super();
   }
 
+  refreshPropList(): void {
+    this.propList = this.validatorSet.getPropertiesForAll();
+  }
+
   override init(syntax: ShorthandSyntaxNode[], propList: string[]): void {
     super.init(syntax, propList);
-    for (const name in this.validatorSet.validators) {
-      if (!propsExcludedFromAll.includes(name)) {
-        this.propList.push(name);
-      }
-    }
   }
 
   override validateList(list: Css.Val[]): number {
@@ -1496,6 +1917,158 @@ export class ValidatorSet {
   shorthands: { [key: string]: ShorthandValidator } = {};
   layoutProps: ValueMap = {};
   backgroundProps: ValueMap = {};
+  readonly scope = new Exprs.LexicalScope(null);
+  private browserShorthandStyle: CSSStyleDeclaration | null = null;
+  private browserShorthandMisses: { [key: string]: true } = {};
+  private browserPropertyNamesForAll: string[] | null = null;
+  private allPropertyNames: string[] | null = null;
+
+  private invalidateAllPropertyNames(): void {
+    this.allPropertyNames = null;
+  }
+
+  private getBrowserPropertyNamesForAll(): string[] | null {
+    if (this.browserPropertyNamesForAll) {
+      return this.browserPropertyNamesForAll;
+    }
+    if (
+      typeof document === "undefined" ||
+      typeof getComputedStyle !== "function"
+    ) {
+      return null;
+    }
+    const root = document.documentElement;
+    if (!root) {
+      return null;
+    }
+    const computedStyle = getComputedStyle(root);
+    const names: string[] = [];
+    for (let i = 0; i < computedStyle.length; i++) {
+      const name = computedStyle.item(i);
+      if (
+        !name ||
+        Css.isCustomPropName(name) ||
+        propsExcludedFromAll.includes(name)
+      ) {
+        continue;
+      }
+      names.push(name);
+    }
+    this.browserPropertyNamesForAll = names;
+    return this.browserPropertyNamesForAll;
+  }
+
+  getPropertiesForAll(): string[] {
+    if (this.allPropertyNames) {
+      return this.allPropertyNames;
+    }
+    const names = new Set<string>();
+    for (const name in this.validators) {
+      if (!propsExcludedFromAll.includes(name)) {
+        names.add(name);
+      }
+    }
+    const browserPropertyNames = this.getBrowserPropertyNamesForAll();
+    if (browserPropertyNames) {
+      for (const name of browserPropertyNames) {
+        if (this.shorthands[name]) {
+          continue;
+        }
+        names.add(name);
+      }
+    }
+    const propList = Array.from(names);
+    if (browserPropertyNames) {
+      this.allPropertyNames = propList;
+    }
+    return propList;
+  }
+
+  private getBrowserShorthandStyle(): CSSStyleDeclaration | null {
+    if (this.browserShorthandStyle !== null) {
+      return this.browserShorthandStyle;
+    }
+    if (typeof document === "undefined") {
+      return null;
+    }
+    this.browserShorthandStyle = document.createElement("div").style;
+    return this.browserShorthandStyle;
+  }
+
+  expandBrowserShorthand(
+    name: string,
+    valueText: string,
+  ): { propList: string[]; values: { [key: string]: string } } | null {
+    const style = this.getBrowserShorthandStyle();
+    if (!style) {
+      return null;
+    }
+    style.cssText = "";
+    style.setProperty(name, valueText);
+    const propList = Array.from({ length: style.length }, (_, i) =>
+      style.item(i),
+    ).filter((prop): prop is string => !!prop);
+    if (
+      !propList.length ||
+      (propList.length === 1 && propList[0] === name.toLowerCase())
+    ) {
+      return null;
+    }
+    // Use a detached CSSStyleDeclaration as a browser-native shorthand parser,
+    // then feed the resulting longhand values back into Vivliostyle's cascade.
+    const values: { [key: string]: string } = {};
+    for (const prop of propList) {
+      values[prop] = style.getPropertyValue(prop);
+    }
+    return { propList, values };
+  }
+
+  getShorthand(
+    name: string,
+    value?: Css.Val | string,
+  ): ShorthandValidator | null {
+    if (Css.isCustomPropName(name)) {
+      return null;
+    }
+    const shorthand = this.shorthands[name];
+    if (shorthand) {
+      if (
+        shorthand instanceof AllShorthandValidator &&
+        !this.allPropertyNames
+      ) {
+        shorthand.refreshPropList();
+      }
+      return shorthand;
+    }
+    if (this.browserShorthandMisses[name]) {
+      return null;
+    }
+    if (value == null) {
+      return null;
+    }
+    const expanded = this.expandBrowserShorthand(
+      name,
+      typeof value === "string" ? value : value.toString(),
+    );
+    if (!expanded) {
+      if (
+        typeof value === "string"
+          ? !/\bvar\(/i.test(value)
+          : !containsVar(value)
+      ) {
+        this.browserShorthandMisses[name] = true;
+      }
+      return null;
+    }
+    const browserShorthand = new BrowserShorthandValidator(
+      name,
+      expanded.propList,
+    );
+    browserShorthand.setOwner(this);
+    this.shorthands[name] = browserShorthand;
+    this.invalidateAllPropertyNames();
+    return browserShorthand;
+  }
 
   private addReplacement(
     val: ValidatingGroup,
@@ -1591,6 +2164,9 @@ export class ValidatorSet {
       case "SPACE":
         validator = new SpaceListValidator(val);
         break;
+      case "attr":
+        validator = new AttrFuncValidator();
+        break;
       default:
         validator = new FuncValidator(fn.toLowerCase(), val);
         break;
@@ -1602,6 +2178,7 @@ export class ValidatorSet {
     this.namedValidators["COLOR"] = this.primitive(
       new PrimitiveValidator(ALLOW_COLOR, NO_IDENTS, NO_IDENTS),
     );
+    this.namedValidators["ATTR"] = this.primitive(new AttrFuncValidator());
     this.namedValidators["IMAGE_FUNCTION"] = this.primitive(
       new PrimitiveValidator(ALLOW_IMAGE, NO_IDENTS, NO_IDENTS),
     );
@@ -1612,7 +2189,7 @@ export class ValidatorSet {
       new PrimitiveValidator(ALLOW_POS_NUM, NO_IDENTS, NO_IDENTS),
     );
     this.namedValidators["POS_PERCENTAGE"] = this.primitive(
-      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, { "%": Css.empty }),
+      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, PERCENTAGE_UNITS),
     );
     this.namedValidators["NEGATIVE"] = this.primitive(
       new PrimitiveValidator(ALLOW_NEGATIVE, NO_IDENTS, NO_IDENTS),
@@ -1624,53 +2201,16 @@ export class ValidatorSet {
       new PrimitiveValidator(ALLOW_ZERO_PERCENT, NO_IDENTS, NO_IDENTS),
     );
     this.namedValidators["POS_LENGTH"] = this.primitive(
-      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, {
-        em: Css.empty,
-        ex: Css.empty,
-        ch: Css.empty,
-        rem: Css.empty,
-        lh: Css.empty,
-        rlh: Css.empty,
-        vw: Css.empty,
-        vh: Css.empty,
-        vi: Css.empty,
-        vb: Css.empty,
-        vmin: Css.empty,
-        vmax: Css.empty,
-        pvw: Css.empty,
-        pvh: Css.empty,
-        pvi: Css.empty,
-        pvb: Css.empty,
-        pvmin: Css.empty,
-        pvmax: Css.empty,
-        cm: Css.empty,
-        mm: Css.empty,
-        in: Css.empty,
-        px: Css.empty,
-        pt: Css.empty,
-        pc: Css.empty,
-        q: Css.empty,
-      }),
+      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, LENGTH_UNITS),
     );
     this.namedValidators["POS_ANGLE"] = this.primitive(
-      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, {
-        deg: Css.empty,
-        grad: Css.empty,
-        rad: Css.empty,
-        turn: Css.empty,
-      }),
+      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, ANGLE_UNITS),
     );
     this.namedValidators["POS_TIME"] = this.primitive(
-      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, {
-        s: Css.empty,
-        ms: Css.empty,
-      }),
+      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, TIME_UNITS),
     );
     this.namedValidators["FREQUENCY"] = this.primitive(
-      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, {
-        Hz: Css.empty,
-        kHz: Css.empty,
-      }),
+      new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, FREQUENCY_UNITS),
     );
     this.namedValidators["RESOLUTION"] = this.primitive(
       new PrimitiveValidator(ALLOW_POS_NUMERIC, NO_IDENTS, {
@@ -2053,6 +2593,7 @@ export class ValidatorSet {
       }
       shorthandValidator.init(syntax, propList);
       this.shorthands[ruleName] = shorthandValidator;
+      this.invalidateAllPropertyNames();
     }
   }
 
@@ -2097,9 +2638,7 @@ export class ValidatorSet {
     if (
       Css.isCustomPropName(name) ||
       // Check if it is a `@font-face` descriptor (Issue #1307)
-      ruleType === "font-face" ||
-      // Check if the property value containing `var(…)`
-      containsVar(value)
+      ruleType === "font-face"
     ) {
       receiver.simpleProperty(name, value, important);
       return;
@@ -2120,11 +2659,31 @@ export class ValidatorSet {
       prefix = r[1];
       name = r[2];
     }
+    const shorthandName = prefix ? origName : name;
+    if (containsVar(value)) {
+      // Register browser-supported shorthands before var() resolution so the
+      // later cascade pass can still expand mixed shorthand/longhand usage.
+      this.getShorthand(shorthandName, value);
+      receiver.simpleProperty(origName, value, important);
+      return;
+    }
     const px = this.prefixes[name];
     if (!px || !px[prefix]) {
       if (CSS.supports(origName, value.toString())) {
-        // Browser supports this property
-        receiver.simpleProperty(origName, value, important);
+        const shorthand = this.getShorthand(shorthandName, value)?.clone();
+        if (shorthand) {
+          if (Css.isDefaultingValue(value)) {
+            shorthand.propagateDefaultingValue(value, important, receiver);
+          } else {
+            value.visit(shorthand);
+            if (!shorthand.finish(important, receiver)) {
+              receiver.invalidPropertyValue(origName, value);
+            }
+          }
+        } else {
+          // Browser supports this property
+          receiver.simpleProperty(origName, value, important);
+        }
       } else if (prefix && !Base.knownPrefixes.includes(`-${prefix}-`)) {
         // Ignore properties with unknown prefix to avoid unnecessary warnings
       } else {
@@ -2157,7 +2716,11 @@ export class ValidatorSet {
         receiver.invalidPropertyValue(origName, value);
       }
     } else {
-      const shorthand = this.shorthands[name].clone();
+      const shorthand = this.getShorthand(name, value)?.clone();
+      if (!shorthand) {
+        receiver.unknownProperty(origName, value);
+        return;
+      }
       if (Css.isDefaultingValue(value)) {
         shorthand.propagateDefaultingValue(value, important, receiver);
       } else {

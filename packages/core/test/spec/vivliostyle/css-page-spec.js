@@ -1,5 +1,6 @@
 /**
  * Copyright 2017 Daishinsha Inc.
+ * Copyright 2026 Vivliostyle Foundation
  *
  * Vivliostyle.js is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
@@ -324,6 +325,25 @@ describe("css-page", function () {
       );
       expect(pageProps["bar:first:left"].marks.value).toBe(
         adapt_css.ident.crop,
+      );
+    });
+
+    it(":nth(An+B of <page-type>) has higher specificity than page type selector", function () {
+      handler.startSelectorRule();
+      handler.pseudoclassSelector("nth", [2, 1, "chapter"]);
+      handler.startRuleBody();
+      handler.simpleProperty("size", new adapt_css.Numeric(100, "px"));
+      handler.endRule();
+
+      handler = createHandler();
+      handler.startSelectorRule();
+      handler.tagSelector(null, "chapter");
+      handler.startRuleBody();
+      handler.simpleProperty("size", new adapt_css.Numeric(200, "px"));
+      handler.endRule();
+
+      expect(pageProps[":nth(2n+1 of chapter)"].size.priority).toBeGreaterThan(
+        pageProps["chapter"].size.priority,
       );
     });
   });

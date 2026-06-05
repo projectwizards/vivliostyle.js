@@ -33,6 +33,7 @@ import * as LayoutHelper from "./layout-helper";
 import * as Logging from "./logging";
 import * as Matchers from "./matchers";
 import * as Plugin from "./plugin";
+import * as SemanticFootnote from "./semantic-footnote";
 import * as Vtree from "./vtree";
 import { CssStyler, Layout } from "./types";
 import { TokenType } from "./css-tokenizer";
@@ -419,38 +420,96 @@ export const SPECIALS = {
 // Persist footnote-call counter values on the call element so footnote-marker
 // can render the same value even if page-based counters reset on the footnote
 // page or during re-layout.
-const FOOTNOTE_COUNTER_ATTR = "data-viv-footnote-counter";
-function getFootnoteCounterMap(element: Element): Record<string, string> {
+export const FOOTNOTE_COUNTER_ATTR = "data-viv-footnote-counter";
+function getFootnoteCounterMap(element: Element): Record<string, number[]> {
   const stored = element.getAttribute(FOOTNOTE_COUNTER_ATTR);
   if (!stored) {
-    return {};
+    return Object.create(null);
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(stored);
-  } catch (err) {
-    return {};
+  } catch {
+    return Object.create(null);
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return {};
+    return Object.create(null);
   }
-  const map: Record<string, string> = Object.create(null);
+  const map: Record<string, number[]> = Object.create(null);
   Object.entries(parsed as Record<string, unknown>).forEach(([key, value]) => {
-    if (typeof value === "string") {
-      map[key] = value;
+    if (Array.isArray(value)) {
+      const nums = value.filter(
+        (item): item is number => typeof item === "number" && isFinite(item),
+      );
+      map[key] = nums;
+    } else if (typeof value === "number" && isFinite(value)) {
+      map[key] = [value];
     }
   });
   return map;
 }
 
-function setFootnoteCounterValue(
+function setFootnoteCounterValues(
   element: Element,
   counterName: string,
-  value: string,
+  values: number[],
 ): void {
   const map = getFootnoteCounterMap(element);
-  map[counterName] = value;
+  map[counterName] = values;
   element.setAttribute(FOOTNOTE_COUNTER_ATTR, JSON.stringify(map));
+}
+
+function getDuplicateSemanticFootnoteCounterValues(
+  element: Element,
+  counterName: string,
+): number[] | null {
+  if (
+    !SemanticFootnote.isSemanticFootnoteNoterefElement(element) ||
+    element.hasAttribute(SemanticFootnote.SEMANTIC_FOOTNOTE_FIRST_REF_ATTR)
+  ) {
+    return null;
+  }
+  const storedOnElement = getFootnoteCounterMap(element)[counterName];
+  if (storedOnElement) {
+    return storedOnElement;
+  }
+  const href =
+    element.getAttribute("href") ||
+    element.getAttributeNS(Base.NS.XLINK, "href");
+  if (!href) {
+    return null;
+  }
+  const baseURL = element.baseURI || element.ownerDocument?.baseURI || "";
+  const resolvedHref = Base.resolveReferenceURL(href, baseURL);
+  if (resolvedHref === "#") {
+    return null;
+  }
+  if (resolvedHref.replace(/#.*$/, "") !== baseURL.replace(/#.*$/, "")) {
+    return null;
+  }
+  const hashIndex = resolvedHref.indexOf("#");
+  if (hashIndex < 0 || hashIndex === resolvedHref.length - 1) {
+    return null;
+  }
+  const target = element.ownerDocument?.getElementById(
+    resolvedHref.substring(hashIndex + 1),
+  );
+  if (!(target instanceof Element)) {
+    return null;
+  }
+  const storedOnTarget = getFootnoteCounterMap(target)[counterName];
+  if (storedOnTarget) {
+    setFootnoteCounterValues(element, counterName, storedOnTarget);
+    return storedOnTarget;
+  }
+  return null;
+}
+
+function hasNonTrivialFootnotePseudoContent(
+  pseudoProps: ElementStyle,
+): boolean {
+  const content = getProp(pseudoProps, "content");
+  return !!content && Vtree.nonTrivialContent(content.value);
 }
 
 export function isSpecialName(name: string): boolean {
@@ -583,12 +642,14 @@ export function mergeIn(
       const av = cascval.increaseSpecificity(specificity);
       setPropCascadeValue(target, prop, av, context);
 
-      // Expand shorthand property (its value contains variables).
-      const propListLH = (
+      // Reserve longhand slots for shorthand declarations, including
+      // browser-supported shorthands discovered lazily by ValidatorSet.
+      const validatorSet = (
         context as Exprs.Context & {
           style: { validatorSet: CssValidator.ValidatorSet };
         }
-      ).style?.validatorSet.shorthands[prop]?.propList;
+      ).style?.validatorSet;
+      const propListLH = validatorSet?.getShorthand(prop, av.value)?.propList;
       if (propListLH) {
         for (const propLH of propListLH) {
           const avLH = new CascadeValue(Css.empty, av.priority);
@@ -927,6 +988,7 @@ export class CheckTargetEpubTypeAction extends ChainedAction {
   constructor(
     public readonly epubTypePatt: RegExp,
     public readonly targetLocalName?: string,
+    public readonly useRoleAttr = false,
   ) {
     super();
   }
@@ -944,9 +1006,10 @@ export class CheckTargetEpubTypeAction extends ChainedAction {
           target &&
           (!this.targetLocalName || target.localName == this.targetLocalName)
         ) {
-          const epubType =
-            target.getAttributeNS(Base.NS.epub, "type") ||
-            target.getAttribute("epub:type");
+          const epubType = this.useRoleAttr
+            ? target.getAttribute("role")
+            : target.getAttributeNS(Base.NS.epub, "type") ||
+              target.getAttribute("epub:type");
           if (epubType && epubType.match(this.epubTypePatt)) {
             this.chained.apply(cascadeInstance);
           }
@@ -972,34 +1035,77 @@ function checkAttribute(
   element: Element,
   ns: string | null,
   name: string,
-  pred: (element: Element, ns: string, name: string) => boolean,
+  pred: (attribute: Attr) => boolean,
 ): boolean {
   if (!element) {
     return false;
   }
+  const htmlAttributeNamesAreCaseInsensitive =
+    element.ownerDocument?.contentType === "text/html";
+  const selectorName = htmlAttributeNamesAreCaseInsensitive
+    ? asciiLowerCase(name)
+    : name;
   if (ns !== null) {
-    return pred(element, ns, name);
+    const attribute = element.getAttributeNodeNS(ns || null, selectorName);
+    return !!attribute && pred(attribute);
   }
-  // For wildcard namespace
-  for (const qname of element.getAttributeNames()) {
-    if (qname === name || qname.endsWith(`:${name}`)) {
-      if (
-        pred(
-          element,
-          qname === name ? "" : element.lookupNamespaceURI(qname.split(":")[0]),
-          name,
-        )
-      ) {
-        return true;
-      }
+  for (const attribute of Array.from(element.attributes)) {
+    const attributeName = htmlAttributeNamesAreCaseInsensitive
+      ? asciiLowerCase(attribute.localName)
+      : attribute.localName;
+    if (attributeName === selectorName && pred(attribute)) {
+      return true;
     }
   }
   return false;
 }
 
+function asciiLowerCase(value: string): string {
+  return value.replace(/[A-Z]/g, (char) => char.toLowerCase());
+}
+
+function isAttributeValueCaseInsensitive(
+  caseSensitivity: CssParser.AttributeSelectorCaseSensitivity,
+): boolean {
+  return caseSensitivity === "i";
+}
+
+function escapeRegExpForAttributeValue(
+  value: string,
+  caseSensitivity: CssParser.AttributeSelectorCaseSensitivity,
+): string {
+  return Array.from(value, (char) => {
+    const escapedChar = Base.escapeRegExp(char);
+    if (!isAttributeValueCaseInsensitive(caseSensitivity)) {
+      return escapedChar;
+    }
+    const lowerChar = asciiLowerCase(char);
+    const upperChar = lowerChar.toUpperCase();
+    if (lowerChar !== upperChar && /^[a-z]$/i.test(char)) {
+      return `[${lowerChar}${upperChar}]`;
+    }
+    return escapedChar;
+  }).join("");
+}
+
+function createAttributeValueRegExp(pattern: string): RegExp {
+  return new RegExp(pattern);
+}
+
+function attributeValueEquals(
+  actualValue: string,
+  expectedValue: string,
+  caseSensitivity: CssParser.AttributeSelectorCaseSensitivity,
+): boolean {
+  if (isAttributeValueCaseInsensitive(caseSensitivity)) {
+    return asciiLowerCase(actualValue) === asciiLowerCase(expectedValue);
+  }
+  return actualValue === expectedValue;
+}
+
 export class CheckAttributePresentAction extends ChainedAction {
   constructor(
-    public readonly ns: string,
+    public readonly ns: string | null,
     public readonly name: string,
   ) {
     super();
@@ -1011,7 +1117,7 @@ export class CheckAttributePresentAction extends ChainedAction {
         cascadeInstance.currentElement,
         this.ns,
         this.name,
-        (element, ns, name) => element.hasAttributeNS(ns, name),
+        () => true,
       )
     ) {
       this.chained.apply(cascadeInstance);
@@ -1021,9 +1127,10 @@ export class CheckAttributePresentAction extends ChainedAction {
 
 export class CheckAttributeEqAction extends ChainedAction {
   constructor(
-    public readonly ns: string,
+    public readonly ns: string | null,
     public readonly name: string,
     public readonly value: string,
+    public readonly caseSensitivity: CssParser.AttributeSelectorCaseSensitivity = null,
   ) {
     super();
   }
@@ -1034,7 +1141,12 @@ export class CheckAttributeEqAction extends ChainedAction {
         cascadeInstance.currentElement,
         this.ns,
         this.name,
-        (element, ns, name) => element.getAttributeNS(ns, name) == this.value,
+        (attribute) =>
+          attributeValueEquals(
+            attribute.value,
+            this.value,
+            this.caseSensitivity,
+          ),
       )
     ) {
       this.chained.apply(cascadeInstance);
@@ -1061,7 +1173,7 @@ export class CheckAttributeEqAction extends ChainedAction {
 
 export class CheckNamespaceSupportedAction extends ChainedAction {
   constructor(
-    public readonly ns: string,
+    public readonly ns: string | null,
     public readonly name: string,
   ) {
     super();
@@ -1073,8 +1185,7 @@ export class CheckNamespaceSupportedAction extends ChainedAction {
         cascadeInstance.currentElement,
         this.ns,
         this.name,
-        (element, ns, name) =>
-          !!supportedNamespaces[element.getAttributeNS(ns, name)],
+        (attribute) => !!supportedNamespaces[attribute.value],
       )
     ) {
       this.chained.apply(cascadeInstance);
@@ -1092,9 +1203,10 @@ export class CheckNamespaceSupportedAction extends ChainedAction {
 
 export class CheckAttributeRegExpAction extends ChainedAction {
   constructor(
-    public readonly ns: string,
+    public readonly ns: string | null,
     public readonly name: string,
     public readonly regexp: RegExp,
+    public readonly caseSensitivity: CssParser.AttributeSelectorCaseSensitivity = null,
   ) {
     super();
   }
@@ -1105,8 +1217,7 @@ export class CheckAttributeRegExpAction extends ChainedAction {
         cascadeInstance.currentElement,
         this.ns,
         this.name,
-        (element, ns, name) =>
-          !!element.getAttributeNS(ns, name)?.match(this.regexp),
+        (attribute) => !!attribute.value.match(this.regexp),
       )
     ) {
       this.chained.apply(cascadeInstance);
@@ -2016,73 +2127,91 @@ export interface CounterResolver {
 }
 
 export class AttrValueFilterVisitor extends Css.FilterVisitor {
-  constructor(public element: Element) {
+  hadAttrFunction = false;
+
+  constructor(
+    public element: Element,
+    private readonly scope: Exprs.LexicalScope,
+    private readonly propName: string,
+    private readonly validatorSet?: CssValidator.ValidatorSet,
+  ) {
     super();
   }
 
-  private createValueFromString(str: string | null, type: string): Css.Val {
-    switch (type) {
-      case "url":
-        if (str) {
-          return new Css.URL(str); // TODO should convert to absolute path
-        }
-        return new Css.URL("about:invalid");
-      case "string":
-      default:
-        if (str) {
-          return new Css.Str(str);
-        }
-        return new Css.Str("");
+  validatePropertyValue(value: Css.Val): Css.Val {
+    if (Css.isDefaultingValue(value)) {
+      return value;
     }
+    const validator = this.validatorSet?.validators[this.propName];
+    if (validator) {
+      return value.visit(validator) ?? Css.ident.unset;
+    }
+    if (!this.propName || CSS.supports(this.propName, value.toString())) {
+      return value;
+    }
+    return Css.ident.unset;
   }
 
   override visitFunc(func: Css.Func): Css.Val {
-    if (func.name !== "attr") {
+    if (func.name.toLowerCase() !== "attr") {
       return super.visitFunc(func);
     }
-    let type = "string";
-    let attributeName: string | null = null;
-    let defaultValue: Css.Val = null;
-    if (func.values[0] instanceof Css.SpaceList) {
-      const values = (func.values[0] as Css.SpaceList).values;
-      if (values.length >= 2) {
-        type = values[1].stringValue();
-      }
-      attributeName = values[0].stringValue();
-    } else {
-      attributeName = func.values[0].stringValue();
+    this.hadAttrFunction = true;
+    const attr = CssValidator.parseAttrFunction(func);
+    if (!attr) {
+      return super.visitFunc(func);
     }
-    if (func.values.length > 1) {
-      defaultValue = this.createValueFromString(
-        func.values[1].stringValue(),
-        type,
-      );
-    } else {
-      defaultValue = this.createValueFromString(null, type);
+
+    const fallback = (
+      attr.fallback ?? CssValidator.getImplicitAttrFallback(attr.type)
+    ).visit(this);
+
+    if (!this.element || !this.element.hasAttribute(attr.attributeName)) {
+      return fallback;
     }
-    if (this.element && this.element.hasAttribute(attributeName)) {
-      return this.createValueFromString(
-        this.element.getAttribute(attributeName),
-        type,
-      );
+
+    const value = CssValidator.parseAttrValue(
+      this.scope,
+      this.element.getAttribute(attr.attributeName),
+      attr.type,
+    );
+    if (!value) {
+      return fallback;
     }
-    return defaultValue;
+    return value;
   }
 }
 
 /**
- * Get concatenated string value from CSS `string-set` and `content` property
+ * Get concatenated string value from CSS `string-set` and `content` property.
+ * When context is provided, evaluates Css.Expr objects (e.g., counter() functions)
+ * to their string values. Non-string results (except numbers) are ignored.
  */
-function getStringValueFromCssContentVal(val: Css.Val): string {
-  // When this function is called, CSS `content()`, `attr()`, `counter()`
-  // values are already resolved to strings values. Remaining non-string values
-  // are ignored.
+function getStringValueFromCssContentVal(
+  val: Css.Val,
+  context?: Exprs.Context,
+): string {
   if (Vtree.nonTrivialContent(val)) {
     if (val instanceof Css.Str) {
       return val.stringValue();
     }
+    if (val instanceof Css.Expr && context) {
+      // Evaluate expressions like counter() to get their string value.
+      // Non-string results are ignored (except numbers, which are explicitly
+      // stringified if desired).
+      const result = val.expr.evaluate(context);
+      if (typeof result === "string") {
+        return result;
+      }
+      if (typeof result === "number") {
+        return String(result);
+      }
+      return "";
+    }
     if (val instanceof Css.SpaceList) {
-      return val.values.map((v) => getStringValueFromCssContentVal(v)).join("");
+      return val.values
+        .map((v) => getStringValueFromCssContentVal(v, context))
+        .join("");
     }
   }
   return "";
@@ -2127,6 +2256,29 @@ export class ContentPropVisitor extends Css.FilterVisitor {
         style?: { pageScope?: Exprs.LexicalScope | null };
       }
     )?.style?.pageScope;
+  }
+
+  /**
+   * Helper method to evaluate CSS values containing counter() and other functions,
+   * then convert to string.
+   */
+  private evaluateAndGetString(val: Css.Val | null | undefined): string {
+    if (!val) {
+      return "";
+    }
+    // Snapshot quoteDepth to avoid leaking state changes from this evaluation.
+    const originalQuoteDepth = this.cascade.quoteDepth;
+    // Visit the value to resolve counter() and other functions
+    const resolvedVal = val.visit(this);
+    // Convert to string, evaluating any Css.Expr objects
+    const result = getStringValueFromCssContentVal(
+      resolvedVal,
+      this.cascade.context,
+    );
+    // Restore quoteDepth so that later processing (e.g., ::before/::after)
+    // is not affected by this helper.
+    this.cascade.quoteDepth = originalQuoteDepth;
+    return result;
   }
 
   override visitIdent(ident: Css.Ident): Css.Val {
@@ -2194,35 +2346,42 @@ export class ContentPropVisitor extends Css.FilterVisitor {
     cascadeDocCounters: number[],
     separator?: string,
   ): string {
-    const storeFootnoteCounterValueIfNeeded = (value: string): string => {
-      if (this.pseudoName === "footnote-call" && this.element) {
-        setFootnoteCounterValue(this.element, counterName, value);
-      }
-      return value;
-    };
     const isList = typeof separator === "string";
+    const formatCounterValues = (values: number[]): string => {
+      return isList
+        ? this.formatCounterList(values, separator as string, type)
+        : this.formatLastValue(values, type);
+    };
+    const storeFootnoteCounterValuesIfNeeded = (values: number[]): void => {
+      if (this.pseudoName === "footnote-call" && this.element) {
+        setFootnoteCounterValues(this.element, counterName, values);
+      }
+    };
+    if (this.pseudoName === "footnote-call" && this.element) {
+      const storedDuplicateSemanticFootnoteCounter =
+        getDuplicateSemanticFootnoteCounterValues(this.element, counterName);
+      if (storedDuplicateSemanticFootnoteCounter) {
+        return formatCounterValues(storedDuplicateSemanticFootnoteCounter);
+      }
+    }
     if (this.pseudoName === "footnote-marker" && this.element) {
       const map = getFootnoteCounterMap(this.element);
       const stored = map[counterName];
       if (stored) {
-        return stored;
+        return formatCounterValues(stored);
       }
     }
-    let result: string;
+    let counterValues: number[];
     if (counterName === "pages") {
-      result = isList
-        ? this.formatCounterList([], separator as string, type)
-        : this.format(0, type);
-      return result;
+      return formatCounterValues([]);
     }
 
     if (!this.element) {
       const pageCounters = store.currentPageCounters?.[counterName] || [];
       if (pageCounters.length) {
-        result = isList
-          ? this.formatCounterList(pageCounters, separator as string, type)
-          : this.formatLastValue(pageCounters, type);
-        return storeFootnoteCounterValueIfNeeded(result);
+        counterValues = pageCounters;
+        storeFootnoteCounterValuesIfNeeded(counterValues);
+        return formatCounterValues(counterValues);
       }
     }
 
@@ -2234,45 +2393,35 @@ export class ContentPropVisitor extends Css.FilterVisitor {
       const docStartCounters =
         store.currentPageDocCounters?.[counterName] || [];
       const pageStartCounters = store.currentPageCounters?.[counterName] || [];
-      const docStartVal = docStartCounters.length
-        ? docStartCounters[docStartCounters.length - 1]
-        : 0;
       const pageStartVal = pageStartCounters.length
         ? pageStartCounters[pageStartCounters.length - 1]
         : 0;
-      const docVal = docCounters.length
-        ? docCounters[docCounters.length - 1]
-        : 0;
-      const adjusted = pageStartVal + (docVal - docStartVal);
-      if (!isList) {
-        result = this.format(adjusted, type);
-        return storeFootnoteCounterValueIfNeeded(result);
-      }
-      const adjustedCounters = docCounters.length
-        ? docCounters.slice(0, -1).concat([adjusted])
+      // Adjust the outermost (first) counter value with the page contribution.
+      // The page counter operates at the outermost scope, so only the first
+      // level gets the cross-scope adjustment. Nested scopes created by
+      // counter-reset in the document are not affected.
+      const docStartVal = docStartCounters.length ? docStartCounters[0] : 0;
+      const docVal0 = docCounters.length ? docCounters[0] : 0;
+      const adjustedFirst = pageStartVal + (docVal0 - docStartVal);
+      counterValues = docCounters.length
+        ? [adjustedFirst, ...docCounters.slice(1)]
         : pageStartCounters.length
           ? pageStartCounters
           : [0];
-      result = this.formatCounterList(
-        adjustedCounters,
-        separator as string,
-        type,
-      );
-      return storeFootnoteCounterValueIfNeeded(result);
+      storeFootnoteCounterValuesIfNeeded(counterValues);
+      return formatCounterValues(counterValues);
     }
 
     if (docCounters.length) {
-      result = isList
-        ? this.formatCounterList(docCounters, separator as string, type)
-        : this.formatLastValue(docCounters, type);
-      return storeFootnoteCounterValueIfNeeded(result);
+      counterValues = docCounters;
+      storeFootnoteCounterValuesIfNeeded(counterValues);
+      return formatCounterValues(counterValues);
     }
 
     const pageCounters = store.currentPageCounters?.[counterName] || [];
-    result = isList
-      ? this.formatCounterList(pageCounters, separator as string, type)
-      : this.formatLastValue(pageCounters, type);
-    return storeFootnoteCounterValueIfNeeded(result);
+    counterValues = pageCounters;
+    storeFootnoteCounterValuesIfNeeded(counterValues);
+    return formatCounterValues(counterValues);
   }
 
   visitFuncCounter(values: Css.Val[]): Css.Val {
@@ -2507,24 +2656,58 @@ export class ContentPropVisitor extends Css.FilterVisitor {
       case "after":
       case "marker":
         {
-          const pseudos = getStyleMap(this.cascade.currentStyle, "_pseudos");
-          const val = (pseudos?.[pseudoName]?.["content"] as CascadeValue)
-            ?.value;
-          stringValue = getStringValueFromCssContentVal(val);
+          // Get the actual rendered text from the pseudo-element in the DOM.
+          // Use querySelectorAll and check parentElement to avoid matching
+          // nested pseudo-elements or user markup with data-adapt-pseudo.
+          const pseudoElems = this.element?.querySelectorAll(
+            `[data-adapt-pseudo="${pseudoName}"]`,
+          );
+          let pseudoElem: Element | null = null;
+          if (pseudoElems && this.element) {
+            for (let i = 0; i < pseudoElems.length; i++) {
+              const candidate = pseudoElems[i] as Element;
+              if (candidate.parentElement === this.element) {
+                pseudoElem = candidate;
+                break;
+              }
+            }
+          }
+          if (pseudoElem) {
+            stringValue = pseudoElem.textContent || "";
+          } else {
+            // Fallback: get from stored styles and evaluate counter() functions
+            const pseudos = getStyleMap(this.cascade.currentStyle, "_pseudos");
+            const val = (pseudos?.[pseudoName]?.["content"] as CascadeValue)
+              ?.value;
+            if (val) {
+              stringValue = this.evaluateAndGetString(val);
+            } else if (pseudoName === "marker") {
+              // Native ::marker: content was extracted to --viv-marker-content
+              const markerVal = (
+                this.cascade.currentStyle[
+                  "--viv-marker-content"
+                ] as CascadeValue
+              )?.value;
+              stringValue = getStringValueFromCssContentVal(
+                markerVal,
+                this.cascade.context,
+              );
+            }
+          }
         }
         break;
       case "first-letter":
         {
           // Respect ::before/after pseudo-elements (Issue #1174)
           const pseudos = getStyleMap(this.cascade.currentStyle, "_pseudos");
+          const beforeVal = (pseudos?.["before"]?.["content"] as CascadeValue)
+            ?.value;
+          const afterVal = (pseudos?.["after"]?.["content"] as CascadeValue)
+            ?.value;
           const r = (
-            getStringValueFromCssContentVal(
-              (pseudos?.["before"]?.["content"] as CascadeValue)?.value,
-            ) ||
+            this.evaluateAndGetString(beforeVal) ||
             this.element.textContent ||
-            getStringValueFromCssContentVal(
-              (pseudos?.["after"]?.["content"] as CascadeValue)?.value,
-            )
+            this.evaluateAndGetString(afterVal)
           ).match(Base.firstLetterPattern);
           stringValue = r ? r[0] : "";
         }
@@ -3037,7 +3220,7 @@ export class Cascade {
 export class CascadeInstance {
   code: Cascade;
   stack = [[], []] as ConditionItem[][];
-  conditions = {} as { [key: string]: number };
+  conditions = Object.create(null) as { [key: string]: number };
   currentElement: Element | null = null;
   currentElementOffset: number | null = null;
   currentStyle: ElementStyle | null = null;
@@ -3051,13 +3234,15 @@ export class CascadeInstance {
   currentPageType: string | null = null;
   previousPageType: string | null = null;
   firstPageType: string | null = null;
-  pageTypePageCounts: { [pageType: string]: number } = {};
+  pageTypePageIndices: { [pageType: string]: number[] } = Object.create(null);
   isFirst: boolean = true;
   isRoot: boolean = true;
-  counters: CounterValues = {};
+  counters: CounterValues = Object.create(null);
   lastCounterChanges: string[] = [];
-  lastCounterChangeTypes: { [key: string]: "reset" | "set" | "increment" } = {};
-  counterScoping: { [key: string]: boolean }[] = [{}];
+  lastCounterChangeTypes: {
+    [key: string]: "reset" | "set" | "increment";
+  } = Object.create(null);
+  counterScoping: { [key: string]: boolean }[] = [Object.create(null)];
   quotes: Css.Str[];
   quoteDepth: number = 0;
   lang: string = "";
@@ -3073,7 +3258,7 @@ export class CascadeInstance {
   currentFollowingSiblingTypeCounts: {
     [key: string]: { [key: string]: number };
   };
-  viewConditions: { [key: string]: Matchers.Matcher[] } = {};
+  viewConditions: { [key: string]: Matchers.Matcher[] } = Object.create(null);
   dependentConditions: string[] = [];
   elementStack: Element[];
 
@@ -3193,7 +3378,7 @@ export class CascadeInstance {
   defineCounter(counterName: string, value: number) {
     let scoping = this.counterScoping[this.counterScoping.length - 1];
     if (!scoping) {
-      scoping = {};
+      scoping = Object.create(null);
       this.counterScoping[this.counterScoping.length - 1] = scoping;
     }
     if (this.counters[counterName]) {
@@ -3211,7 +3396,7 @@ export class CascadeInstance {
     const counterChanges = new Set<string>();
     const counterChangeTypes: {
       [key: string]: "reset" | "set" | "increment";
-    } = {};
+    } = Object.create(null);
     let displayVal: Css.Val = Css.ident.inline;
     const display = props["display"] as CascadeValue;
     if (display) {
@@ -3221,12 +3406,12 @@ export class CascadeInstance {
     if (displayVal === Css.ident.none) {
       this.currentElement.setAttribute("data-viv-display-none", "true");
       this.lastCounterChanges = [];
-      this.lastCounterChangeTypes = {};
+      this.lastCounterChangeTypes = Object.create(null);
       this.counterScoping.push(null);
       return;
     } else if (this.currentElement.closest("[data-viv-display-none]")) {
       this.lastCounterChanges = [];
-      this.lastCounterChangeTypes = {};
+      this.lastCounterChangeTypes = Object.create(null);
       this.counterScoping.push(null);
       return;
     }
@@ -3264,36 +3449,39 @@ export class CascadeInstance {
       this.currentNamespace == Base.NS.XHTML
     ) {
       if (!resetMap) {
-        resetMap = {};
+        resetMap = Object.create(null);
       }
       resetMap["list-item"] = ((this.currentElement as any)?.start ?? 1) - 1;
     }
     if (Display.isListItem(displayVal)) {
       if (!incrementMap) {
-        incrementMap = {};
+        incrementMap = Object.create(null);
       }
       incrementMap["list-item"] = incrementMap["list-item"] ?? 1;
       if (
         /^\s*[-+]?\d/.test(this.currentElement?.getAttribute("value") ?? "")
       ) {
         if (!setMap) {
-          setMap = {};
+          setMap = Object.create(null);
         }
         setMap["list-item"] = (this.currentElement as any).value;
       }
     }
-    if (this.currentElement?.parentNode.nodeType === Node.DOCUMENT_NODE) {
+    if (this.currentElement?.parentNode?.nodeType === Node.DOCUMENT_NODE) {
       if (!resetMap) {
-        resetMap = {};
+        resetMap = Object.create(null);
       }
       // `counter-reset: footnote 0` is implicitly applied on the root element
       if (resetMap["footnote"] === undefined) {
         resetMap["footnote"] = 0;
       }
     }
-    if (floatVal === Css.ident.footnote) {
+    if (
+      floatVal === Css.ident.footnote &&
+      !this.currentStyle["--viv-semantic-footnote-content"]
+    ) {
       if (!incrementMap) {
-        incrementMap = {};
+        incrementMap = Object.create(null);
       }
       // `counter-increment: footnote 1` is implicitly applied on the
       // element (or pseudo element) with `float: footnote`,
@@ -3416,7 +3604,7 @@ export class CascadeInstance {
         const name = set.values[0].stringValue();
         const stringValue = set.values
           .slice(1)
-          .map((v) => getStringValueFromCssContentVal(v))
+          .map((v) => getStringValueFromCssContentVal(v, this.context))
           .join("");
         this.counterResolver.setNamedString(
           name,
@@ -3557,7 +3745,7 @@ export class CascadeInstance {
     // Convert device-cmyk() to color(srgb ...)
     this.applyCmykFilter(this.currentStyle, this.currentElement);
 
-    this.applyAttrFilter(element);
+    this.applyAttrFilter(element, styler);
     const quotesCasc = baseStyle["quotes"] as CascadeValue;
     let itemToPushLast: QuotesScopeItem | null = null;
     if (quotesCasc) {
@@ -3586,7 +3774,7 @@ export class CascadeInstance {
     const id =
       this.currentId || this.currentXmlId || element.getAttribute("name") || "";
     if (isRoot || id) {
-      const counters: CounterValues = {};
+      const counters: CounterValues = Object.create(null);
       Object.keys(this.counters).forEach((name) => {
         counters[name] = Array.from(this.counters[name]);
       });
@@ -3602,10 +3790,44 @@ export class CascadeInstance {
         }
         const pseudoProps = pseudos[pseudoName];
         if (pseudoProps) {
+          const floatValue = getProp(this.currentStyle, "float")?.value;
+          const isSemanticNoteref =
+            element instanceof Element &&
+            SemanticFootnote.isSemanticFootnoteNoterefElement(element);
+          const isSemanticFootnote =
+            element instanceof Element &&
+            SemanticFootnote.isSemanticFootnoteElement(element);
+          const isSemanticFootnoteContent = !!getProp(
+            this.currentStyle,
+            "--viv-semantic-footnote-content",
+          );
+          const isFootnoteFloat = floatValue === Css.ident.footnote;
+          // Keep explicit empty before/after pseudos on rendered footnotes so
+          // author content:none can suppress the layout-level default separator.
+          const allowFootnoteBeforeAfter =
+            (pseudoName === "before" || pseudoName === "after") &&
+            (isFootnoteFloat ||
+              isSemanticFootnote ||
+              isSemanticFootnoteContent) &&
+            !!pseudoProps["content"];
+          const hasSemanticFootnotePseudoContent =
+            hasNonTrivialFootnotePseudoContent(pseudoProps);
+          const allowSemanticFootnoteCall =
+            pseudoName === "footnote-call" &&
+            isSemanticNoteref &&
+            hasSemanticFootnotePseudoContent;
+          const allowSemanticFootnoteMarker =
+            pseudoName === "footnote-marker" &&
+            (isSemanticFootnote || isSemanticFootnoteContent) &&
+            hasSemanticFootnotePseudoContent;
           if (
             ((pseudoName === "before" || pseudoName === "after") &&
-              !Vtree.nonTrivialContent(
-                (pseudoProps["content"] as CascadeValue)?.value,
+              !(
+                allowFootnoteBeforeAfter ||
+                Vtree.nonTrivialContent(
+                  (pseudoProps["content"] as CascadeValue)?.value,
+                ) ||
+                this.hasNonTrivialViewConditionalPseudoContent(pseudoProps)
               )) ||
             (pseudoName === "marker" &&
               !Display.isListItem(
@@ -3613,19 +3835,78 @@ export class CascadeInstance {
               )) ||
             ((pseudoName === "footnote-call" ||
               pseudoName === "footnote-marker") &&
-              getProp(this.currentStyle, "float")?.value !== Css.ident.footnote)
+              floatValue !== Css.ident.footnote &&
+              !allowSemanticFootnoteCall &&
+              !allowSemanticFootnoteMarker) ||
+            ((pseudoName === "footnote-call" ||
+              pseudoName === "footnote-marker") &&
+              isSemanticFootnoteContent &&
+              !hasSemanticFootnotePseudoContent)
           ) {
             delete pseudos[pseudoName];
           } else if (before) {
             this.processPseudoelementProps(pseudoProps, element, pseudoName);
 
             if (pseudoName === "marker") {
-              // Make marker content from list-style-* properties
+              // Extract ::marker properties into CSS custom properties on the
+              // parent element, then remove the pseudo-element so the browser's
+              // native ::marker is used instead.
               this.processMarkerPseudoelementProps(
                 pseudoProps,
                 element,
                 styler,
               );
+              // Delete the pseudo to prevent fake element generation
+              delete pseudos[pseudoName];
+            } else if (pseudoName === "footnote-marker") {
+              // For ::footnote-marker, use native ::marker only when
+              // list-style-position: outside. When inside (default), use
+              // traditional marker span to support properties like
+              // vertical-align that ::marker doesn't support.
+              const fnMarkerListStylePos =
+                this.resolvePseudoelementInheritedPropertyValue(
+                  pseudoProps,
+                  "list-style-position",
+                  styler,
+                  element,
+                );
+              if (fnMarkerListStylePos === Css.ident.outside) {
+                // Use native ::marker with CSS custom properties
+                this.processMarkerPseudoelementProps(
+                  pseudoProps,
+                  element,
+                  styler,
+                );
+                // Preserve the original footnote-marker content for semantic
+                // footnotes so vgen can re-evaluate it with the final counter.
+                const footnoteMarkerContent = pseudoProps[
+                  "content"
+                ] as CascadeValue;
+                if (footnoteMarkerContent) {
+                  this.currentStyle["_footnote-marker-content"] =
+                    footnoteMarkerContent;
+                }
+                // Set display: list-item for native ::marker to work
+                this.currentStyle["display"] = new CascadeValue(
+                  Css.getName("list-item"),
+                  0,
+                );
+                this.currentStyle["list-style-position"] = new CascadeValue(
+                  Css.ident.outside,
+                  0,
+                );
+                this.currentStyle["list-style-type"] = new CascadeValue(
+                  Css.ident.none,
+                  0,
+                );
+                this.currentStyle["list-style-image"] = new CascadeValue(
+                  Css.ident.none,
+                  0,
+                );
+                // Delete the pseudo to prevent fake element generation
+                delete pseudos[pseudoName];
+              }
+              // else: keep the pseudo for traditional span-based rendering
             } else if (
               pseudoName === "first-letter" &&
               pseudoProps["initial-letter"]
@@ -3666,19 +3947,71 @@ export class CascadeInstance {
     }
   }
 
+  private hasNonTrivialViewConditionalPseudoContent(
+    pseudoProps: ElementStyle,
+  ): boolean {
+    const viewConditionalStyles = pseudoProps["_viewConditionalStyles"] as
+      | { matcher: Matchers.Matcher; styles: ElementStyle }[]
+      | undefined;
+    if (!viewConditionalStyles || viewConditionalStyles.length <= 0) {
+      return false;
+    }
+    return viewConditionalStyles.some((entry) =>
+      Vtree.nonTrivialContent((entry.styles["content"] as CascadeValue)?.value),
+    );
+  }
+
+  /**
+   * Properties that are valid on ::marker and should be extracted
+   * to CSS custom properties on the parent element.
+   */
+  static readonly markerAllowedProps: string[] = [
+    "color",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "font-variant",
+    "hyphens",
+    "line-height",
+    "tab-size",
+    "text-combine-upright",
+    "text-emphasis-color",
+    "text-emphasis-position",
+    "text-emphasis-style",
+    "text-orientation",
+    "text-shadow",
+    "text-transform",
+    "unicode-bidi",
+    "direction",
+    "white-space",
+  ];
+
+  /**
+   * Extract ::marker or ::footnote-marker properties into CSS custom
+   * properties (--viv-marker-*) on the parent element's currentStyle,
+   * so that the browser's native ::marker can be controlled via polyfill CSS.
+   *
+   * For ::marker: the content is resolved from list-style-type/list-style-image
+   * if not explicitly set.  For ::footnote-marker: the content comes from
+   * ::footnote-marker { content: ... } declarations.
+   */
   processMarkerPseudoelementProps(
     pseudoProps: ElementStyle,
     element: Element,
     styler: CssStyler.AbstractStyler,
   ): void {
+    const isListItem = Display.isListItem(
+      (this.currentStyle["display"] as CascadeValue)?.value,
+    );
+
+    // Resolve marker content from list-style-* if no explicit content
     if (
       !Vtree.nonTrivialContent(
         (pseudoProps["content"] as CascadeValue)?.value,
       ) &&
-      Display.isListItem((this.currentStyle["display"] as CascadeValue)?.value)
+      isListItem
     ) {
-      // If no ::marker content is specified and the element is a list-item,
-      // make content from list-style-type or list-style-image.
       const listStyleType = this.getInheritedPropertyValue(
         "list-style-type",
         styler,
@@ -3690,8 +4023,7 @@ export class CascadeInstance {
         element,
       );
       if (listStyleImage instanceof Css.URL) {
-        // list-style-image: <URL>
-        // -> content: <URL> " "
+        // list-style-image: <URL> -> content: <URL> " "
         pseudoProps["content"] = new CascadeValue(
           new Css.SpaceList([listStyleImage, new Css.Str(" ")]),
           0,
@@ -3709,19 +4041,56 @@ export class CascadeInstance {
             ?.value as Css.Num
         )?.num;
         if (listItemCount != null) {
-          pseudoProps["content"] = new CascadeValue(
-            new Css.Str(
-              this.counterStyleStore.formatMarker(
-                listStyleType.name,
-                listItemCount,
+          const lowerName = listStyleType.name.toLowerCase();
+          if (
+            lowerName === "disc" ||
+            lowerName === "circle" ||
+            lowerName === "square" ||
+            lowerName === "disclosure-open" ||
+            lowerName === "disclosure-closed"
+          ) {
+            // Bullet types: let the browser handle natively via
+            // list-style-type. Don't set --viv-marker-content.
+          } else {
+            pseudoProps["content"] = new CascadeValue(
+              new Css.Str(
+                this.counterStyleStore.formatMarker(
+                  listStyleType.name,
+                  listItemCount,
+                ),
               ),
-            ),
+              0,
+            );
+          }
+        }
+      }
+    }
+
+    // Now extract the resolved content to CSS custom property
+    const contentCasc = pseudoProps["content"] as CascadeValue;
+    if (contentCasc) {
+      const contentVal = contentCasc.value;
+      if (Vtree.nonTrivialContent(contentVal)) {
+        // Resolve any Css.Expr nodes (e.g., from counter()) to strings
+        const resolvedContent = this.resolveMarkerContentVal(contentVal);
+        this.currentStyle["--viv-marker-content"] = new CascadeValue(
+          resolvedContent,
+          0,
+        );
+      }
+    }
+
+    // Extract allowed ::marker properties to CSS custom properties
+    for (const propName of CascadeInstance.markerAllowedProps) {
+      const prop = pseudoProps[propName] as CascadeValue;
+      if (prop) {
+        const val = prop.evaluate(this.context, propName);
+        if (val && !Css.isDefaultingValue(val)) {
+          this.currentStyle[`--viv-marker-${propName}`] = new CascadeValue(
+            val,
             0,
           );
         }
-        // This is used in the marker layout processing in
-        // `PseudoelementStyler.processMarker()` in pseudo-element.ts.
-        pseudoProps["list-style-type"] = new CascadeValue(listStyleType, 0);
       }
     }
 
@@ -3732,15 +4101,39 @@ export class CascadeInstance {
         styler,
         element,
       );
-      if (listStylePosition) {
-        // This is used in the marker layout processing in
-        // `PseudoelementStyler.processMarker()` in pseudo-element.ts.
-        pseudoProps["list-style-position"] = new CascadeValue(
+      if (
+        listStylePosition &&
+        listStylePosition !== Css.ident.outside &&
+        !Css.isDefaultingValue(listStylePosition)
+      ) {
+        this.currentStyle["list-style-position"] = new CascadeValue(
           listStylePosition,
           0,
         );
       }
     }
+  }
+
+  /**
+   * Resolve Css.Expr nodes in marker content to static values.
+   * counter() functions are evaluated to strings; URLs are kept as-is.
+   */
+  private resolveMarkerContentVal(val: Css.Val): Css.Val {
+    if (val instanceof Css.Expr) {
+      const result = val.expr.evaluate(this.context);
+      if (typeof result === "string") {
+        return new Css.Str(result);
+      }
+      if (typeof result === "number") {
+        return new Css.Str(String(result));
+      }
+      return val;
+    }
+    if (val instanceof Css.SpaceList) {
+      const resolved = val.values.map((v) => this.resolveMarkerContentVal(v));
+      return new Css.SpaceList(resolved);
+    }
+    return val;
   }
 
   /**
@@ -3781,27 +4174,79 @@ export class CascadeInstance {
     return validatorSet?.defaultValues[propName] ?? null;
   }
 
+  resolvePseudoelementInheritedPropertyValue(
+    pseudoProps: ElementStyle,
+    propName: string,
+    styler: CssStyler.AbstractStyler,
+    element: Element,
+  ): Css.Val | null {
+    const prop = pseudoProps[propName] as CascadeValue;
+    if (prop) {
+      const val = prop.evaluate(this.context, propName);
+      if (
+        val !== Css.ident.inherit &&
+        val !== Css.ident.unset &&
+        val !== Css.ident.revert
+      ) {
+        if (val === Css.ident.initial) {
+          const validatorSet = (
+            styler as AbstractStyler & {
+              validatorSet: CssValidator.ValidatorSet;
+            }
+          ).validatorSet;
+          return validatorSet?.defaultValues[propName] ?? null;
+        }
+        return val;
+      }
+    }
+    return this.getInheritedPropertyValue(propName, styler, element);
+  }
+
   private applyAttrFilterInner(
-    visitor: Css.Visitor,
+    styler: CssStyler.AbstractStyler,
+    element: Element,
     elementStyle: ElementStyle,
   ): void {
+    const scope = (styler as AbstractStyler & { scope: Exprs.LexicalScope })
+      .scope;
+    const validatorSet = (
+      styler as AbstractStyler & {
+        validatorSet: CssValidator.ValidatorSet;
+      }
+    ).validatorSet;
     for (const propName in elementStyle) {
       if (isPropName(propName) && !Css.isCustomPropName(propName)) {
-        elementStyle[propName] = (
-          elementStyle[propName] as CascadeValue
-        ).filterValue(visitor);
+        const cascVal = elementStyle[propName] as CascadeValue;
+        const visitor = new AttrValueFilterVisitor(
+          element,
+          scope,
+          propName,
+          validatorSet,
+        );
+        const filtered = cascVal.filterValue(visitor);
+        if (!visitor.hadAttrFunction) {
+          elementStyle[propName] = filtered;
+          continue;
+        }
+        const validatedValue = visitor.validatePropertyValue(filtered.value);
+        elementStyle[propName] =
+          validatedValue === filtered.value
+            ? filtered
+            : new CascadeValue(validatedValue, filtered.priority);
       }
     }
   }
 
-  private applyAttrFilter(element: Element): void {
-    const visitor = new AttrValueFilterVisitor(element);
+  private applyAttrFilter(
+    element: Element,
+    styler: CssStyler.AbstractStyler,
+  ): void {
     const currentStyle = this.currentStyle;
     const pseudoMap = getStyleMap(currentStyle, "_pseudos");
     for (const pseudoName in pseudoMap) {
-      this.applyAttrFilterInner(visitor, pseudoMap[pseudoName]);
+      this.applyAttrFilterInner(styler, element, pseudoMap[pseudoName]);
     }
-    this.applyAttrFilterInner(visitor, currentStyle);
+    this.applyAttrFilterInner(styler, element, currentStyle);
   }
 
   /**
@@ -3813,12 +4258,112 @@ export class CascadeInstance {
     element: Element | null,
   ): void {
     const elementStyle = elementStyles[0];
-    const visitor = new VarFilterVisitor(elementStyles, styler, element);
+    const sourceElementStyles = elementStyles.map((style) => ({ ...style }));
     const LIMIT_LOOP = 32; // prevent cyclic or too deep dependency
     const propsLH: ElementStyle = {}; // for shorthand -> longhand cascade
+    const pendingPseudoMap = getStyleMap(elementStyle, "_pseudos");
+    const propNames = Object.keys(elementStyle).filter(isPropName);
+
+    const applyVarFilterToProperty = (name: string): void => {
+      const cascVal = getProp(elementStyle, name);
+      let value = cascVal.value;
+      const lookupElementStyles = Css.isCustomPropName(name)
+        ? sourceElementStyles
+        : elementStyles;
+      const visitor = new VarFilterVisitor(
+        lookupElementStyles,
+        styler,
+        element,
+        Css.isCustomPropName(name) ? name : null,
+      );
+
+      if (
+        Css.isCustomPropName(name) &&
+        visitor.getFallbackCycleMembers(value, lookupElementStyles, element)
+      ) {
+        value = Css.ident.initial;
+      }
+
+      for (let i = 0; ; i++) {
+        if (i >= LIMIT_LOOP) {
+          value = Css.isCustomPropName(name) ? Css.ident.initial : Css.empty;
+          break;
+        }
+        const after = value.visit(visitor);
+        if (visitor.error) {
+          // invalid or unresolved variable found
+          value = Css.isCustomPropName(name) ? Css.ident.initial : Css.empty;
+          visitor.error = false;
+          break;
+        }
+        if (after === value) {
+          // no variable, or all variables substituted
+          break;
+        }
+        // variables substituted, but the substituted value may contain variables
+        value = after;
+      }
+      if (value !== cascVal.value) {
+        // all variables substituted
+        const validatorSet = (styler as any)
+          .validatorSet as CssValidator.ValidatorSet;
+        const shorthand = validatorSet?.getShorthand(name, value)?.clone();
+        if (shorthand) {
+          if (Css.isDefaultingValue(value)) {
+            for (const nameLH of shorthand.propList) {
+              const avLH = new CascadeValue(value, cascVal.priority);
+              const tvLH = getProp(elementStyle, nameLH);
+              setProp(propsLH, nameLH, cascadeValues(this.context, tvLH, avLH));
+            }
+            delete elementStyle[name];
+          } else {
+            // The var()-substituted value may have complex structure
+            // (e.g. SpaceList in SpaceList) that ShorthandValidator
+            // cannot handle directly, so normalize it through parseValue
+            // before expanding the shorthand to longhands.
+            const valueSH = CssParser.parseValue(
+              (styler as any).scope,
+              new CssTokenizer.Tokenizer(value.toString(), null),
+              "",
+            );
+            if (valueSH) {
+              valueSH.visit(shorthand);
+              if (!shorthand.error) {
+                for (const nameLH of shorthand.propList) {
+                  const avLH = new CascadeValue(
+                    shorthand.values[nameLH] ??
+                      validatorSet.defaultValues[nameLH] ??
+                      Css.ident.initial,
+                    cascVal.priority,
+                  );
+                  const tvLH = getProp(elementStyle, nameLH);
+                  setProp(
+                    propsLH,
+                    nameLH,
+                    cascadeValues(this.context, tvLH, avLH),
+                  );
+                }
+                delete elementStyle[name];
+              }
+            }
+          }
+        } else {
+          elementStyle[name] = new CascadeValue(value, cascVal.priority);
+        }
+      }
+      if (propsLH[name]) {
+        const av = getProp(elementStyle, name);
+        if (av && av.value !== Css.empty) {
+          setPropCascadeValue(propsLH, name, av, this.context);
+        }
+      }
+    };
 
     for (const name in elementStyle) {
       if (isMapName(name)) {
+        if (name === "_pseudos") {
+          continue;
+        }
         const pseudoMap = getStyleMap(elementStyle, name);
         for (const pseudoName in pseudoMap) {
           this.applyVarFilter(
@@ -3827,86 +4372,25 @@ export class CascadeInstance {
             element,
           );
         }
-      } else if (isPropName(name)) {
-        const cascVal = getProp(elementStyle, name);
-        let value = cascVal.value;
-
-        for (let i = 0; ; i++) {
-          if (i >= LIMIT_LOOP) {
-            value = Css.empty;
-            break;
-          }
-          const after = value.visit(visitor);
-          if (visitor.error) {
-            // invalid or unresolved variable found
-            value = Css.empty;
-            visitor.error = false;
-            break;
-          }
-          if (after === value) {
-            // no variable, or all variables substituted
-            break;
-          }
-          // variables substituted, but the substituted value may contain variables
-          value = after;
-        }
-        if (value !== cascVal.value) {
-          // all variables substituted
-          const validatorSet = (styler as any)
-            .validatorSet as CssValidator.ValidatorSet;
-          const shorthand = validatorSet?.shorthands[name]?.clone();
-          if (shorthand) {
-            if (Css.isDefaultingValue(value)) {
-              for (const nameLH of shorthand.propList) {
-                const avLH = new CascadeValue(value, cascVal.priority);
-                const tvLH = getProp(elementStyle, nameLH);
-                setProp(
-                  propsLH,
-                  nameLH,
-                  cascadeValues(this.context, tvLH, avLH),
-                );
-              }
-              delete elementStyle[name];
-            } else {
-              // The var()-substituted value may have complex structure
-              // (e.g. SpaceList in SpaceList) that ShorthandValidator
-              // cannot handle, so use toString and parseValue.
-              const valueSH = CssParser.parseValue(
-                (styler as any).scope,
-                new CssTokenizer.Tokenizer(value.toString(), null),
-                "",
-              );
-              if (valueSH) {
-                valueSH.visit(shorthand);
-                if (!shorthand.error) {
-                  for (const nameLH of shorthand.propList) {
-                    const avLH = new CascadeValue(
-                      shorthand.values[nameLH] ??
-                        validatorSet.defaultValues[nameLH] ??
-                        Css.ident.initial,
-                      cascVal.priority,
-                    );
-                    const tvLH = getProp(elementStyle, nameLH);
-                    setProp(
-                      propsLH,
-                      nameLH,
-                      cascadeValues(this.context, tvLH, avLH),
-                    );
-                  }
-                  delete elementStyle[name];
-                }
-              }
-            }
-          } else {
-            elementStyle[name] = new CascadeValue(value, cascVal.priority);
-          }
-        }
-        if (propsLH[name]) {
-          const av = getProp(elementStyle, name);
-          if (av && av.value !== Css.empty) {
-            setPropCascadeValue(propsLH, name, av, this.context);
-          }
-        }
+      }
+    }
+    for (const name of propNames) {
+      if (Css.isCustomPropName(name)) {
+        applyVarFilterToProperty(name);
+      }
+    }
+    for (const name of propNames) {
+      if (!Css.isCustomPropName(name)) {
+        applyVarFilterToProperty(name);
+      }
+    }
+    if (pendingPseudoMap) {
+      for (const pseudoName in pendingPseudoMap) {
+        this.applyVarFilter(
+          [pendingPseudoMap[pseudoName], ...elementStyles],
+          styler,
+          element,
+        );
       }
     }
     // Update elementStyle with shorthand -> longhand cascade result
@@ -4067,7 +4551,6 @@ export const EMPTY: string[] = [];
  */
 export const pseudoNames = [
   "before",
-  "transclusion-before",
   "footnote-call",
   "footnote-marker",
   "marker",
@@ -4075,7 +4558,6 @@ export const pseudoNames = [
   "first-letter",
   "first-line",
   "", // content
-  "transclusion-after",
   "after",
 ];
 
@@ -4106,6 +4588,7 @@ export class CascadeParserHandler
   elementStyle: ElementStyle = null;
   conditionCount: number = 0;
   pseudoelement: string | null = null;
+  selectorFunctionContainsPseudoelement: boolean = false;
   footnoteContent: boolean = false;
   cascade: Cascade;
   state: ParseState;
@@ -4146,6 +4629,22 @@ export class CascadeParserHandler
     this.insertNonPrimary(chained);
   }
 
+  private invalidContinuationAfterPseudoelement(continuation: string): boolean {
+    if (this.pseudoelement) {
+      this.invalidSelector(
+        `::${this.pseudoelement} followed by ${continuation}`,
+      );
+      return true;
+    }
+    if (this.selectorFunctionContainsPseudoelement) {
+      this.invalidSelector(
+        `Selector containing pseudo-element followed by ${continuation}`,
+      );
+      return true;
+    }
+    return false;
+  }
+
   isInsideSelectorRule(mnemonics: string): boolean {
     if (this.state != ParseState.TOP) {
       this.reportAndSkip(mnemonics);
@@ -4156,6 +4655,9 @@ export class CascadeParserHandler
 
   override tagSelector(ns: string | null, name: string | null): void {
     if (!name && !ns) {
+      return;
+    }
+    if (this.invalidContinuationAfterPseudoelement(name ? name : "*")) {
       return;
     }
     if (name) {
@@ -4188,8 +4690,7 @@ export class CascadeParserHandler
   }
 
   override classSelector(name: string): void {
-    if (this.pseudoelement) {
-      this.invalidSelector(`::${this.pseudoelement} followed by .${name}`);
+    if (this.invalidContinuationAfterPseudoelement(`.${name}`)) {
       return;
     }
     this.specificity += 256;
@@ -4200,8 +4701,7 @@ export class CascadeParserHandler
     name: string,
     params: (number | string)[],
   ): void {
-    if (this.pseudoelement) {
-      this.invalidSelector(`::${this.pseudoelement} followed by :${name}`);
+    if (this.invalidContinuationAfterPseudoelement(`:${name}`)) {
       return;
     }
     switch (name.toLowerCase()) {
@@ -4222,18 +4722,23 @@ export class CascadeParserHandler
         this.chain.push(new CheckLocalNameAction("a"));
         this.chain.push(new CheckAttributePresentAction("", "href"));
         break;
-      case "-adapt-href-epub-type":
       case "href-epub-type":
+      case "href-role-type":
         if (params && params.length >= 1 && typeof params[0] == "string") {
           const value = params[0] as string;
           const patt = new RegExp(`(^|\\s)${Base.escapeRegExp(value)}(\$|\\s)`);
           const targetLocalName = params[1] as string;
-          this.chain.push(new CheckTargetEpubTypeAction(patt, targetLocalName));
+          this.chain.push(
+            new CheckTargetEpubTypeAction(
+              patt,
+              targetLocalName,
+              name === "href-role-type",
+            ),
+          );
         } else {
           this.chain.push(new CheckConditionAction("")); // always fails
         }
         break;
-      case "-adapt-footnote-content":
       case "footnote-content":
         // content inside the footnote
         this.footnoteContent = true;
@@ -4312,6 +4817,9 @@ export class CascadeParserHandler
     name: string,
     params: (number | string)[],
   ): void {
+    if (this.invalidContinuationAfterPseudoelement(`::${name}`)) {
+      return;
+    }
     switch (name) {
       case "before":
       case "after":
@@ -4363,18 +4871,24 @@ export class CascadeParserHandler
   }
 
   override idSelector(id: string): void {
+    if (this.invalidContinuationAfterPseudoelement(`#${id}`)) {
+      return;
+    }
     this.specificity += 65536;
     this.chain.push(new CheckIdAction(id));
   }
 
   override attributeSelector(
-    ns: string,
+    ns: string | null,
     name: string,
     op: TokenType,
     value: string | null,
+    modifier?: CssParser.AttributeSelectorCaseSensitivity,
   ): void {
+    if (this.invalidContinuationAfterPseudoelement(`[${name}]`)) {
+      return;
+    }
     this.specificity += 256;
-    name = name.toLowerCase();
     value = value || "";
     let action;
     switch (op) {
@@ -4382,7 +4896,7 @@ export class CascadeParserHandler
         action = new CheckAttributePresentAction(ns, name);
         break;
       case TokenType.EQ:
-        action = new CheckAttributeEqAction(ns, name, value);
+        action = new CheckAttributeEqAction(ns, name, value, modifier ?? null);
         break;
       case TokenType.TILDE_EQ:
         if (!value || value.match(/\s/)) {
@@ -4391,7 +4905,10 @@ export class CascadeParserHandler
           action = new CheckAttributeRegExpAction(
             ns,
             name,
-            new RegExp(`(^|\\s)${Base.escapeRegExp(value)}(\$|\\s)`),
+            createAttributeValueRegExp(
+              `(^|\\s)${escapeRegExpForAttributeValue(value, modifier ?? null)}(\$|\\s)`,
+            ),
+            modifier ?? null,
           );
         }
         break;
@@ -4399,7 +4916,10 @@ export class CascadeParserHandler
         action = new CheckAttributeRegExpAction(
           ns,
           name,
-          new RegExp(`^${Base.escapeRegExp(value)}(\$|-)`),
+          createAttributeValueRegExp(
+            `^${escapeRegExpForAttributeValue(value, modifier ?? null)}(\$|-)`,
+          ),
+          modifier ?? null,
         );
         break;
       case TokenType.HAT_EQ:
@@ -4409,7 +4929,10 @@ export class CascadeParserHandler
           action = new CheckAttributeRegExpAction(
             ns,
             name,
-            new RegExp(`^${Base.escapeRegExp(value)}`),
+            createAttributeValueRegExp(
+              `^${escapeRegExpForAttributeValue(value, modifier ?? null)}`,
+            ),
+            modifier ?? null,
           );
         }
         break;
@@ -4420,7 +4943,10 @@ export class CascadeParserHandler
           action = new CheckAttributeRegExpAction(
             ns,
             name,
-            new RegExp(`${Base.escapeRegExp(value)}\$`),
+            createAttributeValueRegExp(
+              `${escapeRegExpForAttributeValue(value, modifier ?? null)}\$`,
+            ),
+            modifier ?? null,
           );
         }
         break;
@@ -4431,7 +4957,10 @@ export class CascadeParserHandler
           action = new CheckAttributeRegExpAction(
             ns,
             name,
-            new RegExp(Base.escapeRegExp(value)),
+            createAttributeValueRegExp(
+              escapeRegExpForAttributeValue(value, modifier ?? null),
+            ),
+            modifier ?? null,
           );
         }
         break;
@@ -4451,6 +4980,9 @@ export class CascadeParserHandler
   }
 
   override descendantSelector(): void {
+    if (this.invalidContinuationAfterPseudoelement("descendant selector")) {
+      return;
+    }
     const condition = `d${conditionCount++}`;
     this.processChain(
       new ConditionItemAction(
@@ -4462,6 +4994,9 @@ export class CascadeParserHandler
   }
 
   override childSelector(): void {
+    if (this.invalidContinuationAfterPseudoelement("child selector")) {
+      return;
+    }
     const condition = `c${conditionCount++}`;
     this.processChain(
       new ConditionItemAction(
@@ -4473,6 +5008,11 @@ export class CascadeParserHandler
   }
 
   override adjacentSiblingSelector(): void {
+    if (
+      this.invalidContinuationAfterPseudoelement("adjacent sibling selector")
+    ) {
+      return;
+    }
     const condition = `a${conditionCount++}`;
     this.processChain(
       new ConditionItemAction(
@@ -4484,6 +5024,11 @@ export class CascadeParserHandler
   }
 
   override followingSiblingSelector(): void {
+    if (
+      this.invalidContinuationAfterPseudoelement("following sibling selector")
+    ) {
+      return;
+    }
     const condition = `f${conditionCount++}`;
     this.processChain(
       new ConditionItemAction(
@@ -4501,6 +5046,7 @@ export class CascadeParserHandler
   override nextSelector(): void {
     this.finishChain();
     this.pseudoelement = null;
+    this.selectorFunctionContainsPseudoelement = false;
     this.footnoteContent = false;
     this.specificity = 0;
     this.chain = [];
@@ -4513,6 +5059,7 @@ export class CascadeParserHandler
     this.state = ParseState.SELECTOR;
     this.elementStyle = {} as ElementStyle;
     this.pseudoelement = null;
+    this.selectorFunctionContainsPseudoelement = false;
     this.specificity = 0;
     this.footnoteContent = false;
     this.chain = [];
@@ -4550,6 +5097,7 @@ export class CascadeParserHandler
       this.processChain(this.makeApplyRuleAction(this.specificity));
       this.chain = null;
       this.pseudoelement = null;
+      this.selectorFunctionContainsPseudoelement = false;
       this.viewConditionId = null;
       this.footnoteContent = false;
       this.specificity = 0;
@@ -4702,6 +5250,7 @@ export class MatchesParameterParserHandler extends CascadeParserHandler {
   chains: ChainedAction[][] = [];
   maxSpecificity: number = 0;
   selectorTexts: string[] = [];
+  containsPseudoelementSelector: boolean = false;
 
   constructor(public readonly parent: CascadeParserHandler) {
     super(
@@ -4717,6 +5266,7 @@ export class MatchesParameterParserHandler extends CascadeParserHandler {
   }
 
   override nextSelector(): void {
+    this.containsPseudoelementSelector ||= !!this.pseudoelement;
     if (this.chain) {
       this.chains.push(this.chain);
     }
@@ -4729,6 +5279,7 @@ export class MatchesParameterParserHandler extends CascadeParserHandler {
   }
 
   override endFuncWithSelector(): void {
+    this.containsPseudoelementSelector ||= !!this.pseudoelement;
     if (this.chain) {
       this.chains.push(this.chain);
     }
@@ -4744,6 +5295,8 @@ export class MatchesParameterParserHandler extends CascadeParserHandler {
       if (this.increasingSpecificity()) {
         this.parent.specificity += this.maxSpecificity;
       }
+      this.parent.selectorFunctionContainsPseudoelement ||=
+        this.containsPseudoelementSelector;
     } else {
       // func argument is empty or all invalid
       this.parentChain.push(new CheckConditionAction("")); // always fails
@@ -5263,21 +5816,298 @@ export const convertToPhysical = <T>(
  * Convert var() to its value
  */
 export class VarFilterVisitor extends Css.FilterVisitor {
+  private resolvingCustomProperties = [] as string[];
+  private varResolutionState = { cycleMembers: new Set<string>() };
+
   constructor(
     public elementStyles: ElementStyle[],
     public styler: CssStyler.AbstractStyler,
     public element: Element | null,
+    private readonly currentCustomPropertyName: string | null = null,
   ) {
     super();
+    if (currentCustomPropertyName) {
+      this.resolvingCustomProperties.push(currentCustomPropertyName);
+    }
+  }
+
+  private getRawCustomPropertyLookup(
+    name: string,
+    elementStyles: ElementStyle[],
+    element: Element | null,
+  ): {
+    found: boolean;
+    value: Css.Val | null;
+    elementStyles: ElementStyle[];
+    element: Element | null;
+  } {
+    let elem = element ?? ((this.styler as any).root as Element);
+    if (elementStyles?.length) {
+      for (let index = 0; index < elementStyles.length; index++) {
+        const style = elementStyles[index];
+        const val = (style[name] as CascadeValue)?.value;
+        if (!val) {
+          continue;
+        }
+        if (val === Css.ident.initial) {
+          return {
+            found: true,
+            value: null,
+            elementStyles: elementStyles.slice(index),
+            element,
+          };
+        }
+        if (
+          val === Css.ident.inherit ||
+          val === Css.ident.unset ||
+          val === Css.ident.revert
+        ) {
+          continue;
+        }
+        return {
+          found: true,
+          value: val,
+          elementStyles: elementStyles.slice(index),
+          element,
+        };
+      }
+      if (element) {
+        elem = element.parentElement;
+      }
+    }
+    for (; elem; elem = elem.parentElement) {
+      const style = this.styler.getStyle(elem, false);
+      const val = (style?.[name] as CascadeValue)?.value;
+      if (!val) {
+        continue;
+      }
+      if (val === Css.ident.initial) {
+        return {
+          found: true,
+          value: null,
+          elementStyles: style ? [style] : [],
+          element: elem,
+        };
+      }
+      if (
+        val === Css.ident.inherit ||
+        val === Css.ident.unset ||
+        val === Css.ident.revert
+      ) {
+        continue;
+      }
+      return {
+        found: true,
+        value: val,
+        elementStyles: style ? [style] : [],
+        element: elem,
+      };
+    }
+    return {
+      found: false,
+      value: null,
+      elementStyles: [],
+      element: null,
+    };
+  }
+
+  private collectReferencedCustomProperties(val: Css.Val): string[] {
+    const names = new Set<string>();
+    class ReferenceVisitor extends Css.Visitor {
+      override visitFunc(func: Css.Func): Css.Val {
+        const name = func.values[0] instanceof Css.Ident && func.values[0].name;
+        if (func.name === "var" && name && Css.isCustomPropName(name)) {
+          names.add(name);
+        }
+        return super.visitFunc(func);
+      }
+    }
+    val.visit(new ReferenceVisitor());
+    return Array.from(names);
+  }
+
+  private findReferencedCycleStart(
+    val: Css.Val,
+    elementStyles: ElementStyle[],
+    element: Element | null,
+    visited = new Set<string>(),
+  ): string | null {
+    for (const name of this.collectReferencedCustomProperties(val)) {
+      if (this.resolvingCustomProperties.includes(name)) {
+        return name;
+      }
+      if (visited.has(name)) {
+        continue;
+      }
+      visited.add(name);
+      const lookup = this.getRawCustomPropertyLookup(
+        name,
+        elementStyles,
+        element,
+      );
+      const cycleStartName =
+        lookup.value &&
+        this.findReferencedCycleStart(
+          lookup.value,
+          lookup.elementStyles,
+          lookup.element,
+          visited,
+        );
+      if (cycleStartName) {
+        return cycleStartName;
+      }
+    }
+    return null;
+  }
+
+  getFallbackCycleMembers(
+    val: Css.Val,
+    elementStyles: ElementStyle[],
+    element: Element | null,
+  ): Set<string> | null {
+    let cycleStartName: string | null = null;
+    const self = this;
+    class FallbackReferenceVisitor extends Css.Visitor {
+      override visitFunc(func: Css.Func): Css.Val {
+        if (func.name === "var") {
+          for (const fallbackVal of func.values.slice(1)) {
+            const referencedCycleStart = self.findReferencedCycleStart(
+              fallbackVal,
+              elementStyles,
+              element,
+            );
+            if (referencedCycleStart) {
+              cycleStartName = referencedCycleStart;
+              return null;
+            }
+          }
+        }
+        return super.visitFunc(func);
+      }
+    }
+    val.visit(new FallbackReferenceVisitor());
+    if (!cycleStartName) {
+      return null;
+    }
+    const cycleStartIndex =
+      this.resolvingCustomProperties.indexOf(cycleStartName);
+    return new Set(this.resolvingCustomProperties.slice(cycleStartIndex));
+  }
+
+  private resolveCustomProperty(
+    name: string,
+    val: Css.Val | null | undefined,
+    elementStyles: ElementStyle[],
+    element: Element | null,
+  ): { found: boolean; value: Css.Val | null; continueLookup: boolean } {
+    if (!val) {
+      return { found: false, value: null, continueLookup: false };
+    }
+    if (val === Css.ident.initial) {
+      return { found: true, value: null, continueLookup: false };
+    }
+    if (
+      val === Css.ident.inherit ||
+      val === Css.ident.unset ||
+      val === Css.ident.revert
+    ) {
+      return { found: true, value: null, continueLookup: true };
+    }
+    const fallbackCycleMembers = this.getFallbackCycleMembers(
+      val,
+      elementStyles,
+      element,
+    );
+    if (fallbackCycleMembers) {
+      fallbackCycleMembers.forEach((member) =>
+        this.varResolutionState.cycleMembers.add(member),
+      );
+      return { found: true, value: null, continueLookup: false };
+    }
+    return {
+      found: true,
+      value: this.resolveReferencedCustomProperty(
+        name,
+        val,
+        elementStyles,
+        element,
+      ),
+      continueLookup: false,
+    };
+  }
+
+  private resolveReferencedCustomProperty(
+    name: string,
+    value: Css.Val,
+    elementStyles: ElementStyle[],
+    element: Element | null,
+  ): Css.Val | null {
+    const cycleIndex = this.resolvingCustomProperties.indexOf(name);
+    if (cycleIndex >= 0) {
+      this.resolvingCustomProperties
+        .slice(cycleIndex)
+        .forEach((member) => this.varResolutionState.cycleMembers.add(member));
+      return null;
+    }
+
+    const previousCycleMembers = new Set(this.varResolutionState.cycleMembers);
+    this.varResolutionState.cycleMembers = new Set();
+    const nestedVisitor = new VarFilterVisitor(
+      elementStyles,
+      this.styler,
+      element,
+      name,
+    );
+    nestedVisitor.resolvingCustomProperties = this.resolvingCustomProperties;
+    nestedVisitor.resolvingCustomProperties.push(name);
+    nestedVisitor.varResolutionState = this.varResolutionState;
+
+    let resolvedValue = value;
+    const LIMIT_LOOP = 32;
+    for (let i = 0; ; i++) {
+      if (i >= LIMIT_LOOP) {
+        resolvedValue = null;
+        break;
+      }
+      const after = resolvedValue.visit(nestedVisitor);
+      if (nestedVisitor.error) {
+        resolvedValue = null;
+        break;
+      }
+      if (after === resolvedValue) {
+        break;
+      }
+      resolvedValue = after;
+    }
+
+    const hadCycleMembers = this.varResolutionState.cycleMembers;
+    this.varResolutionState.cycleMembers = new Set([
+      ...previousCycleMembers,
+      ...hadCycleMembers,
+    ]);
+    this.resolvingCustomProperties.pop();
+    return hadCycleMembers.has(name) ? null : resolvedValue;
   }
 
   private getVarValue(name: string): Css.Val {
     let elem = this.element ?? ((this.styler as any).root as Element);
     if (this.elementStyles?.length) {
-      for (const style of this.elementStyles) {
-        const val = (style[name] as CascadeValue)?.value;
-        if (val) {
-          return val;
+      for (let index = 0; index < this.elementStyles.length; index++) {
+        const style = this.elementStyles[index];
+        const resolved = this.resolveCustomProperty(
+          name,
+          (style[name] as CascadeValue)?.value,
+          this.elementStyles.slice(index),
+          this.element,
+        );
+        if (!resolved.found) {
+          continue;
+        }
+        if (resolved.value) {
+          return resolved.value;
+        }
+        if (!resolved.continueLookup) {
+          return null;
         }
       }
       if (this.element) {
@@ -5285,10 +6115,21 @@ export class VarFilterVisitor extends Css.FilterVisitor {
       }
     }
     for (; elem; elem = elem.parentElement) {
-      const val = (this.styler.getStyle(elem, false)?.[name] as CascadeValue)
-        ?.value;
-      if (val) {
-        return val;
+      const style = this.styler.getStyle(elem, false);
+      const resolved = this.resolveCustomProperty(
+        name,
+        (style?.[name] as CascadeValue)?.value,
+        style ? [style] : [],
+        elem,
+      );
+      if (!resolved.found) {
+        continue;
+      }
+      if (resolved.value) {
+        return resolved.value;
+      }
+      if (!resolved.continueLookup) {
+        return null;
       }
     }
     return null;
@@ -5306,6 +6147,13 @@ export class VarFilterVisitor extends Css.FilterVisitor {
     const varVal = this.getVarValue(name);
     if (varVal) {
       return varVal;
+    }
+    if (
+      this.currentCustomPropertyName &&
+      this.varResolutionState.cycleMembers.has(this.currentCustomPropertyName)
+    ) {
+      this.error = true;
+      return Css.empty;
     }
     // fallback value
     if (func.values.length < 2) {
@@ -5374,8 +6222,9 @@ export class CalcFilterVisitor extends Css.FilterVisitor {
 
   override visitNumeric(numeric: Css.Numeric): Css.Val {
     if (
-      this.resolveViewportUnit &&
-      (Exprs.isViewportRelativeLengthUnit(numeric.unit) ||
+      (this.resolveViewportUnit &&
+        Exprs.isViewportRelativeLengthUnit(numeric.unit)) ||
+      (this.context.rootFontSize != null &&
         Exprs.isRootFontRelativeLengthUnit(numeric.unit))
     ) {
       return new Css.Numeric(

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Table page break test</title>
+  <style>
+@page {
+  size: 500px;
+  margin: 50px;
+  outline: 1px solid cyan;
+  @bottom-center {
+    content: "Page " counter(page);
+    font-size: 14px;
+    line-height: 1;
+  }
+}
+body {
+  margin: 0;
+  font: 16px/22px serif;
+  widows: 1;
+  orphans: 1;
+}
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  border: 4px solid;
+}
+td {
+  border: 1px solid;
+  padding: 0 4px;
+  vertical-align: top;
+}
+  </style>
+</head>
+<body>
+  <!--
+    Test: Table page breaking (auto + forced)
+    - Issue #1849: Auto page breaking inside cells without overflow
+    - Issue #1492: Forced page breaks on table rows and cells
+
+    Expected: 5 pages
+    Page 1: R1 auto-broken (lines 1-18 in each cell)
+    Page 2: R1 continued (lines 19-22)
+    Page 3: R2 (forced break-before: page on row)
+    Page 4: R3 + R4 (forced break-before: page on cell)
+    Page 5: R5 (forced break-after: page on R4)
+  -->
+  <table>
+    <tr>
+      <td>
+        R1C1 (1)<br>R1C1 (2)<br>R1C1 (3)<br>R1C1 (4)<br>
+        R1C1 (5)<br>R1C1 (6)<br>R1C1 (7)<br>R1C1 (8)<br>
+        R1C1 (9)<br>R1C1 (10)<br>R1C1 (11)<br>R1C1 (12)<br>
+        R1C1 (13)<br>R1C1 (14)<br>R1C1 (15)<br>R1C1 (16)<br>
+        R1C1 (17)<br>R1C1 (18)<br>R1C1 (19)<br>R1C1 (20)<br>
+        R1C1 (21)<br>R1C1 (22)
+      </td>
+      <td>
+        R1C2 (1)<br>R1C2 (2)<br>R1C2 (3)<br>R1C2 (4)<br>
+        R1C2 (5)<br>R1C2 (6)<br>R1C2 (7)<br>R1C2 (8)<br>
+        R1C2 (9)<br>R1C2 (10)<br>R1C2 (11)<br>R1C2 (12)<br>
+        R1C2 (13)<br>R1C2 (14)<br>R1C2 (15)<br>R1C2 (16)<br>
+        R1C2 (17)<br>R1C2 (18)<br>R1C2 (19)<br>R1C2 (20)<br>
+        R1C2 (21)<br>R1C2 (22)
+      </td>
+    </tr>
+    <tr style="break-before: page;">
+      <td>R2C1 — break-before: page on row</td>
+      <td>R2C2</td>
+    </tr>
+    <tr>
+      <td style="break-before: page;">R3C1 — break-before: page on cell</td>
+      <td>R3C2</td>
+    </tr>
+    <tr style="break-after: page;">
+      <td>R4C1 — break-after: page on row</td>
+      <td>R4C2</td>
+    </tr>
+    <tr>
+      <td>R5C1 — after forced break</td>
+      <td>R5C2</td>
+    </tr>
+  </table>
+</body>
+</html>

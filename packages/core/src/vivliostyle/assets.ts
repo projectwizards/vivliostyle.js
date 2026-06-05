@@ -104,6 +104,8 @@ export const VivliostyleViewportCss = `
 }
 
 [data-vivliostyle-debug] [data-vivliostyle-layout-box] {
+  right: auto;
+  bottom: auto;
   z-index: auto;
   overflow: visible;
 }
@@ -211,20 +213,6 @@ export const VivliostyleViewportCss = `
   [data-vivliostyle-spread-container] [data-vivliostyle-page-container]:not(:last-child) {
     break-after: page;
   }
-
-  /* Gecko-only hack, see https://bugzilla.mozilla.org/show_bug.cgi?id=267029#c17 */
-  @-moz-document url-prefix()  {
-    [data-vivliostyle-spread-container] [data-vivliostyle-page-container]:nth-last-child(n + 2) {
-      top: -1px;
-      margin-top: 1px;
-      margin-bottom: -1px;
-    }
-    /* Workaround Gecko problem on page break */
-    [data-vivliostyle-spread-container] [data-vivliostyle-page-container] {
-      break-after: auto !important;
-      height: 100% !important;
-    }
-  }
 }
 `;
 
@@ -295,8 +283,6 @@ caption-side = top | bottom;
 clip = rect(ALENGTH{4}) | rect(SPACE(ALENGTH{4})) | auto;
 color = COLOR;
 LIST_STYLE_TYPE = IDENT;
-TYPE_OR_UNIT_IN_ATTR = string | color | url | integer | number | length | angle | time | frequency;
-ATTR = attr(SPACE(IDENT TYPE_OR_UNIT_IN_ATTR?) [ STRING | IDENT | COLOR | INT | NUM | PLENGTH | ANGLE | POS_TIME | FREQUENCY]?);
 CONTENT_LIST = [ STRING | URI | counter(IDENT LIST_STYLE_TYPE?) |
     counters(IDENT STRING LIST_STYLE_TYPE?) | ATTR |
     target-counter([ STRING | URI ] IDENT LIST_STYLE_TYPE?) |
@@ -665,6 +651,7 @@ background-blend-mode = COMMA( BLEND_MODE+ );
 
 /* CSS GCPM */
 string-set = COMMA( SPACE( IDENT CONTENT_LIST )+ | none );
+footnote-display = block | inline | compact;
 footnote-policy = auto | line;
 
 /* CSS Repeated Headers and Footers */
@@ -872,6 +859,7 @@ export const UserAgentXml = `
 
 .-vivliostyle-footnote-content {
   float: footnote;
+  --viv-semantic-footnote-content: 1;
 }
 
 .-vivliostyle-table-cell-container {
@@ -903,19 +891,16 @@ export const UserAgentPageCss = `
   break-before: right;
 }
 
-@page {
-  @footnote {
-    margin-block-start: 0.5em;
-  }
-  @footnote ::before {
-    display: block;
-    border-block-start-width: 1px;
-    border-block-start-style: solid;
-    border-block-start-color: black;
-    margin-block-end: 0.4em;
-    margin-inline-start: 0;
-    margin-inline-end: 60%;
-  }
+@footnote {
+  margin-block-start: 0.5em;
+}
+@footnote ::before {
+  border-block-start-width: 1px;
+  border-block-start-style: solid;
+  border-block-start-color: black;
+  margin-block-end: 0.4em;
+  margin-inline-start: 0;
+  margin-inline-end: 60%;
 }
 
 /* default page master */
@@ -1019,7 +1004,7 @@ export const UserAgentPageCss = `
 `;
 
 /** user-agent-base.css */
-export const UserAgentBaseCss = `
+export const UserAgentBaseCss = String.raw`
 @namespace "http://www.w3.org/1999/xhtml";
 @namespace m "http://www.w3.org/1998/Math/MathML";
 @namespace epub "http://www.idpf.org/2007/ops";
@@ -1216,6 +1201,10 @@ sub {
 sup {
   vertical-align: super;
 }
+sub,
+sup {
+  line-height: 1;
+}
 table {
   box-sizing: border-box;
   border-spacing: 2px;
@@ -1281,10 +1270,10 @@ ol[type=a], li[type=a] { list-style-type: lower-alpha; }
 ol[type=A], li[type=A] { list-style-type: upper-alpha; }
 ol[type=i], li[type=i] { list-style-type: lower-roman; }
 ol[type=I], li[type=I] { list-style-type: upper-roman; }
-ul[type=none], li[type=none] { list-style-type: none; }
-ul[type=disc], li[type=disc] { list-style-type: disc; }
-ul[type=circle], li[type=circle] { list-style-type: circle; }
-ul[type=square], li[type=square] { list-style-type: square; }
+ul[type=none i], li[type=none i] { list-style-type: none; }
+ul[type=disc i], li[type=disc i] { list-style-type: disc; }
+ul[type=circle i], li[type=circle i] { list-style-type: circle; }
+ul[type=square i], li[type=square i] { list-style-type: square; }
 u,
 ins {
   text-decoration: underline;
@@ -1361,34 +1350,64 @@ m|math[display="block"] {
   display: block math;
 }
 
-/*------------------ epub-specific ---------------------*/
-
-a[epub|type="noteref"],
-a[epub\\:type="noteref"] {
+/* CSS GCPM footnotes */
+::footnote-marker {
+  list-style-position: inside;
+}
+/* Semantic DPUB/EPUB footnotes provide their own default call/marker path. */
+:not(aside[epub|type~="footnote"], aside[epub\:type~="footnote"], aside[role~="doc-footnote"])::footnote-marker {
+  content: counter(footnote) ". ";
+}
+:not(a[epub|type~="noteref"], a[epub\:type~="noteref"], a[role~="doc-noteref"])::footnote-call {
+  content: counter(footnote);
   font-size: 0.75em;
   vertical-align: super;
-  line-height: 0.01;
+  line-height: 0;
+}
+
+/* EPUB/DPUB footnotes */
+
+a[epub|type="noteref"]:not(sup > *, :has(> sup)),
+a[epub\:type="noteref"]:not(sup > *, :has(> sup)),
+a[role="doc-noteref"]:not(sup > *, :has(> sup)) {
+  font-size: 0.75em;
+  vertical-align: super;
+  line-height: 0;
+}
+
+a[epub|type="noteref"][data-vivliostyle-footnote-first-ref],
+a[epub\:type="noteref"][data-vivliostyle-footnote-first-ref],
+a[role="doc-noteref"][data-vivliostyle-footnote-first-ref] {
+  counter-increment: footnote;
 }
 
 a[epub|type="noteref"]:href-epub-type(footnote, aside),
-a[epub\\:type="noteref"]:href-epub-type(footnote, aside) {
+a[epub\:type="noteref"]:href-epub-type(footnote, aside),
+a[role="doc-noteref"]:href-role-type(doc-footnote, aside) {
   -adapt-template: footnote;
   text-decoration: none;
 }
 
-aside[epub|type="footnote"],
-aside[epub\\:type="footnote"] {
+aside[epub|type="footnote"][data-vivliostyle-footnote-referenced],
+aside[epub\:type="footnote"][data-vivliostyle-footnote-referenced],
+aside[role="doc-footnote"][data-vivliostyle-footnote-referenced] {
   display: none;
 }
 
 aside[epub|type="footnote"]:footnote-content,
-aside[epub\\:type="footnote"]:footnote-content {
+aside[epub\:type="footnote"]:footnote-content,
+aside[role="doc-footnote"]:footnote-content {
   display: block;
-  margin: 0.25em;
-  font-size: 1.2em;
-  line-height: 1.2;
+  font-size: 0.9em;
 }
 
+aside[epub|type="footnote"]:footnote-content a[epub|type="backlink"],
+aside[epub\:type="footnote"]:footnote-content a[epub\:type="backlink"],
+aside[role="doc-footnote"]:footnote-content a[role="doc-backlink"] {
+  text-decoration: none;
+}
+
+/* EPUB-specific */
 epub|trigger {
   display: none;
 }
@@ -1573,29 +1592,80 @@ span[data-viv-leader] {
 }
 
 /* ::marker */
-/* Mozilla Bullet font (https://github.com/mozilla/gecko-dev/blob/master/layout/style/res/Mozilla_Bullet.woff2) */
-@font-face {
-  font-family: "-viv-moz-bullet";
-  src: url("data:font/woff2;base64,d09GMgABAAAAAAScAAsAAAAACfAAAARNAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAABmAAhBIRCAqGMIRJATYCJAMsCxgABCAFhF4HaBsuCMgehXEsLOlXaXd7sgbPQ172fjLwdhYFM92mABaiTuRVdO5/mx9I5UJiJom3phLRQw/TSF2M/vo25+pNyWkNws81NrUDAAf0QOdfcf7nmPEyBPZtCbbZEDuosskKZG922ZhBenh05qcSXktf6s3Oy9dAkWsyDzMoM5QTKcwKNjFayUPSREGFhUMrdE8MJsH052qGcYNO3pbEaYIBoDTItIKGAqhDdKHRD0kkKg6QGSCWEfueTNr3P6OvYaIbDH/8ULEAbjQtUt+hT/qmX/SH/twwMLDqN4jxzXjy4PHtltSA6lINqkpRd7N7onVBP20y7YBWyDIHFEBjqKBFMmECfQcTZtD3MmEB/SATVtCPM2ED/TQTdtCfS0/pEsN4ySin3r8q8xHE+0D0XMg8gJi4YrNpNv3qetXuDyeo6OBNZrq5gi7ouC1zcmB2Fd+FewIhcUIfszpF1hzXhrmMCwxaznRyZjig6Y2W7+bBn2DL8fJu/2oHbWc6X80+LUTXcVzv8O3IOy4qKVyFw/DHaMtfzNQEi5gbFT/EDpiofbpkYq2dQui6WcpfxrVBEJ/KxbLA4ZroZoVx+iE+QeTIiI7oKuoUIk/a1ekEOoNFjozm0suYYUelq13/88K1c3PTH9O9Q0d5LZbu7+J2aT7XP23KyQs+34WTU7r8d/k0l6dLl98Dn+/BSUZc7U0mm7FqhSMO9EHV/j5FB4qYX4aXNaKwz/4RRfAWsW8xGW+hvr8PTAf6IP9mRpkDwwv7QFz9HRuOeGWfd8rkyYsWTVy4vpG/pgVNWzBx0aTeIgeq58XFVfZXVduwuOq51a77aT0XLVw4v1PBFjRsQzO+tVeVp3KIwqfKbd6sdjzGvFSuPMquGpMT29lkrhwbE5uz6cGHhIETB06oUk+6tHLJgfnu/3nVnJzYxiXNjQNjYqsu+vCgYKDla5uUOzTNDZg46eCBd3d3gSk9Kz/bFiv8hvOzCT5eqyjBGerT+EiG/JGqwbC+UQ6Bv9bmKGWMj8Yn+fPVRJxKBGqTFXQyM9DhHSlvEHmLVxyYjY/Fdd3hACfLyP3VVZLvVR7B0pxSsGIBqHhwT5sSMOMkRG0BJhpsWMkEO24KwE0pqp3tIYTWCIjJjuBiGNTKTj8JoBLKAn4TmPFnj9oywZwFGx4egp1g3oObeLHdwUO2pFcYTITZCa2c1GQbNg6RCsu9bpikThhAWnLaBi3LM8+5VbMU6rUn30owOC83ULcfBlClb5BBre46BinaWRal85SUvlCbUx1Nbyj2HWCxBTkEgWScQKzsTioJW0IanAYRZqET4mZLSKU2JABII9np01lQ7lOt3srtM1KAeqgQPhYJSMCZJRuAukRZB1CF35gB1MJBr4ilIPZchNyIlDkpRt+3s96cz9K8XKQvCdZfcqWxgtLoXZ2AoKAyVSRRxSRmsYjVOriP089q3z6gdMjE5KI7kzumWzpnAwAAAA==") format("woff2");
-}
-[data-adapt-pseudo="marker"] {
+[style*="--viv-marker-content"]::marker {
+  content: var(--viv-marker-content);
   unicode-bidi: isolate;
   font-variant-numeric: tabular-nums;
   white-space: pre;
   text-transform: none;
 }
-[data-adapt-pseudo="marker"]._viv-marker-bullet {
-  font-family: "-viv-moz-bullet";
-  font-style: normal;
-  font-weight: normal;
+/* ::footnote-marker inherits --viv-marker-content from the footnote element */
+.-vivliostyle-footnote-content::marker {
+  content: var(--viv-marker-content);
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+  text-transform: none;
 }
-[data-adapt-pseudo="marker"]._viv-marker-outside {
-  position: absolute;
-  text-indent: 0;
+[style*="--viv-footnote-white-space"] {
+  white-space: var(--viv-footnote-white-space);
 }
-[data-adapt-pseudo="marker"] > ._viv-marker-outside-content {
-  position: absolute;
-  inset-inline-end: 0;
+[style*="--viv-marker-color"]::marker {
+  color: var(--viv-marker-color);
+}
+[style*="--viv-marker-font-size"]::marker {
+  font-size: var(--viv-marker-font-size);
+}
+[style*="--viv-marker-font-family"]::marker {
+  font-family: var(--viv-marker-font-family);
+}
+[style*="--viv-marker-font-style"]::marker {
+  font-style: var(--viv-marker-font-style);
+}
+[style*="--viv-marker-font-weight"]::marker {
+  font-weight: var(--viv-marker-font-weight);
+}
+[style*="--viv-marker-font-variant"]::marker {
+  font-variant: var(--viv-marker-font-variant);
+}
+[style*="--viv-marker-unicode-bidi"]::marker {
+  unicode-bidi: var(--viv-marker-unicode-bidi);
+}
+[style*="--viv-marker-direction"]::marker {
+  direction: var(--viv-marker-direction);
+}
+[style*="--viv-marker-white-space"]::marker {
+  white-space: var(--viv-marker-white-space);
+}
+[style*="--viv-marker-text-transform"]::marker {
+  text-transform: var(--viv-marker-text-transform);
+}
+[style*="--viv-marker-text-combine-upright"]::marker {
+  text-combine-upright: var(--viv-marker-text-combine-upright);
+}
+[style*="--viv-marker-text-orientation"]::marker {
+  text-orientation: var(--viv-marker-text-orientation);
+}
+[style*="--viv-marker-hyphens"]::marker {
+  hyphens: var(--viv-marker-hyphens);
+}
+[style*="--viv-marker-line-height"]::marker {
+  line-height: var(--viv-marker-line-height);
+}
+[style*="--viv-marker-tab-size"]::marker {
+  tab-size: var(--viv-marker-tab-size);
+}
+[style*="--viv-marker-text-emphasis-style"]::marker {
+  text-emphasis-style: var(--viv-marker-text-emphasis-style);
+}
+[style*="--viv-marker-text-emphasis-color"]::marker {
+  text-emphasis-color: var(--viv-marker-text-emphasis-color);
+}
+[style*="--viv-marker-text-emphasis-position"]::marker {
+  text-emphasis-position: var(--viv-marker-text-emphasis-position);
+}
+[style*="--viv-marker-text-shadow"]::marker {
+  text-shadow: var(--viv-marker-text-shadow);
 }
 
 /* initial-letter */

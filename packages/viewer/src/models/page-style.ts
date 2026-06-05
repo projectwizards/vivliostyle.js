@@ -18,7 +18,7 @@
  * along with Vivliostyle UI.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import ko, { Observable, PureComputed } from "knockout";
+import ko, { Observable, WritablePureComputed } from "knockout";
 
 type PresetSize = { name: string; description: string };
 type Constants = {
@@ -150,13 +150,13 @@ class PageStyle {
   beforeOtherStyle: Observable<string>;
   afterOtherStyle: Observable<string>;
 
-  cssText: PureComputed<string>;
+  cssText: WritablePureComputed<string>;
   setViewerFontSizeObservable: (
     viewerFontSizeObservable: null | Observable<number | string>,
   ) => void;
   pageStyleRegExp: RegExp;
   viewerFontSize: null | Observable<number | string>;
-  viewerFontSizePercent: PureComputed<number | string>;
+  viewerFontSizePercent: WritablePureComputed<number | string>;
 
   static Mode = Mode;
   static Constants = CONSTANTS;

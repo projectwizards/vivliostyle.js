@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Table column break in non-root multicol</title>
+  <style>
+@page {
+  size: 500px;
+  margin: 50px;
+  outline: 1px solid cyan;
+  @bottom-center {
+    content: "Page " counter(page);
+    font-size: 14px;
+    line-height: 1;
+  }
+}
+body {
+  margin: 0;
+  font: 16px/22px serif;
+  widows: 1;
+  orphans: 1;
+}
+.multicol {
+  column-count: 2;
+}
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  border: 4px solid;
+}
+td {
+  border: 1px solid;
+  padding: 0 4px;
+  vertical-align: top;
+}
+  </style>
+</head>
+<body>
+  <!--
+    Test: nested multi-column table column breaks
+    - Issue #1854: avoid border-only trailing row fragments at page boundaries
+      and avoid re-firing break-before: column after such an empty fragment.
+
+    Expected: 3 pages
+    Page 1: R1 split across both nested columns with bottom cell borders visible.
+    Page 2: R2 in the first nested column, R3 and R4 in the second nested column.
+    Page 3: R5.
+  -->
+  <div class="multicol">
+    <table>
+      <tr>
+        <td>
+          R1C1 (1)<br>R1C1 (2)<br>R1C1 (3)<br>R1C1 (4)<br>
+          R1C1 (5)<br>R1C1 (6)<br>R1C1 (7)<br>R1C1 (8)<br>
+          R1C1 (9)<br>R1C1 (10)<br>R1C1 (11)<br>R1C1 (12)<br>
+          R1C1 (13)<br>R1C1 (14)<br>R1C1 (15)<br>R1C1 (16)<br>
+          R1C1 (17)<br>R1C1 (18)<br>R1C1 (19)<br>R1C1 (20)<br>
+          R1C1 (21)<br>R1C1 (22)
+        </td>
+        <td>
+          R1C2 (1)<br>R1C2 (2)<br>R1C2 (3)<br>R1C2 (4)<br>
+          R1C2 (5)<br>R1C2 (6)<br>R1C2 (7)<br>R1C2 (8)<br>
+          R1C2 (9)<br>R1C2 (10)<br>R1C2 (11)<br>R1C2 (12)<br>
+          R1C2 (13)<br>R1C2 (14)<br>R1C2 (15)<br>R1C2 (16)<br>
+          R1C2 (17)<br>R1C2 (18)<br>R1C2 (19)<br>R1C2 (20)<br>
+          R1C2 (21)<br>R1C2 (22)
+        </td>
+      </tr>
+      <tr style="break-before: column;">
+        <td>R2C1 -- break-before: column on row</td>
+        <td>R2C2</td>
+      </tr>
+      <tr>
+        <td style="break-before: column;">R3C1 -- break-before: column on cell</td>
+        <td>R3C2</td>
+      </tr>
+      <tr style="break-after: column;">
+        <td>R4C1 -- break-after: column on row</td>
+        <td>R4C2</td>
+      </tr>
+      <tr>
+        <td>R5C1 -- after forced break</td>
+        <td>R5C2</td>
+      </tr>
+    </table>
+  </div>
+</body>
+</html>

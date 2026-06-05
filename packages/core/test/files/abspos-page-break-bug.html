@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>abspos page break bug</title>
+  <style>
+  @page {
+    size: 500px;
+    margin: 50px;
+    @bottom-center {
+      content: "Page " counter(page);
+    }
+  }
+  .abspos {
+    position: absolute;
+    top: 220px;
+    left: 50px;
+  }
+  h2 {
+    break-before: page;
+  }
+  </style>
+</head>
+<body>
+  <h1>First Page</h1>
+  <div class="abspos">Absolute Positioned</div>
+  <h2>Second Page</h2>
+</body>
+</html>

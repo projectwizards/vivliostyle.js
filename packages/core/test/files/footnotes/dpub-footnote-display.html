@@ -1,0 +1,256 @@
+<!-- Test case for Issue #1884: semantic display:inline and footnote-display -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>DPUB footnote display</title>
+    <style>
+      @page {
+        size: 148mm 210mm;
+        margin: 16mm;
+
+        @bottom-center {
+          font-size: 0.85rem;
+          content: "Page " counter(page);
+        }
+      }
+
+      body {
+        font-family: serif;
+        line-height: 1.4;
+      }
+
+      section {
+        margin-block: 0 1.4rem;
+      }
+
+      h1 {
+        margin-bottom: 0.5rem;
+      }
+
+      h2 {
+        margin-bottom: 0.3rem;
+      }
+
+      p {
+        margin: 0.35rem 0;
+      }
+
+      .keep-together {
+        break-inside: avoid;
+      }
+
+      .expected {
+        font-size: 0.9rem;
+        font-style: italic;
+      }
+
+      .footnote-display-block {
+        color: #800;
+      }
+
+      .footnote-display-inline {
+        color: #080;
+      }
+
+      .footnote-display-inline .footnote {
+        footnote-display: inline;
+      }
+
+      .footnote-display-compact {
+        color: #008;
+      }
+
+      .footnote-display-compact .footnote {
+        footnote-display: compact;
+      }
+
+      .inline-author-separator {
+        color: #055;
+      }
+
+      .inline-author-separator .footnote {
+        footnote-display: inline;
+      }
+
+      .inline-author-separator .footnote::after {
+        content: "|";
+      }
+
+      .compact-no-separator {
+        color: #a63a00;
+      }
+
+      .compact-no-separator .footnote {
+        footnote-display: compact;
+      }
+
+      .compact-no-separator .footnote::after {
+        content: none;
+      }
+
+      .display-inline {
+        color: #005a8d;
+      }
+
+      .display-inline .footnote {
+        display: inline;
+      }
+
+      .outside-marker-inline,
+      .outside-marker-compact {
+        color: #244;
+      }
+
+      .outside-marker-inline .footnote {
+        footnote-display: inline;
+      }
+
+      .outside-marker-compact .footnote {
+        footnote-display: compact;
+      }
+
+      .outside-marker-inline .footnote-ref::footnote-call,
+      .outside-marker-compact .footnote-ref::footnote-call {
+        content: "[" counter(footnote) "]";
+      }
+
+      .outside-marker-inline .footnote::footnote-marker,
+      .outside-marker-compact .footnote::footnote-marker {
+        content: "[" counter(footnote) "] ";
+        list-style-position: outside;
+      }
+
+      .outside-marker-inline .footnote-back,
+      .outside-marker-compact .footnote-back {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>DPUB footnote display test</h1>
+    <section class="footnote-display-block">
+      <h2>footnote-display: block (default)</h2>
+      <p class="expected">
+        Each semantic footnote body should start on its own line in the footnote area by default.
+      </p>
+      <p>
+        Block footnotes remain separated<a id="block-ref-1" href="#block-note-1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+        even when the note text is short<a id="block-ref-2" href="#block-note-2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+        and could otherwise fit beside another note<a id="block-ref-3" href="#block-note-3" class="footnote-ref" role="doc-noteref"><sup>3</sup></a>.
+      </p>
+      <aside id="block-note-1" class="footnote" role="doc-footnote"><a href="#block-ref-1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>First block note.</aside>
+      <aside id="block-note-2" class="footnote" role="doc-footnote"><a href="#block-ref-2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>Second block note.</aside>
+      <aside id="block-note-3" class="footnote" role="doc-footnote"><a href="#block-ref-3" class="footnote-back" role="doc-backlink"><sup>3</sup></a>Third block note with a little more text.</aside>
+    </section>
+    <section class="footnote-display-inline">
+      <h2>footnote-display: inline</h2>
+      <p class="expected">
+        Inline footnotes should stay in one inline run even when a longer note wraps, with a normal space between note bodies.
+      </p>
+      <p>
+        Inline footnotes should begin as a loose run of notes<a id="inline-ref-1" href="#inline-note-1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+        and then continue through a longer inline note that wraps to the next line in the footnote area<a id="inline-ref-2" href="#inline-note-2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+        before a trailing short note carries on inline rather than becoming a separate block<a id="inline-ref-3" href="#inline-note-3" class="footnote-ref" role="doc-noteref"><sup>3</sup></a>.
+      </p>
+      <aside id="inline-note-1" class="footnote" role="doc-footnote"><a href="#inline-ref-1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>Short inline note.</aside>
+      <aside id="inline-note-2" class="footnote" role="doc-footnote"><a href="#inline-ref-2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>A longer inline note that should wrap to another line so the example shows that inline footnotes still remain part of one inline sequence after wrapping.</aside>
+      <aside id="inline-note-3" class="footnote" role="doc-footnote"><a href="#inline-ref-3" class="footnote-back" role="doc-backlink"><sup>3</sup></a>Trailing inline note.</aside>
+    </section>
+    <section class="footnote-display-compact">
+      <h2>footnote-display: compact</h2>
+      <p class="expected">
+        Compact footnotes should behave like unbreakable inline notes by default, and only fall back to block when a single note cannot fit on one rendered line.
+      </p>
+      <p class="keep-together">
+        Four short compact notes should wrap as inline nowrap units<a id="compact-ref-1" href="#compact-note-1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+        with the next short compact note still on that first line<a id="compact-ref-2" href="#compact-note-2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+        and then continue on the next line with another short compact note<a id="compact-ref-3" href="#compact-note-3" class="footnote-ref" role="doc-noteref"><sup>3</sup></a>
+        plus one more short compact note on that same following line<a id="compact-ref-4" href="#compact-note-4" class="footnote-ref" role="doc-noteref"><sup>4</sup></a>.
+      </p>
+      <p>
+        A compact note that is too long to fit as a single unbroken inline note should fall back to block<a id="compact-ref-5" href="#compact-note-5" class="footnote-ref" role="doc-noteref"><sup>5</sup></a>
+        while the following short compact notes can still share a later line inline<a id="compact-ref-6" href="#compact-note-6" class="footnote-ref" role="doc-noteref"><sup>6</sup></a>
+        and continue with another short compact note on that same line<a id="compact-ref-7" href="#compact-note-7" class="footnote-ref" role="doc-noteref"><sup>7</sup></a>
+        before a final longer compact note falls back to block again<a id="compact-ref-8" href="#compact-note-8" class="footnote-ref" role="doc-noteref"><sup>8</sup></a>.
+      </p>
+      <aside id="compact-note-1" class="footnote" role="doc-footnote"><a href="#compact-ref-1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>Short compact note.</aside>
+      <aside id="compact-note-2" class="footnote" role="doc-footnote"><a href="#compact-ref-2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>Another short compact note.</aside>
+      <aside id="compact-note-3" class="footnote" role="doc-footnote"><a href="#compact-ref-3" class="footnote-back" role="doc-backlink"><sup>3</sup></a>Another short compact note.</aside>
+      <aside id="compact-note-4" class="footnote" role="doc-footnote"><a href="#compact-ref-4" class="footnote-back" role="doc-backlink"><sup>4</sup></a>Short compact note.</aside>
+      <aside id="compact-note-5" class="footnote" role="doc-footnote"><a href="#compact-ref-5" class="footnote-back" role="doc-backlink"><sup>5</sup></a>A medium-length compact note that is long enough that keeping it as a single unbroken inline note would overflow the footnote measure, so it should become a block footnote.</aside>
+      <aside id="compact-note-6" class="footnote" role="doc-footnote"><a href="#compact-ref-6" class="footnote-back" role="doc-backlink"><sup>6</sup></a>Short compact note.</aside>
+      <aside id="compact-note-7" class="footnote" role="doc-footnote"><a href="#compact-ref-7" class="footnote-back" role="doc-backlink"><sup>7</sup></a>Another short note.</aside>
+      <aside id="compact-note-8" class="footnote" role="doc-footnote"><a href="#compact-ref-8" class="footnote-back" role="doc-backlink"><sup>8</sup></a>A longer trailing compact note that no longer fits as a single unbroken inline note.</aside>
+    </section>
+    <section class="outside-marker-inline">
+      <h2>footnote-display: inline with outside markers</h2>
+      <p class="expected">
+        Outside footnote markers should keep each semantic footnote as a list item, even when footnote-display:inline is specified.
+      </p>
+      <p>
+        Outside-marker inline footnotes should not collapse into one inline run<a id="outside-inline-ref-1" href="#outside-inline-note-1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+        when the marker is rendered outside the footnote body<a id="outside-inline-ref-2" href="#outside-inline-note-2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+        and a third footnote should still remain a separate list item<a id="outside-inline-ref-3" href="#outside-inline-note-3" class="footnote-ref" role="doc-noteref"><sup>3</sup></a>.
+      </p>
+      <aside id="outside-inline-note-1" class="footnote" role="doc-footnote"><a href="#outside-inline-ref-1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>Short inline note.</aside>
+      <aside id="outside-inline-note-2" class="footnote" role="doc-footnote"><a href="#outside-inline-ref-2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>A longer inline note that should wrap to another line so the example shows that outside markers do not allow one inline sequence.</aside>
+      <aside id="outside-inline-note-3" class="footnote" role="doc-footnote"><a href="#outside-inline-ref-3" class="footnote-back" role="doc-backlink"><sup>3</sup></a>Trailing inline note.</aside>
+    </section>
+    <section class="outside-marker-compact">
+      <h2>footnote-display: compact with outside markers</h2>
+      <p class="expected">
+        Outside markers should also prevent compact semantic footnotes from being forced into inline nowrap rendering.
+      </p>
+      <p>
+        Compact outside-marker footnotes should stay as separate list items<a id="outside-compact-ref-1" href="#outside-compact-note-1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+        rather than sharing a single inline row<a id="outside-compact-ref-2" href="#outside-compact-note-2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+        even when another short footnote follows<a id="outside-compact-ref-3" href="#outside-compact-note-3" class="footnote-ref" role="doc-noteref"><sup>3</sup></a>.
+      </p>
+      <aside id="outside-compact-note-1" class="footnote" role="doc-footnote"><a href="#outside-compact-ref-1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>First compact note.</aside>
+      <aside id="outside-compact-note-2" class="footnote" role="doc-footnote"><a href="#outside-compact-ref-2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>Second compact note.</aside>
+      <aside id="outside-compact-note-3" class="footnote" role="doc-footnote"><a href="#outside-compact-ref-3" class="footnote-back" role="doc-backlink"><sup>3</sup></a>Third compact note.</aside>
+    </section>
+    <section class="inline-author-separator">
+      <h2>footnote-display: inline with author ::after separator</h2>
+      <p class="expected">
+        When author CSS sets .footnote::after content, that content should replace the default space separator between inline footnotes, and line breaks should still be allowed between adjacent footnotes even though the author separator is not whitespace.
+      </p>
+      <p>
+        Author CSS should be able to use a visible non-space separator between inline semantic footnotes<a id="inline-author-ref-1" href="#inline-author-note-1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+        and keep using that author-defined separator for the next inline footnote<a id="inline-author-ref-2" href="#inline-author-note-2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+        instead of the default single ASCII space<a id="inline-author-ref-3" href="#inline-author-note-3" class="footnote-ref" role="doc-noteref"><sup>3</sup></a>.
+      </p>
+      <aside id="inline-author-note-1" class="footnote" role="doc-footnote"><a href="#inline-author-ref-1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>AuthorSeparatorAlphaSegment.</aside>
+      <aside id="inline-author-note-2" class="footnote" role="doc-footnote"><a href="#inline-author-ref-2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>AuthorSeparatorBetaSegment.</aside>
+      <aside id="inline-author-note-3" class="footnote" role="doc-footnote"><a href="#inline-author-ref-3" class="footnote-back" role="doc-backlink"><sup>3</sup></a>AuthorSeparatorGammaSegment.</aside>
+    </section>
+    <section class="compact-no-separator">
+      <h2>footnote-display: compact with author ::after none</h2>
+      <p class="expected">
+        When author CSS sets .footnote::after to none, compact inline footnotes should appear with no default separator inserted between them, but adjacent compact notes should still be able to wrap between notes.
+      </p>
+      <p>
+        Compact semantic footnotes should allow the author to suppress separators entirely<a id="compact-none-ref-1" href="#compact-none-note-1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+        so the next compact footnote follows with no generated gap yet can still move to the next line<a id="compact-none-ref-2" href="#compact-none-note-2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+        and a third note also keeps that explicit no-separator behavior<a id="compact-none-ref-3" href="#compact-none-note-3" class="footnote-ref" role="doc-noteref"><sup>3</sup></a>.
+      </p>
+      <aside id="compact-none-note-1" class="footnote" role="doc-footnote"><a href="#compact-none-ref-1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>CompactBreakAlphaSegment.</aside>
+      <aside id="compact-none-note-2" class="footnote" role="doc-footnote"><a href="#compact-none-ref-2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>CompactBreakBetaSegment.</aside>
+      <aside id="compact-none-note-3" class="footnote" role="doc-footnote"><a href="#compact-none-ref-3" class="footnote-back" role="doc-backlink"><sup>3</sup></a>CompactBreakGammaSegment.</aside>
+    </section>
+    <section class="display-inline">
+      <h2>display: inline</h2>
+      <p class="expected">
+        Semantic footnotes with display:inline should behave like footnote-display:inline and stay in one inline run in the footnote area.
+      </p>
+      <p>
+        Inline footnotes should begin as a loose run of notes<a id="display-inline-ref-1" href="#display-inline-note-1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+        and continue through another short note<a id="display-inline-ref-2" href="#display-inline-note-2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>
+        without forcing a new block for each footnote body.
+      </p>
+      <aside id="display-inline-note-1" class="footnote" role="doc-footnote"><a href="#display-inline-ref-1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>First inline note.</aside>
+      <aside id="display-inline-note-2" class="footnote" role="doc-footnote"><a href="#display-inline-ref-2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>Second inline note.</aside>
+    </section>
+  </body>
+</html>

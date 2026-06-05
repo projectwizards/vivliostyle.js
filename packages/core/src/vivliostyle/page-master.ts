@@ -28,6 +28,7 @@ import * as Exprs from "./exprs";
 import * as Font from "./font";
 import * as LayoutHelper from "./layout-helper";
 import { StyleInstance } from "./ops";
+import { addImageFetchersToPage } from "./vgen";
 import * as Vtree from "./vtree";
 
 export let keyCount: number = 1;
@@ -1506,6 +1507,24 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
         const containerSize = this.vertical
           ? container.height
           : container.width;
+        const renderedPhysicalStartOffset = parseFloat(
+          this.vertical
+            ? (column?.element.style.left ?? "")
+            : (column?.element.style.top ?? ""),
+        );
+        const basePaddingRect = container.getPaddingRect();
+        const columnLike = column as Vtree.Container & {
+          pageFloatLayoutContext?: {
+            parent?: {
+              getBlockEndEdgeOfBlockStartFloats?: (
+                inlinePos?: number,
+              ) => number;
+              getBlockStartEdgeOfBlockEndFloats?: (
+                inlinePos?: number,
+              ) => number;
+            };
+          };
+        };
         const border = this.vertical ? "border-top" : "border-left";
         for (let i = 1; i < columnCount; i++) {
           const pos = this.vertical
@@ -1517,18 +1536,71 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
               columnGap / 2 +
               container.paddingLeft -
               ruleWidth / 2;
-          const size = this.vertical
-            ? container.width + container.paddingLeft + container.paddingRight
-            : container.height + container.paddingTop + container.paddingBottom;
+          // pos is the rule box start; overlap filtering should use
+          // the rendered rule stroke center.
+          const physicalInlinePos = this.vertical
+            ? basePaddingRect.y1 + pos + ruleWidth / 2
+            : basePaddingRect.x1 + pos + ruleWidth / 2;
+          const blockStartFloatEndEdge =
+            columnLike.pageFloatLayoutContext?.parent?.getBlockEndEdgeOfBlockStartFloats?.(
+              physicalInlinePos,
+            );
+          const blockEndFloatStartEdge =
+            columnLike.pageFloatLayoutContext?.parent?.getBlockStartEdgeOfBlockEndFloats?.(
+              physicalInlinePos,
+            );
+          const blockStartLimit = isFinite(blockStartFloatEndEdge)
+            ? this.vertical
+              ? blockStartFloatEndEdge - basePaddingRect.x1
+              : blockStartFloatEndEdge - basePaddingRect.y1
+            : NaN;
+          const blockEndLimit = isFinite(blockEndFloatStartEdge)
+            ? this.vertical
+              ? blockEndFloatStartEdge - basePaddingRect.x1
+              : blockEndFloatStartEdge - basePaddingRect.y1
+            : NaN;
+          const renderedBlockSize = parseFloat(
+            this.vertical
+              ? (column?.element.style.width ?? "")
+              : (column?.element.style.height ?? ""),
+          );
+          const size =
+            renderedBlockSize > 0
+              ? renderedBlockSize
+              : this.vertical
+                ? column.width
+                : column.height;
+          const renderedStart = Math.max(
+            renderedPhysicalStartOffset > 0 ? renderedPhysicalStartOffset : 0,
+            0,
+          );
+          const renderedEnd = renderedStart + size;
+          const adjustedStart = Math.max(
+            renderedStart,
+            isFinite(this.vertical ? blockEndLimit : blockStartLimit)
+              ? Math.max(0, this.vertical ? blockEndLimit : blockStartLimit)
+              : 0,
+          );
+          const adjustedEnd = Math.min(
+            renderedEnd,
+            isFinite(this.vertical ? blockStartLimit : blockEndLimit)
+              ? Math.max(0, this.vertical ? blockStartLimit : blockEndLimit)
+              : renderedEnd,
+          );
+          const adjustedSize = Math.max(0, adjustedEnd - adjustedStart);
           const rule = container.element.ownerDocument.createElement("div");
           Base.setCSSProperty(rule, "position", "absolute");
-          Base.setCSSProperty(rule, this.vertical ? "left" : "top", "0px");
+          Base.setCSSProperty(
+            rule,
+            this.vertical ? "left" : "top",
+            `${adjustedStart}px`,
+          );
           Base.setCSSProperty(rule, this.vertical ? "top" : "left", `${pos}px`);
           Base.setCSSProperty(rule, this.vertical ? "height" : "width", "0px");
           Base.setCSSProperty(
             rule,
             this.vertical ? "width" : "height",
-            `${size}px`,
+            `${adjustedSize}px`,
           );
           Base.setCSSProperty(
             rule,
@@ -1548,6 +1620,15 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
         passPostProperties[i],
         docFaces,
       );
+    }
+    // Preload images referenced by background-image, border-image-source,
+    // and filter that were propagated from :root/body to the page container,
+    // so that page.fetchers waits for them before screenshot/render.
+    for (const name of imageProperties) {
+      const val = this.getProp(context, name);
+      if (val) {
+        addImageFetchersToPage(val, page);
+      }
     }
     for (let i = 0; i < delayedProperties.length; i++) {
       this.propagateDelayedProperty(
@@ -1689,7 +1770,23 @@ export const passPostProperties = [
 ];
 
 /**
+ * Image-bearing properties in passPostProperties whose URLs need preloading.
+ */
+const imageProperties = ["background-image", "border-image-source", "filter"];
+
+/**
  * Only passed when there is content assigned by the content property.
+ *
+ * This list is for properties that need to be propagated to the generated DOM
+ * element as browser CSS properties. Keep browser-expanded longhands here
+ * rather than their shorthand forms (for example, text-box-trim/text-box-edge
+ * instead of text-box).
+ *
+ * text-autospace and text-spacing-trim are intentionally omitted for now:
+ * generated content handles them via TextPolyfill.processGeneratedContent()
+ * with explicit values from boxInstance.getProp(), not by inheriting browser
+ * CSS properties. If generated content switches to browser-native handling for
+ * those properties in the future, add them back here.
  */
 export const passContentProperties = [
   "color",
@@ -1705,7 +1802,6 @@ export const passContentProperties = [
   "text-indent",
   "text-transform",
   "white-space",
-  "text-wrap",
   "text-wrap-mode",
   "text-wrap-style",
   "word-spacing",
@@ -1724,7 +1820,6 @@ export const passContentProperties = [
   "text-decoration-skip-ink",
   "text-decoration-style",
   "text-decoration-thickness",
-  "text-emphasis",
   "text-emphasis-color",
   "text-emphasis-position",
   "text-emphasis-style",
@@ -1736,6 +1831,9 @@ export const passContentProperties = [
   "text-underline-offset",
   "text-underline-position",
   "text-overflow",
+  "text-box-trim",
+  "text-box-edge",
+  "text-justify",
 ];
 
 export const passSingleUriContentProperties = [

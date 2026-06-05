@@ -19,6 +19,7 @@ Vivliostyle.js offers HTML+CSS typesetting and rich paged viewing with EPUB/Web 
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 
 - [Packages](#packages)
   - [`@vivliostyle/core`](#vivliostylecore)
@@ -151,6 +152,12 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/u1f992"><img src="https://avatars.githubusercontent.com/u/57749636?v=4?s=80" width="80px;" alt="Koutaro Mukai"/><br /><sub><b>Koutaro Mukai</b></sub></a><br /><a href="https://github.com/vivliostyle/vivliostyle.js/commits?author=u1f992" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/depth42"><img src="https://avatars.githubusercontent.com/u/207403?v=4?s=80" width="80px;" alt="Frank Illenberger"/><br /><sub><b>Frank Illenberger</b></sub></a><br /><a href="https://github.com/vivliostyle/vivliostyle.js/commits?author=depth42" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://www.woda.at/"><img src="https://avatars.githubusercontent.com/u/3883758?v=4?s=80" width="80px;" alt="David Mondok"/><br /><sub><b>David Mondok</b></sub></a><br /><a href="https://github.com/vivliostyle/vivliostyle.js/commits?author=davidmondok" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/jdtcn"><img src="https://avatars.githubusercontent.com/u/47177226?v=4?s=80" width="80px;" alt="Sergey"/><br /><sub><b>Sergey</b></sub></a><br /><a href="https://github.com/vivliostyle/vivliostyle.js/commits?author=jdtcn" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/tomaioo"><img src="https://avatars.githubusercontent.com/u/203048277?v=4?s=80" width="80px;" alt="tomaioo"/><br /><sub><b>tomaioo</b></sub></a><br /><a href="https://github.com/vivliostyle/vivliostyle.js/commits?author=tomaioo" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://wanderer.tw/"><img src="https://avatars.githubusercontent.com/u/1863378?v=4?s=80" width="80px;" alt="Bobby Tung"/><br /><sub><b>Bobby Tung</b></sub></a><br /><a href="https://github.com/vivliostyle/vivliostyle.js/commits?author=bobbytung" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://sayportfolio.vercel.app/"><img src="https://avatars.githubusercontent.com/u/240962040?v=4?s=80" width="80px;" alt="Sai Asish Y"/><br /><sub><b>Sai Asish Y</b></sub></a><br /><a href="https://github.com/vivliostyle/vivliostyle.js/commits?author=SAY-5" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>

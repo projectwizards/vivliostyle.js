@@ -787,6 +787,16 @@ export class Styler implements AbstractStyler {
     if (offset < rootOffset) {
       const rootStyle = this.getStyle(this.root, false);
       Asserts.assert(rootStyle);
+      if (!this.cascade.firstPageType) {
+        const rootPageCV = rootStyle["page"] as CssCascade.CascadeValue;
+        const rootPageType =
+          rootPageCV &&
+          !Css.isDefaultingValue(rootPageCV.value) &&
+          rootPageCV.value.toString();
+        if (rootPageType && rootPageType.toLowerCase() !== "auto") {
+          this.cascade.firstPageType = rootPageType;
+        }
+      }
       const flowName = CssCascade.getProp(rootStyle, "flow-into");
       const flowNameStr = flowName
         ? flowName.evaluate(context, "flow-into").toString()
@@ -990,10 +1000,10 @@ export class Styler implements AbstractStyler {
       return Number.POSITIVE_INFINITY;
     }
     const context = this.context;
-    while (true) {
+    while (this.last) {
       let next: Node = this.last.firstChild;
       if (next == null) {
-        while (true) {
+        while (this.last) {
           if (this.last.nodeType == 1) {
             this.cascade.popElement(this.last as Element);
             this.primary = this.primaryStack.pop();
@@ -1026,7 +1036,7 @@ export class Styler implements AbstractStyler {
             break;
           }
           this.last = this.last.parentNode;
-          if (this.last === this.root) {
+          if (!this.last || this.last === this.root) {
             this.last = null;
             if (startOffset < this.lastOffset) {
               if (targetSlippedOffset < 0) {
@@ -1109,14 +1119,18 @@ export class Styler implements AbstractStyler {
         }
         const blockStartOffset = this.boxStack.nearestBlockStartOffset(box);
 
-        if (blockStartOffset === 0) {
+        if (blockStartOffset === 0 || elem === this.xmldoc.body) {
           // Named page type at first page
           const pageCV = style["page"] as CssCascade.CascadeValue;
           const pageType =
             pageCV &&
             !Css.isDefaultingValue(pageCV.value) &&
             pageCV.value.toString();
-          if (pageType && pageType.toLowerCase() !== "auto") {
+          if (
+            !this.cascade.firstPageType &&
+            pageType &&
+            pageType.toLowerCase() !== "auto"
+          ) {
             this.cascade.firstPageType = pageType;
           }
         }
@@ -1169,6 +1183,7 @@ export class Styler implements AbstractStyler {
         }
       }
     }
+    return Number.POSITIVE_INFINITY;
   }
 
   /** @override */

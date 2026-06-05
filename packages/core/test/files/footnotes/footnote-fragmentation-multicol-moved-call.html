@@ -1,0 +1,63 @@
+<!-- Test case for Issue #1891: Footnote fragmentation in multicol after moving footnote call position -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>Footnote Fragmentation in Multi-Column After Moving Call</title>
+    <style>
+      @page {
+        size: 148mm 210mm;
+        margin: 20mm;
+        @footnote {
+          border-top: 1px solid black;
+          padding-top: 0.5em;
+          margin-top: 0.5em;
+        }
+      }
+      :root { font: 12pt/1.5 serif; }
+      body {
+        column-count: 2;
+        column-gap: 8mm;
+        column-rule: 1px solid #ccc;
+      }
+      h1 { font-size: 1.2em; }
+      .footnote { float: footnote; font: 0.9rem/1.4 serif; }
+    </style>
+  </head>
+  <body>
+    <h1>Footnote Fragmentation in Multi-Column After Moving Call</h1>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum
+      volutpat, nunc sit amet varius dignissim, lacus erat facilisis urna,
+      vitae facilisis lorem justo ut nulla. Integer non purus ut massa
+      scelerisque tincidunt.</p>
+    <p>Sed ut perspiciatis unde omnis iste natus error sit voluptatem
+      accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae
+      ab illo inventore veritatis et quasi architecto beatae vitae dicta
+      sunt explicabo.</p>
+    <p>Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut
+      fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem
+      sequi nesciunt.</p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.<span class="footnote">
+        This is a deliberately very long footnote that cannot fit entirely
+        in the remaining footnote area on the current page. Expected: it
+        should start on this page and continue on the next page, even after
+        moving the footnote call later in the same multi-column flow. Lorem
+        ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum
+        volutpat, nunc sit amet varius dignissim, lacus erat facilisis urna,
+        vitae facilisis lorem justo ut nulla. Integer non purus ut massa
+        scelerisque tincidunt. Sed ut perspiciatis unde omnis iste natus
+        error sit voluptatem accusantium doloremque laudantium, totam rem
+        aperiam, eaque ipsa quae ab illo inventore veritatis et quasi
+        architecto beatae vitae dicta sunt explicabo. Nemo enim ipsam
+        voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia
+        consequuntur magni dolores eos qui ratione voluptatem sequi
+        nesciunt. Eaque ipsa quae ab illo inventore veritatis et quasi
+        architecto beatae vitae dicta sunt explicabo. Nemo enim ipsam
+        voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia
+        consequuntur magni dolores eos qui ratione voluptatem sequi
+        nesciunt.
+      </span></p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+  </body>
+</html>

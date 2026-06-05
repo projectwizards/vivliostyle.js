@@ -1,0 +1,55 @@
+<!-- Test case for Issue #1884: semantic ::footnote-marker outside -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DPUB ::footnote-marker outside</title>
+  <style>
+    @page {
+      size: 160mm 120mm;
+      margin: 12mm;
+    }
+
+    :root {
+      counter-reset: footnote;
+    }
+
+    body {
+      font-family: serif;
+      line-height: 1.45;
+    }
+
+    a.footnote-ref > sup {
+      display: none;
+    }
+
+    a.footnote-ref::footnote-call {
+      content: "[" counter(footnote) "]";
+    }
+
+    aside.footnote {
+      margin-inline-start: 1.5em;
+    }
+
+    aside.footnote > a.footnote-back {
+      display: none;
+    }
+
+    aside.footnote::footnote-marker {
+      content: "[" counter(footnote) "] ";
+      list-style-position: outside;
+    }
+  </style>
+</head>
+<body>
+  <h1>DPUB ::footnote-marker outside</h1>
+  <p>Expected: generated semantic footnote markers render outside multi-line footnote bodies.</p>
+  <p>
+    Outside markers should work too<a id="fnref1" href="#fn1" class="footnote-ref" role="doc-noteref"><sup>1</sup></a>
+    with another note<a id="fnref2" href="#fn2" class="footnote-ref" role="doc-noteref"><sup>2</sup></a>.
+  </p>
+
+  <aside id="fn1" class="footnote" role="doc-footnote"><a href="#fnref1" class="footnote-back" role="doc-backlink"><sup>1</sup></a>First outside marker note with enough additional text to wrap onto a second line, making the hanging marker position easy to see.</aside>
+  <aside id="fn2" class="footnote" role="doc-footnote"><a href="#fnref2" class="footnote-back" role="doc-backlink"><sup>2</sup></a>Second outside marker note with another longer sentence so the outside alignment is visually obvious here as well.</aside>
+</body>
+</html>

@@ -137,6 +137,9 @@ export namespace Layout {
     last: Node;
     viewDocument: Document;
     flowRootFormattingContext: Vtree.FormattingContext;
+    // Issue #1842: distinguishes auto-advanced follow-up columns from the first
+    // column on a page so leading-edge forced breaks can be handled differently.
+    isNonFirstColumn: boolean;
     isFloat: boolean;
     isFootnote: boolean;
     startEdge: number;
@@ -169,6 +172,7 @@ export namespace Layout {
     pseudoParent: Column;
     nodeContextOverflowingDueToRepetitiveElements: Vtree.NodeContext | null;
     blockDistanceToBlockEndFloats: number;
+    lastLineStride: number;
     computedBlockSize: number;
 
     layoutContext: Vtree.LayoutContext;
@@ -296,14 +300,14 @@ export namespace Layout {
       anchorEdge: number | null,
       strategy: PageFloats.PageFloatLayoutStrategy,
       condition: PageFloats.PageFloatPlacementCondition,
-    ): boolean;
+    ): Task.Result<boolean>;
     createPageFloatArea(
       float: PageFloats.PageFloat | null,
       floatSide: string,
       anchorEdge: number | null,
       strategy: PageFloats.PageFloatLayoutStrategy,
       condition: PageFloats.PageFloatPlacementCondition,
-    ): PageFloatArea | null;
+    ): Task.Result<PageFloatArea | null>;
     layoutSinglePageFloatFragment(
       continuations: PageFloats.PageFloatContinuation[],
       floatSide: string,
@@ -403,10 +407,6 @@ export namespace Layout {
      * Determines if a page break is acceptable at this position
      */
     isBreakable(flowPosition: Vtree.NodeContext): boolean;
-    /**
-     * Determines if an indent value is zero
-     */
-    zeroIndent(val: string | number): boolean;
     /**
      * @return true if overflows
      */
@@ -570,6 +570,7 @@ export namespace Layout {
 
     convertPercentageSizesToPx(target: Element): void;
     fixFloatSizeAndPosition(nodeContext: Vtree.NodeContext): void;
+    getContentBlockMarginAfter(): number;
     getContentInlineSize(): number;
   }
 }
@@ -641,6 +642,8 @@ export namespace PageFloats {
   export interface PageFloat {
     order: number | null;
     id: PageFloatID | null;
+    insidePageFloatArea: boolean;
+    parentPageFloat: PageFloat | null;
     readonly nodePosition: Vtree.NodePosition;
     readonly floatReference: FloatReference;
     readonly floatSide: string;
@@ -687,12 +690,15 @@ export namespace PageFloats {
     writingMode: Css.Val;
     direction: Css.Val;
     floatFragments: PageFloatFragment[];
+    ignoreFootnoteAreaMaxHeight: boolean;
     readonly parent: PageFloatLayoutContext;
+    readonly effectiveParent: PageFloatLayoutContext | null;
     readonly flowName: string | null;
     readonly generatingNodePosition: Vtree.NodePosition | null;
 
     getContainer(floatReference?: FloatReference): Vtree.Container;
     setContainer(container: Vtree.Container);
+    setOuterContext(outerContext: PageFloatLayoutContext): void;
     addPageFloat(float: PageFloat): void;
     getPageFloatLayoutContext(
       floatReference: FloatReference,
@@ -712,10 +718,12 @@ export namespace PageFloats {
     findPageFloatFragment(float: PageFloat): PageFloatFragment | null;
     hasFloatFragments(condition?: (p1: PageFloatFragment) => boolean): boolean;
     hasContinuingFloatFragmentsInFlow(flowName: string): boolean;
+    markPageFloatAnchorSeen(float: PageFloat): void;
     registerPageFloatAnchor(float: PageFloat, anchorViewNode: Node): void;
     collectPageFloatAnchors(): any;
     isAnchorAlreadyAppeared(floatId: PageFloatID): boolean;
     deferPageFloat(continuation: PageFloatContinuation): void;
+    removeFloatDeferredToNext(float: PageFloat): void;
     hasPrecedingFloatsDeferredToNext(
       float: PageFloat,
       ignoreReference?: boolean,
@@ -728,6 +736,10 @@ export namespace PageFloats {
       flowName?: string | null,
     ): PageFloatContinuation[];
     getFloatsDeferredToNextInChildContexts(): PageFloat[];
+    initFootnoteRetryFromEmptyFragment(
+      float: PageFloat,
+      area: Layout.PageFloatArea,
+    ): boolean;
     checkAndForbidNotAllowedFloat(): boolean;
     checkAndForbidFloatFollowingDeferredFloat(): boolean;
     finish(): void;
@@ -761,7 +773,8 @@ export namespace PageFloats {
     ): string | null;
     getFloatFragmentExclusions(): GeometryUtil.Shape[];
     getMaxReachedAfterEdge(): number;
-    getBlockStartEdgeOfBlockEndFloats(): number;
+    getBlockEndEdgeOfBlockStartFloats(inlinePos?: number): number;
+    getBlockStartEdgeOfBlockEndFloats(inlinePos?: number): number;
     getPageFloatClearEdge(clear: string, column: Layout.Column): number;
     getPageFloatPlacementCondition(
       float: PageFloat,
@@ -802,7 +815,7 @@ export namespace PageFloats {
       floatArea: Layout.PageFloatArea,
       floatContainer: Vtree.Container,
       column: Layout.Column,
-    );
+    ): Task.Result<void>;
     forbid(float: PageFloat, pageFloatLayoutContext: PageFloatLayoutContext);
   }
 }
@@ -1068,7 +1081,7 @@ export namespace Vtree {
       vertical: boolean,
       rtl: boolean,
       target: Element,
-    ): boolean;
+    ): Task.Result<boolean>;
     /**
      * Peel off innermost first-XXX pseudoelement, create and create view nodes
      * after the end of that pseudoelement.
@@ -1278,7 +1291,6 @@ export namespace Vtree {
     clearSide: string | null;
     floatMinWrapBlock: Css.Numeric | null;
     columnSpan: Css.Val | null;
-    verticalAlign: string;
     captionSide: string;
     inlineBorderSpacing: number;
     blockBorderSpacing: number;

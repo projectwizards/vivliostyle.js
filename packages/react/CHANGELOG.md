@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [2.43.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.42.1...v2.43.0) (2026-05-22)
+
+**Note:** Version bump only for package @vivliostyle/react
+
+## [2.42.1](https://github.com/vivliostyle/vivliostyle.js/compare/v2.42.0...v2.42.1) (2026-05-13)
+
+**Note:** Version bump only for package @vivliostyle/react
+
+# [2.42.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.41.0...v2.42.0) (2026-04-25)
+
+**Note:** Version bump only for package @vivliostyle/react
+
+# [2.41.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.40.0...v2.41.0) (2026-04-11)
+
+### Bug Fixes
+
+- update react tsconfig and viewer computed types ([e66203c](https://github.com/vivliostyle/vivliostyle.js/commit/e66203ce904d1094a2c7ee05f4247c763636e0bb))
+- **react:** support React 18.2+ with flexible peer dependencies ([e2f292e](https://github.com/vivliostyle/vivliostyle.js/commit/e2f292e629f9abd3243254a9fed4124623220a6a)), closes [#1643](https://github.com/vivliostyle/vivliostyle.js/issues/1643)
+
 # [2.40.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.39.1...v2.40.0) (2026-01-11)
 
 ### Bug Fixes

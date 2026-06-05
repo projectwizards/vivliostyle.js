@@ -37,8 +37,6 @@ yamahige🌟
 Munehiro Yamamoto⭐️
 <p><a href="https://github.com/zonuexe"><img src="https://avatars3.githubusercontent.com/u/822086?s=460&amp;v=4" title="USAMI Kenta" width="60" height="60" style="max-width:100%;"></a>
 USAMI Kenta⭐️
-<p><a href="https://github.com/omasanori"><img src="https://avatars2.githubusercontent.com/u/167209?s=460&amp;v=4" title="Masanori Ogino" width="60" height="60" style="max-width:100%;"></a>
-omasanori⭐️
 <p><a href="https://github.com/monami-ya"><img src="https://avatars3.githubusercontent.com/u/4535778?s=460&amp;v=4" title="monami-ya" width="60" height="60" style="max-width:100%;"></a>
 monami-ya⭐️
 
@@ -62,6 +60,10 @@ niszet⭐️
 yuji-1980⭐️
 <p><a href="https://github.com/Atelier-Mirai"><img src="https://avatars3.githubusercontent.com/u/6257661?s=460&amp;v=4" title="Atelier Mirai" width="60" height="60" style="max-width:100%;"></a>
 Atelier Mirai⭐️
+<p><a href="https://github.com/nishinos"><img src="https://avatars2.githubusercontent.com/u/1988266?s=460&amp;v=4" title="nishinos" width="60" height="60" style="max-width:100%;"></a>
+nishinos⭐️
+<p><a href="https://github.com/omasanori"><img src="https://avatars2.githubusercontent.com/u/167209?s=460&amp;v=4" title="Masanori Ogino" width="60" height="60" style="max-width:100%;"></a>
+omasanori⭐️
 
 ## One-time Sponsors
 

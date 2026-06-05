@@ -1,5 +1,6 @@
 /**
  * Copyright 2017 Daishinsha Inc.
+ * Copyright 2026 Vivliostyle Foundation
  *
  * Vivliostyle.js is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
@@ -268,6 +269,36 @@ describe("xml-doc", function () {
         expect(doc.documentElement.localName).toBe("svg");
         doneSvg = true;
         complete();
+      });
+    });
+
+    it("returns a non-null XMLDocHolder for an empty response body", function (done) {
+      var docStore = adapt_xmldoc.newXMLDocStore();
+      var result = adapt_xmldoc.parseXMLResource(
+        { responseText: "", contentType: "text/html", url: "blank.html" },
+        docStore,
+      );
+      result.then(function (docHolder) {
+        expect(docHolder).not.toBeNull();
+        expect(docHolder.document).not.toBeNull();
+        done();
+      });
+    });
+
+    it("returns null for a null response body (fetch failure)", function (done) {
+      var docStore = adapt_xmldoc.newXMLDocStore();
+      var result = adapt_xmldoc.parseXMLResource(
+        {
+          responseText: null,
+          responseXML: null,
+          contentType: null,
+          url: "blank.html",
+        },
+        docStore,
+      );
+      result.then(function (docHolder) {
+        expect(docHolder).toBeNull();
+        done();
       });
     });
   });

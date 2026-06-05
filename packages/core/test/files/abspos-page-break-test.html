@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>abspos page break test</title>
+  <style>
+  @page {
+    size: 500px;
+    margin: 50px;
+    @bottom-center {
+      content: "Page " counter(page);
+    }
+  }
+  .chapter-head {
+    font-size: 50px;
+  }
+  .chapter-title {
+    position: absolute;
+    top: 100px;
+    left: 50px;
+    font-size: 50px;
+  }
+  .chapter-lead {
+    position: absolute;
+    top: 220px;
+    left: 50px;
+    font-size: 20px;
+  }
+  .section {
+    break-before: page;
+  }
+  .section-title {
+    font-size: 30px;
+  }
+  .chapter-body {
+    border: 1px solid magenta;
+  }
+  </style>
+</head>
+<body>
+  <h1 class="chapter-head">Chapter 1</h1>
+  <div class="chapter-body">
+    <h2 class="chapter-title">Chapter Title</h2>
+    <div class="chapter-lead">
+      Chapter lead text.
+    </div>
+    <section class="section">
+      <h2 class="section-title">Section Title</h2>
+      <p>Section content.</p>
+    </section>
+  </div>
+</body>
+</html>

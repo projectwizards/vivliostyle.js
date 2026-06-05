@@ -358,7 +358,7 @@ export function parseXMLResource(
   if (!doc) {
     const parser = new DOMParser();
     const text = response.responseText;
-    if (text) {
+    if (text != null) {
       const contentType = resolveContentType(response);
       doc = parseAndReturnNullIfError(
         text,

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<!-- Test case for default footnote fragmentation from an inline anchor -->
+<!--
+  Page content area: 400px wide x 300px tall, margin 20px -> content 360x260px.
+  Spacer fills 180px -> 80px remain.
+    - anchor line:              20px
+    - footnote overhead:        ~7px
+    - footnote first line:      16px
+    - minimum needed to start:  ~43px
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>footnote fragmentation from inline anchor</title>
+    <style>
+      @page {
+        size: 400px 300px;
+        margin: 20px;
+
+        @bottom-center {
+          content: "Page " counter(page);
+          font-size: 11px;
+        }
+
+        @footnote {
+          border-top: 1px solid black;
+          margin-top: 4px;
+          padding-top: 2px;
+        }
+      }
+
+      :root {
+        font-size: 16px;
+        font-family: Arial, sans-serif;
+        line-height: 20px;
+        widows: 1;
+        orphans: 1;
+      }
+
+      body,
+      div,
+      p {
+        margin: 0;
+        padding: 0;
+      }
+
+      .spacer {
+        height: 180px;
+        background: #f0f0f0;
+      }
+
+      .footnote {
+        float: footnote;
+        font-size: 12px;
+        line-height: 16px;
+      }
+
+      .footnote::footnote-call,
+      .footnote::footnote-marker {
+        content: counter(footnote);
+        vertical-align: super;
+        font-size: 10px;
+        color: blue;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="spacer"></div>
+    <p>
+      This is the anchor paragraph. It contains a footnote<span class="footnote"
+        >This footnote body spans three lines of text to make the constraint
+        meaningful. It should appear at the bottom of page 1 together with its
+        anchor, because there is enough vertical space for both.</span
+      > that should stay on the same page.
+    </p>
+  </body>
+</html>

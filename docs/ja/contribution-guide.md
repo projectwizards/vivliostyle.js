@@ -38,11 +38,11 @@ yarn build-dev  # build a development version of both Core and Viewer.
 yarn dev        # start watching source files and open browser.
 ```
 
-`yarn dev` を使用すると、（[Browsersync](https://browsersync.io/) によりライブリロードが有効な）Webサーバーが起動し、Google Chromeが自動的に開きます。 ブラウザーが開かない場合は、<http://localhost:3000/core/test/files/>を開きます。 ソースファイルを保存すると、ブラウザは自動的にリロードされます。
+`yarn dev` を使用すると、（[Browsersync](https://browsersync.io/) によりライブリロードが有効な）Webサーバーが起動し、Google Chromeが自動的に開きます。 ブラウザーが開かない場合は、<http://localhost:3300/core/test/files/>を開きます。 ソースファイルを保存すると、ブラウザは自動的にリロードされます。
 
 ### ビューワーとテストファイル
 
-開発モード中のビューワーHTMLファイルは `packages/viewer/lib/vivliostyle-viewer-dev.html` にあります。`#src=` ハッシュパラメータを指定して、ビューワーHTMLファイルから相対の(X)HTMLファイルをURLで指定できます。例えば、<http://localhost:3000/viewer/lib/vivliostyle-viewer-dev.html#src=../../core/test/files/print_media/index.html> は `packages/core/test/files/print_media/index.html` にあるprint mediaのテストファイルを開きます。
+開発モード中のビューワーHTMLファイルは `packages/viewer/lib/vivliostyle-viewer-dev.html` にあります。`#src=` ハッシュパラメータを指定して、ビューワーHTMLファイルから相対の(X)HTMLファイルをURLで指定できます。例えば、<http://localhost:3300/viewer/lib/vivliostyle-viewer-dev.html#src=../../core/test/files/print_media/index.html> は `packages/core/test/files/print_media/index.html` にあるprint mediaのテストファイルを開きます。
 
 開発中に使用することを目的としたテストHTMLファイルは、 `packages/core/test/files/` にあります。 機能の実装と検証に役立つテストファイルを追加することをお勧めします。
 
@@ -97,24 +97,22 @@ yarn version:graduate
 yarn version:bump
 ```
 
+#### 3. 公開
+
+`yarn version:*` コマンドを実行後、必要であれば `CHANGELOG.md` を編集し、その後 `yarn version:push` を実行します。これによりリリースコミットの修正（amend）とタグの更新、GitHubへのプッシュが行われ、CIがnpmへの公開とGitHub Releaseの作成を行います。
+
 ## 一貫した命名ガイドライン
 
 1. 一貫性を保つために、クラス名とそのファイル名を一致させます。
 2. モジュールのインポート名にはPascalCaseを、ファイル名にはkebab-caseを使用して、違いを視覚的に区別しやすくします。
 3. 分かりやすさのために、ファイル名とクラス名に省略語を使わないようにします。ただし以下を除きます:
-    1. イニシャリズム（EPUB、PDFなど）。
-    2. 長い名前（conditional-properties よりも conditional-props が好ましい）。
+   1. イニシャリズム（EPUB、PDFなど）。
+   2. 長い名前（conditional-properties よりも conditional-props が好ましい）。
 
 ## コミットメッセージのガイドライン
 
 このプロジェクトへの重要な変更は `CHANGELOG.md` に記録されます。
 そのためのコミットメッセージのガイドラインは [Conventional Commits](https://conventionalcommits.org) を参照。
-
-## トラブルシューティング
-
-### Cannot find `node_modules/@vivliostyle/core`
-
-これは `yarn add` の後に発生します。 インストール後にシンボリックリンクを再作成するには、 `lerna link` を実行します。それ以外の場合は、`yarn add` の代わりに `lerna add` を使用します。
 
 ## ドキュメントのメンテナンス
 
