@@ -747,13 +747,21 @@ export class StyleInstance
     const searchRootOffset = searchRoot
       ? this.xmldoc.getElementOffset(searchRoot)
       : pageStartOffset;
-    // Document start: page starts at or before the body/root element offset.
+    // Issue #1999: on the first page, @page counters must start from the
+    // body/root snapshot instead of treating document start as a synthetic
+    // page-boundary counter change.
     const isDocumentStart = pageStartOffset <= searchRootOffset;
     const resolvedStartElement =
       startElement === searchRoot && isDocumentStart
-        ? this.getFirstInFlowChildElement(searchRoot)
+        ? (this.getFirstInFlowChildElement(searchRoot) ?? startElement)
         : startElement;
     if (!resolvedStartElement) {
+      if (isDocumentStart) {
+        return {
+          counterOffset: searchRootOffset,
+          changeOffset: searchRootOffset,
+        };
+      }
       return { counterOffset: pageStartOffset, changeOffset: pageStartOffset };
     }
     const changeOffset = this.xmldoc.getElementOffset(resolvedStartElement);
@@ -792,7 +800,7 @@ export class StyleInstance
     const searchRootOffset = this.xmldoc.getElementOffset(searchRoot);
     const isDocumentStart = pageStartOffset <= searchRootOffset;
     if (startElement === searchRoot && isDocumentStart) {
-      return this.getFirstInFlowChildElement(searchRoot);
+      return this.getFirstInFlowChildElement(searchRoot) ?? startElement;
     }
 
     const startElementOffset = startElement
@@ -811,7 +819,7 @@ export class StyleInstance
         while (currentElement) {
           if (
             this.xmldoc.getElementOffset(currentElement) <= pageStartOffset &&
-            this.isNormalFlowElement(currentElement)
+            this.isPageBoundaryCandidateElement(currentElement)
           ) {
             return currentElement;
           }
@@ -857,6 +865,9 @@ export class StyleInstance
   }
 
   private getPageGroupPageType(element: Element): string | null {
+    if (this.isInlineLevelElement(element)) {
+      return null;
+    }
     const style = this.styler.getStyle(element, false);
     if (!style) {
       return null;
@@ -874,15 +885,11 @@ export class StyleInstance
     );
     let currentElement = startElement;
     while (currentElement) {
-      const style = this.styler.getStyle(currentElement, false);
-      const pageValue = style && CssCascade.getProp(style, "page");
       // Resolve the page-start named page before page master selection, where
       // `styler.cascade.currentPageType` may still describe the previous page.
-      if (pageValue && !Css.isDefaultingValue(pageValue.value)) {
-        const pageType = pageValue.evaluate(this, "page").toString();
-        if (pageType && pageType.toLowerCase() !== "auto") {
-          return pageType;
-        }
+      const pageType = this.getPageGroupPageType(currentElement);
+      if (pageType) {
+        return pageType;
       }
       if (currentElement === this.xmldoc.root) {
         break;
@@ -922,7 +929,7 @@ export class StyleInstance
   private getPreviousInFlowSibling(element: Element): Element | null {
     let sibling = element.previousElementSibling;
     while (sibling) {
-      if (this.isNormalFlowElement(sibling)) {
+      if (this.isPageBoundaryCandidateElement(sibling)) {
         return sibling;
       }
       sibling = sibling.previousElementSibling;
@@ -941,8 +948,43 @@ export class StyleInstance
       searchRootOffset,
     );
     return startElement === searchRoot
-      ? this.getFirstInFlowChildElement(searchRoot)
+      ? (this.getFirstInFlowChildElement(searchRoot) ?? startElement)
       : startElement;
+  }
+
+  private getEffectiveFirstPageType(element: Element | null): string | null {
+    let currentElement = element;
+    let effectivePageType = currentElement
+      ? this.getPageGroupPageType(currentElement)
+      : null;
+    while (currentElement) {
+      const child = this.getFirstInFlowChildElement(currentElement);
+      if (!child) {
+        return effectivePageType;
+      }
+      const childPageType = this.getPageGroupPageType(child);
+      if (childPageType) {
+        effectivePageType = childPageType;
+      }
+      currentElement = child;
+    }
+    return effectivePageType;
+  }
+
+  private getEffectivePageGroupStartElement(startElement: Element): Element {
+    let effectiveStartElement = startElement;
+    let currentElement: Element | null = startElement;
+    while (currentElement) {
+      const child = this.getFirstInFlowChildElement(currentElement);
+      if (!child) {
+        return effectiveStartElement;
+      }
+      if (this.getPageGroupPageType(child)) {
+        effectiveStartElement = child;
+      }
+      currentElement = child;
+    }
+    return effectiveStartElement;
   }
 
   /**
@@ -960,10 +1002,7 @@ export class StyleInstance
    */
   private resolveFirstPageType(): string | null {
     const firstElement = this.getFirstDocumentFlowElement();
-    if (!firstElement) {
-      return null;
-    }
-    return this.getPageGroupPageType(firstElement);
+    return this.getEffectiveFirstPageType(firstElement);
   }
 
   private shouldStartPageGroup(
@@ -1045,14 +1084,21 @@ export class StyleInstance
       !isSpreadDeferredBlankPage;
 
     const pageStartOffset = this.getPageStartOffset(layoutPosition);
-    const startElement = this.getPageStartElement(
+    const rawStartElement = this.getPageStartElement(
       layoutPosition,
       pageStartOffset,
     );
 
-    if (!startElement) {
+    if (!rawStartElement) {
       return;
     }
+
+    const startElement =
+      this.getEffectivePageGroupStartElement(rawStartElement);
+    const effectivePageStartOffset =
+      startElement === rawStartElement
+        ? pageStartOffset
+        : this.xmldoc.getElementOffset(startElement);
 
     const startDocument = startElement.ownerDocument;
     const isNewPageGroupDocument =
@@ -1081,7 +1127,7 @@ export class StyleInstance
               this.shouldStartPageGroup(
                 currentElement,
                 pageType,
-                pageStartOffset,
+                effectivePageStartOffset,
               )))
         ) {
           pageIndex += 1;
@@ -1123,7 +1169,7 @@ export class StyleInstance
     offset: number,
   ): Element | null {
     if (
-      this.isNormalFlowElement(root) &&
+      this.isPageBoundaryCandidateElement(root) &&
       this.xmldoc.getElementOffset(root) >= offset
     ) {
       return root;
@@ -1136,6 +1182,9 @@ export class StyleInstance
           const element = node as Element;
           if (!this.isNormalFlowElement(element)) {
             return NodeFilter.FILTER_REJECT;
+          }
+          if (this.isInlineLevelElement(element)) {
+            return NodeFilter.FILTER_SKIP;
           }
           const nodeOffset = this.xmldoc.getElementOffset(element);
           if (nodeOffset < offset) {
@@ -1176,11 +1225,20 @@ export class StyleInstance
       }
       const element = child as Element;
       if (this.isNormalFlowElement(element)) {
+        if (this.isInlineLevelElement(element)) {
+          return null;
+        }
         return element;
       }
       child = child.nextSibling;
     }
     return null;
+  }
+
+  private isPageBoundaryCandidateElement(element: Element): boolean {
+    return (
+      this.isNormalFlowElement(element) && !this.isInlineLevelElement(element)
+    );
   }
 
   private isNormalFlowElement(element: Element): boolean {
@@ -2716,11 +2774,10 @@ export class StyleInstance
       page.pageType = pageStartPageType;
     }
     if (page.pageType == null) {
-      const fallbackPageType =
-        (page.isBlankPage
-          ? this.styler.cascade.previousPageType
-          : this.styler.cascade.currentPageType) ??
-        (cp.page === 1 ? this.resolveFirstPageType() : null);
+      const firstPageType = cp.page === 1 ? this.resolveFirstPageType() : null;
+      const fallbackPageType = page.isBlankPage
+        ? this.styler.cascade.previousPageType
+        : (firstPageType ?? this.styler.cascade.currentPageType);
       page.pageType = fallbackPageType;
       if (!page.pageType) {
         // Issue #1991: `currentPageType` can still be empty when a page starts

@@ -80,6 +80,10 @@ module.exports = [
         title: "Unbreakable box at the end of a flow",
       },
       { file: "outline.html", title: "Outline" },
+      {
+        file: "outline-offset-at-page.html",
+        title: "outline-offset on @page (Issue #2000)",
+      },
       { file: "font-feature-settings.html", title: "Font feature settings" },
       {
         file: "font-variation-settings.html",
@@ -261,6 +265,10 @@ module.exports = [
       {
         file: "target-counter-page-group-nth.html",
         title: "target-counter() with :nth(1 of Page) (Issue #1990)",
+      },
+      {
+        file: "target-counter-nested-page-group-nth.html",
+        title: "target-counter() with nested :nth(1 of page type)",
       },
       {
         file: "target-counter-missing-page.html",
@@ -518,6 +526,18 @@ module.exports = [
         file: "named-pages/page-child-first-page.html",
         title: "Named Page on Child Element at Page Start",
       },
+      {
+        file: "named-pages/page-name-propagation.html",
+        title: "Named page propagation (Issue #1998)",
+      },
+      {
+        file: "named-pages/page-rule-override-first-page.html",
+        title: "@page override on first page (Issue #2002)",
+      },
+      {
+        file: "nested-page-group-nth.html",
+        title: "Nested named page with :nth(1 of page type)",
+      },
     ],
   },
   {
@@ -534,6 +554,10 @@ module.exports = [
       {
         file: "named-strings/string-set-attr.html",
         title: "string-set with attr() function",
+      },
+      {
+        file: "named-strings/string-set-counter-page.html",
+        title: "string-set with counter(page) (Issue #1997)",
       },
     ],
   },
@@ -980,6 +1004,15 @@ module.exports = [
       {
         file: "footnotes/footnote-policy-line-fragmentation.html",
         title: "footnote-policy: line fragmentation (Issue #1899)",
+      },
+      {
+        file: "footnotes/footnote-policy-line-break.html",
+        title: "footnote-policy: line break before anchor line (Issue #2006)",
+      },
+      {
+        file: "footnotes/footnote-policy-line-break-vertical.html",
+        title:
+          "footnote-policy: line break before anchor line (vertical writing-mode) (Issue #2006)",
       },
       {
         file: "footnotes/named-page-deferred-text.html",

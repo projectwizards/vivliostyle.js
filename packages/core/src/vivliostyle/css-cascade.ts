@@ -2109,7 +2109,7 @@ export interface CounterResolver {
    */
   setNamedString(
     name: string,
-    stringValue: string,
+    stringValue: string | Css.Val,
     elementOffset: number,
   ): void;
 
@@ -2217,6 +2217,54 @@ function getStringValueFromCssContentVal(
   return "";
 }
 
+/**
+ * Returns true if the value contains a page-based counter expression
+ * (`counter(page)` / `counter(pages)` or a counter that is page-controlled).
+ * Such values must be kept as a content list so the counters are resolved per
+ * page and patched with the final page count (Issue #1997).
+ */
+function containsPageCounter(val: Css.Val): boolean {
+  if (val instanceof Css.Expr) {
+    const ex = val.expr;
+    return ex instanceof Exprs.Native && /^page-counters?-/.test(ex.str);
+  }
+  if (val instanceof Css.SpaceList || val instanceof Css.CommaList) {
+    return val.values.some((v) => containsPageCounter(v));
+  }
+  return false;
+}
+
+/**
+ * Build the deferred content list stored for a `string-set` value that
+ * contains page-based counters (Issue #1997). Only the page-based counter
+ * expressions are kept deferred (so they can be resolved per page and patched
+ * with the final page count); every other part is stringified up front using
+ * the same rules as the non-deferred path (`getStringValueFromCssContentVal`),
+ * which ignores non-string content such as `url()`. This keeps `string()`
+ * behaving like plain string-set stringification instead of injecting images
+ * or other replaced content.
+ */
+function buildDeferredStringSetVal(
+  val: Css.Val,
+  context?: Exprs.Context,
+): Css.Val {
+  if (!containsPageCounter(val)) {
+    return new Css.Str(getStringValueFromCssContentVal(val, context));
+  }
+  if (val instanceof Css.SpaceList) {
+    return new Css.SpaceList(
+      val.values.map((v) => buildDeferredStringSetVal(v, context)),
+    );
+  }
+  if (val instanceof Css.CommaList) {
+    return new Css.CommaList(
+      val.values.map((v) => buildDeferredStringSetVal(v, context)),
+    );
+  }
+  // A page-based counter expression: keep it deferred.
+  return val;
+}
+
 export class ContentPropVisitor extends Css.FilterVisitor {
   constructor(
     public cascade: CascadeInstance,
@@ -2256,6 +2304,35 @@ export class ContentPropVisitor extends Css.FilterVisitor {
         style?: { pageScope?: Exprs.LexicalScope | null };
       }
     )?.style?.pageScope;
+  }
+
+  private hasLocalCounterResetOrSet(counterName: string): boolean {
+    return (
+      this.hasLocalCounter(counterName, "counter-reset", { reset: true }) ||
+      this.hasLocalCounter(counterName, "counter-set", { defaultValue: 0 })
+    );
+  }
+
+  private hasLocalCounterIncrement(counterName: string): boolean {
+    return this.hasLocalCounter(counterName, "counter-increment", {});
+  }
+
+  private hasLocalCounter(
+    counterName: string,
+    propName: "counter-reset" | "counter-set" | "counter-increment",
+    options: { reset?: boolean; defaultValue?: number },
+  ): boolean {
+    const currentStyle = this.cascade.currentStyle;
+    const cascVal = currentStyle?.[propName] as CascadeValue;
+    if (!cascVal) {
+      return false;
+    }
+    const value = cascVal.evaluate(this.cascade.context);
+    if (!value || Css.isDefaultingValue(value)) {
+      return false;
+    }
+    const counters = CssProp.toCounters(value, options);
+    return Object.prototype.hasOwnProperty.call(counters, counterName);
   }
 
   /**
@@ -2345,6 +2422,8 @@ export class ContentPropVisitor extends Css.FilterVisitor {
     type: string,
     cascadeDocCounters: number[],
     separator?: string,
+    localCounterResetOrSet: boolean = false,
+    localCounterIncrement: boolean = false,
   ): string {
     const isList = typeof separator === "string";
     const formatCounterValues = (values: number[]): string => {
@@ -2356,6 +2435,11 @@ export class ContentPropVisitor extends Css.FilterVisitor {
       if (this.pseudoName === "footnote-call" && this.element) {
         setFootnoteCounterValues(this.element, counterName, values);
       }
+    };
+    const counterValuesEqual = (a: number[], b: number[]): boolean => {
+      return (
+        a.length === b.length && a.every((value, index) => value === b[index])
+      );
     };
     if (this.pseudoName === "footnote-call" && this.element) {
       const storedDuplicateSemanticFootnoteCounter =
@@ -2377,17 +2461,52 @@ export class ContentPropVisitor extends Css.FilterVisitor {
     }
 
     if (!this.element) {
-      const pageCounters = store.currentPageCounters?.[counterName] || [];
-      if (pageCounters.length) {
-        counterValues = pageCounters;
+      // Issue #1999: a page or margin-box local reset/set shadows the page
+      // counter state while resolving this generated content.
+      if (localCounterResetOrSet && cascadeDocCounters.length) {
+        counterValues = cascadeDocCounters;
         storeFootnoteCounterValuesIfNeeded(counterValues);
         return formatCounterValues(counterValues);
       }
+      if (
+        store.isPageControlledCounter?.(counterName) &&
+        localCounterIncrement &&
+        cascadeDocCounters.length
+      ) {
+        // Issue #1999: increment-only inside page/margin-box content is a
+        // delta from the page-start counter value, not a fresh local counter.
+        const pageCounters = store.currentPageCounters?.[counterName] || [];
+        const pageStartVal = pageCounters.length
+          ? pageCounters[pageCounters.length - 1]
+          : 0;
+        counterValues = [
+          pageStartVal + cascadeDocCounters[cascadeDocCounters.length - 1],
+        ];
+        storeFootnoteCounterValuesIfNeeded(counterValues);
+        return formatCounterValues(counterValues);
+      }
+      if (!store.isPageControlledCounter?.(counterName)) {
+        const pageCounters = store.currentPageCounters?.[counterName] || [];
+        if (pageCounters.length) {
+          counterValues = pageCounters;
+          storeFootnoteCounterValuesIfNeeded(counterValues);
+          return formatCounterValues(counterValues);
+        }
+      }
     }
 
+    const pageDocCounters = store.currentPageDocCounters?.[counterName] || [];
+    const useLocalPageCounters =
+      !this.element &&
+      cascadeDocCounters.length &&
+      !counterValuesEqual(cascadeDocCounters, pageDocCounters);
     const docCounters = this.element
       ? cascadeDocCounters
-      : store.currentPageDocCounters?.[counterName] || cascadeDocCounters;
+      : useLocalPageCounters
+        ? cascadeDocCounters
+        : pageDocCounters.length
+          ? pageDocCounters
+          : cascadeDocCounters;
 
     if (store.isPageControlledCounter?.(counterName)) {
       const docStartCounters =
@@ -2430,6 +2549,10 @@ export class ContentPropVisitor extends Css.FilterVisitor {
     const cascadeDocCounters = (
       this.cascade.counters[counterName] || []
     ).slice();
+    const localCounterResetOrSet =
+      !this.element && this.hasLocalCounterResetOrSet(counterName);
+    const localCounterIncrement =
+      !this.element && this.hasLocalCounterIncrement(counterName);
     // When a counter store is available, return a native expression so
     // page/document counters resolve at layout time.
     const counterStore = this.getCounterStore();
@@ -2446,6 +2569,9 @@ export class ContentPropVisitor extends Css.FilterVisitor {
             counterName,
             type,
             cascadeDocCounters,
+            undefined,
+            localCounterResetOrSet,
+            localCounterIncrement,
           ),
         isPageCounter
           ? `page-counter-${counterName}`
@@ -2482,6 +2608,10 @@ export class ContentPropVisitor extends Css.FilterVisitor {
     const cascadeDocCounters = (
       this.cascade.counters[counterName] || []
     ).slice();
+    const localCounterResetOrSet =
+      !this.element && this.hasLocalCounterResetOrSet(counterName);
+    const localCounterIncrement =
+      !this.element && this.hasLocalCounterIncrement(counterName);
     const counterStore = this.getCounterStore();
     if (counterStore) {
       const isPageCounter =
@@ -2497,6 +2627,8 @@ export class ContentPropVisitor extends Css.FilterVisitor {
             type,
             cascadeDocCounters,
             separator,
+            localCounterResetOrSet,
+            localCounterIncrement,
           ),
         isPageCounter
           ? `page-counters-${counterName}`
@@ -3404,12 +3536,12 @@ export class CascadeInstance {
     }
     // Ignore counter-* on 'display: none' elements and their descendants
     if (displayVal === Css.ident.none) {
-      this.currentElement.setAttribute("data-viv-display-none", "true");
+      this.currentElement?.setAttribute("data-viv-display-none", "true");
       this.lastCounterChanges = [];
       this.lastCounterChangeTypes = Object.create(null);
       this.counterScoping.push(null);
       return;
-    } else if (this.currentElement.closest("[data-viv-display-none]")) {
+    } else if (this.currentElement?.closest("[data-viv-display-none]")) {
       this.lastCounterChanges = [];
       this.lastCounterChangeTypes = Object.create(null);
       this.counterScoping.push(null);
@@ -3602,15 +3734,32 @@ export class CascadeInstance {
     for (const set of sets) {
       if (set instanceof Css.SpaceList) {
         const name = set.values[0].stringValue();
-        const stringValue = set.values
-          .slice(1)
-          .map((v) => getStringValueFromCssContentVal(v, this.context))
-          .join("");
-        this.counterResolver.setNamedString(
-          name,
-          stringValue,
-          this.currentElementOffset,
-        );
+        const valueParts = set.values.slice(1);
+        if (valueParts.some((v) => containsPageCounter(v))) {
+          // When the value contains page-based counters (counter(page) /
+          // counter(pages)), keep the content list so the counters are
+          // resolved at the page where the named string is used and patched
+          // with the final page count (Issue #1997). Non-counter parts are
+          // stringified up front so `string()` ignores non-string content
+          // (e.g. url()) just like the plain stringification path.
+          this.counterResolver.setNamedString(
+            name,
+            buildDeferredStringSetVal(
+              new Css.SpaceList(valueParts),
+              this.context,
+            ),
+            this.currentElementOffset,
+          );
+        } else {
+          const stringValue = valueParts
+            .map((v) => getStringValueFromCssContentVal(v, this.context))
+            .join("");
+          this.counterResolver.setNamedString(
+            name,
+            stringValue,
+            this.currentElementOffset,
+          );
+        }
       }
     }
     delete props["string-set"];
@@ -3656,7 +3805,9 @@ export class CascadeInstance {
       this.elementStack.push(element);
     }
 
-    // do not apply page rules
+    // Do not apply @page rules to element styles, but preserve the current
+    // page-type progression state for layout code that reuses this instance.
+    const savedCurrentPageType = this.currentPageType;
     this.currentPageType = null;
     this.currentElement = element;
     this.currentElementOffset = elementOffset;
@@ -3735,6 +3886,7 @@ export class CascadeInstance {
     }
     followingSiblingTypeCountsStack.push({});
     this.applyActions();
+    this.currentPageType = savedCurrentPageType;
 
     // Substitute var()
     this.applyVarFilter([this.currentStyle], styler, element);
