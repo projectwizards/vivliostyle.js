@@ -134,6 +134,10 @@ module.exports = [
         title: "Content in page margin box",
       },
       {
+        file: "target-counter-blank-page-typeerror.html",
+        title: "target-counter after spread blank page (Issue #2013)",
+      },
+      {
         file: "page-margin-box-images.html",
         title: "Page margin box images (Issue #1867)",
       },
@@ -937,6 +941,18 @@ module.exports = [
         title: "Clear page floats (vertical writing-mode)",
       },
       {
+        file: "page_floats/page-float-clear-page.html",
+        title: "Page float with clear: page (Issue #2010)",
+      },
+      {
+        file: "page_floats/column-float-clear-column.html",
+        title: "Column float with clear: column (Issue #2010)",
+      },
+      {
+        file: "page_floats/column-float-clear-page.html",
+        title: "Column float with clear: page (Issue #2010)",
+      },
+      {
         file: "page_floats/clear_on_page_floats.html",
         title: "clear on page floats",
       },
@@ -1017,6 +1033,11 @@ module.exports = [
       {
         file: "footnotes/named-page-deferred-text.html",
         title: "Named page with deferred text after footnote (Issue #1991)",
+      },
+      {
+        file: "footnotes/named-page-deferred-text-first-child.html",
+        title:
+          "First-child named page must not revive after deferred text (Issue #1991 regression)",
       },
       {
         file: "footnotes/footnote-area-at-footnote.html",
