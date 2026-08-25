@@ -116,7 +116,7 @@ function extractPseudoElementText(
  * @param resolved If the reference is already resolved or not
  */
 export class TargetCounterReference {
-  pageCounters: CssCascade.CounterValues = null;
+  pageCounters: CssCascade.CounterValues | null = null;
   spineIndex: number = -1;
   pageIndex: number = -1;
 
@@ -813,7 +813,7 @@ class CounterResolver implements CssCascade.CounterResolver {
               if (elementAtPageStartOffset) {
                 // Find if the element at the offset is (the first child of)* the element at page start
                 for (
-                  let element = elementAtPageStartOffset;
+                  let element: Element | null = elementAtPageStartOffset;
                   element;
                   element = element.firstElementChild
                 ) {
@@ -936,7 +936,7 @@ export class CounterStore {
   pageIndicesById: {
     [key: string]: { spineIndex: number; pageIndex: number };
   } = Object.create(null);
-  currentPage: Vtree.Page = null;
+  currentPage: Vtree.Page | null = null;
   newReferencesOfCurrentPage: TargetCounterReference[] = [];
   referencesToSolve: TargetCounterReference[] = [];
   referencesToSolveStack: TargetCounterReference[][] = [];
@@ -1091,7 +1091,7 @@ export class CounterStore {
       }
     }
     const skipIncrement: { [key: string]: boolean } = Object.create(null);
-    let resetMap: { [key: string]: number };
+    let resetMap: { [key: string]: number } | undefined;
     let resetIsNone = false;
     const reset = cascadedPageStyle["counter-reset"] as CssCascade.CascadeValue;
     if (reset) {
@@ -1106,7 +1106,7 @@ export class CounterStore {
     if (resetMap && "pages" in resetMap) {
       delete resetMap["pages"];
     }
-    let setMap: { [key: string]: number };
+    let setMap: { [key: string]: number } | undefined;
     const set = cascadedPageStyle["counter-set"] as CssCascade.CascadeValue;
     if (set) {
       const setVal = set.evaluate(context);
@@ -1128,7 +1128,7 @@ export class CounterStore {
         pageControlledNames.push(setCounterName);
       }
     }
-    let incrementMap: { [key: string]: number };
+    let incrementMap: { [key: string]: number } | undefined;
     const increment = cascadedPageStyle[
       "counter-increment"
     ] as CssCascade.CascadeValue;
@@ -1152,7 +1152,7 @@ export class CounterStore {
         incrementMap["page"] = 1;
       }
     } else {
-      incrementMap = Object.create(null);
+      incrementMap = Object.create(null) as { [key: string]: number };
       if (!(docCounterInfo["page"] && docCounterInfo["page"].reset)) {
         incrementMap["page"] = 1;
       }
@@ -1283,7 +1283,7 @@ export class CounterStore {
       resolvedRefs = this.resolvedReferences[id] = [];
     }
     let pushed = false;
-    for (let i = 0; i < this.referencesToSolve.length; ) {
+    for (let i = 0; i < this.referencesToSolve.length;) {
       const ref = this.referencesToSolve[i];
       if (ref.targetId === id) {
         ref.resolve();
@@ -1355,7 +1355,7 @@ export class CounterStore {
             if (!unresolvedRefs) {
               unresolvedRefs = this.unresolvedReferences[id] = [];
             }
-            let ref: TargetCounterReference;
+            let ref: TargetCounterReference | undefined;
             while ((ref = resolvedRefs.shift())) {
               ref.unresolve();
               unresolvedRefs.push(ref);
@@ -1366,7 +1366,7 @@ export class CounterStore {
       });
     }
     const prevPageCounters = this.previousPageCounters;
-    let ref: TargetCounterReference;
+    let ref: TargetCounterReference | undefined;
     while ((ref = this.newReferencesOfCurrentPage.shift())) {
       ref.pageCounters = prevPageCounters;
       ref.spineIndex = spineIndex;
@@ -1616,7 +1616,7 @@ export class CounterStore {
   getUnresolvedRefsToPage(page: Vtree.Page): {
     spineIndex: number;
     pageIndex: number;
-    pageCounters: CssCascade.CounterValues;
+    pageCounters: CssCascade.CounterValues | null;
     refs: TargetCounterReference[];
   }[] {
     let refs: TargetCounterReference[] = [];
@@ -1633,15 +1633,15 @@ export class CounterStore {
     const result: {
       spineIndex: number;
       pageIndex: number;
-      pageCounters: CssCascade.CounterValues;
+      pageCounters: CssCascade.CounterValues | null;
       refs: TargetCounterReference[];
     }[] = [];
     let o: {
       spineIndex: number;
       pageIndex: number;
-      pageCounters: CssCascade.CounterValues;
+      pageCounters: CssCascade.CounterValues | null;
       refs: TargetCounterReference[];
-    } = null;
+    } | null = null;
     refs.forEach((ref) => {
       if (
         !o ||

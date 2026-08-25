@@ -6,7 +6,9 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 
 ## 値
 
-- [CSS 全体キーワード](https://www.w3.org/TR/css-values/#common-keywords): `initial`, `inherit`, `unset`, `revert`
+- [CSS 全体キーワード](https://www.w3.org/TR/css-values/#common-keywords): `initial`, `inherit`, `unset`, `revert`, `revert-layer`, `revert-rule`
+  - カスケードを巻き戻す[明示的デフォルト指定キーワード](https://www.w3.org/TR/css-cascade-5/#defaulting-keywords)として、`revert` は前のカスケードオリジンへ、`revert-layer` は現在より前のカスケードレイヤーへ、`revert-rule` は現在のルールを除いたカスケードへ巻き戻します
+  - `@page` ルールとページマージンボックス、`all`、カスタムプロパティ、`var()` のフォールバックとしての記述でも動作します。[PR #2119](https://github.com/vivliostyle/vivliostyle.js/pull/2119), [PR #2123](https://github.com/vivliostyle/vivliostyle.js/pull/2123) を参照
 - [長さの単位](https://www.w3.org/TR/css-values/#lengths): `em`, `ex`, `ch`, `rem`, `lh`, `rlh`, `vw`, `vh`, `vmin, vmax`, `vi`, `vb`, `cm`, `mm`, `q`, `in`, `pc`, `pt`, `px`.
 - サイジングキーワード: [min-content](https://www.w3.org/TR/css-sizing-3/#valdef-width-min-content), [max-content](https://www.w3.org/TR/css-sizing-3/#valdef-width-max-content), [fit-content](https://www.w3.org/TR/css-sizing-4/#valdef-width-fit-content)
 - カラー値
@@ -20,8 +22,9 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
   - [CMYK カラー: `device-cmyk()`](https://www.w3.org/TR/css-color-5/#the-device-cmyk-notation)
     - ブラウザレンダリング用に内部的に `color(srgb ...)` に変換されます。Vivliostyle CLI との後処理によるCMYK出力を可能にします。[PR #1627](https://github.com/vivliostyle/vivliostyle.js/pull/1627) を参照
 - [属性参照: `attr()`](https://www.w3.org/TR/css-values/#attr-notation)
-  - `content` プロパティの値としてのみサポートします。
-  - 'string' 型と 'url' 型のみサポートします。
+  - `content` プロパティを含む、プロパティの値としてサポートします。
+  - `string`、`raw-string`、`url`、`number`、単位型、およびサポートされる CSS 値型を指定する `type(<...>)` 構文をサポートします。[PR #1975](https://github.com/vivliostyle/vivliostyle.js/pull/1975) を参照
+  - 型と単位の値は、`attr()` を使用するプロパティに対して検証されます。
 - [相互参照: `target-counter()`, `target-counters()` and `target-text()`](https://www.w3.org/TR/css-content-3/#cross-references)
   - `content` プロパティの値としてのみサポートします。
 - [`string()` 関数（名前付き文字列）](https://www.w3.org/TR/css-content-3/#string-function)
@@ -96,6 +99,14 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 - [`:nth-child(An+B of S)` 擬似クラス](https://www.w3.org/TR/selectors-4/#nth-child-pseudo)
 - [`:nth-last-child(An+B of S)` 擬似クラス](https://www.w3.org/TR/selectors-4/#nth-last-child-pseudo)
 
+### [CSS Nesting 1](https://www.w3.org/TR/css-nesting-1/)
+
+[PR #1889](https://github.com/vivliostyle/vivliostyle.js/pull/1889) を参照
+
+- 暗黙の子孫セレクタによるネストや `&` ネストセレクタを含む、ネストしたスタイルルール
+- ネストした [`@media`](https://www.w3.org/TR/css-conditional-3/#at-media)、[`@supports`](https://www.w3.org/TR/css-conditional-3/#at-supports)、[`@layer`](https://www.w3.org/TR/css-cascade-5/#layering)、`@-epubx-when` ルール。[PR #2109](https://github.com/vivliostyle/vivliostyle.js/pull/2109) を参照
+- ネストできるアットルールは、Vivliostyle がすでにサポートしているものに限られます
+
 ### [CSS Overflow 4](https://www.w3.org/TR/css-overflow-4/)
 
 - [`:nth-fragment()` 擬似要素](https://www.w3.org/TR/css-overflow-4/#fragment-pseudo-element)
@@ -109,6 +120,7 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 - [`::footnote-call` 擬似要素](https://www.w3.org/TR/css-gcpm-3/#the-footnote-call)
 - [`::footnote-marker` 擬似要素](https://www.w3.org/TR/css-gcpm-3/#the-footnote-marker)
   - [`list-style-position: outside`](https://www.w3.org/TR/css-gcpm-3/#footnote-marker-property) をサポートし、リストマーカーのようにマーカーを脚注本文の外側に配置できます。[PR #1706](https://github.com/vivliostyle/vivliostyle.js/pull/1706) を参照
+  - `role="doc-noteref"` / `role="doc-footnote"` または `epub:type="noteref"` / `epub:type="footnote"` で識別されるセマンティック脚注にも対応します。[PR #1887](https://github.com/vivliostyle/vivliostyle.js/pull/1887) を参照
 
 #### サポートされていないセレクタ
 
@@ -124,6 +136,12 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 - [@charset](https://www.w3.org/TR/CSS2/syndata.html#charset)
 - [@import](https://www.w3.org/TR/CSS2/cascade.html#at-import)
   - [CSS Cascading and Inheritance 3 にも含まれます](https://www.w3.org/TR/css-cascade-3/#at-import)
+
+### [CSS Cascading and Inheritance 5](https://www.w3.org/TR/css-cascade-5/)
+
+- [@layer](https://www.w3.org/TR/css-cascade-5/#layering)
+  - ブロック形式 (`@layer name { … }`、`@layer { … }`) と文形式 (`@layer a, b;`)、および `@import … layer` / `@import … layer(name)` をサポートしています。
+  - [`revert-layer` キーワード](https://www.w3.org/TR/css-cascade-5/#valdef-all-revert-layer)をサポートしています。[値](#値)も参照してください。
 
 ### [CSS Namespaces 3](https://www.w3.org/TR/css3-namespace/)
 
@@ -333,8 +351,10 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 - [position: running()（ランニング要素）](https://www.w3.org/TR/css-gcpm-3/#running-elements)
 - [footnote-display](https://www.w3.org/TR/css-gcpm-3/#propdef-footnote-display)
   - [`block`、`inline`、`compact`](https://www.w3.org/TR/css-gcpm-3/#propdef-footnote-display) 値をサポートします。
+  - セマンティック脚注にも適用されます。[PR #1887](https://github.com/vivliostyle/vivliostyle.js/pull/1887) を参照
 - [footnote-policy](https://www.w3.org/TR/css-gcpm-3/#propdef-footnote-policy)
   - [`auto`、`line`](https://www.w3.org/TR/css-gcpm-3/#propdef-footnote-policy) 値をサポートします。
+  - セマンティック脚注にも適用されます。[PR #1887](https://github.com/vivliostyle/vivliostyle.js/pull/1887) を参照
 
 参照:
 

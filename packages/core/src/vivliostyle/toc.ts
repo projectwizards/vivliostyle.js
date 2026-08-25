@@ -64,7 +64,7 @@ export function findTocElements(doc: Document): Array<Element> {
     if (tocElems.find((e) => e.contains(elem))) {
       continue; // Skip nested TOC elements.
     }
-    let tocElem = elem;
+    let tocElem: Element | null = elem;
     if (/^h[1-6]$/.test(tocElem.localName)) {
       // If the element is a heading, use its parent or next sibling as TOC element.
       if (!tocElem.previousElementSibling) {
@@ -96,8 +96,7 @@ export function findTocAnchorElements(doc: Document): Array<Element> {
 
 export class TOCView implements Vgen.CustomRendererFactory {
   pref: Exprs.Preferences;
-  page: Vtree.Page = null;
-  instance: OPS.StyleInstance = null;
+  page: Vtree.Page | null = null;
 
   constructor(
     public readonly store: OPS.OPSDocStore,
@@ -120,7 +119,7 @@ export class TOCView implements Vgen.CustomRendererFactory {
     if (depth-- == 0) {
       return;
     }
-    for (let c: Node = elem.firstChild; c; c = c.nextSibling) {
+    for (let c: Node | null = elem.firstChild; c; c = c.nextSibling) {
       if (c.nodeType == 1) {
         const e = c as Element;
         if (Base.getCSSProperty(e, "height", "auto") != "auto") {
@@ -142,7 +141,7 @@ export class TOCView implements Vgen.CustomRendererFactory {
       srcElem: Element,
       viewParent: Element,
       computedStyle: { [key: string]: Css.Val },
-    ): Task.Result<Element> => {
+    ): Task.Result<Element | null> => {
       const behavior = computedStyle["behavior"];
       if (behavior) {
         switch (behavior.toString()) {
@@ -268,7 +267,7 @@ export class TOCView implements Vgen.CustomRendererFactory {
 
     // The (X)HTML doc for the TOC box may be reused for the TOC page in the book,
     // but they need different styles. So, add "?viv-toc-box" to distinguish with TOC page URL.
-    const tocBoxUrl = Base.stripFragment(this.url) + "?viv-toc-box";
+    const tocBoxUrl = Base.toTocBoxURL(this.url);
 
     this.store.load(tocBoxUrl).then((xmldoc) => {
       for (const tocElem of findTocElements(xmldoc.document)) {
@@ -287,7 +286,7 @@ export class TOCView implements Vgen.CustomRendererFactory {
         viewportSize.height,
       );
       const customRenderer = this.makeCustomRenderer(xmldoc);
-      const instance = new OPS.StyleInstance(
+      OPS.StyleInstance.create(
         style,
         xmldoc,
         this.lang,
@@ -300,10 +299,10 @@ export class TOCView implements Vgen.CustomRendererFactory {
         this.documentURLTransformer,
         this.counterStore,
         this.cmykStore,
-      );
-      this.instance = instance;
-      instance.pref = this.pref;
-      instance.init().then(() => {
+        this.pref,
+        null,
+        null,
+      ).then((instance) => {
         instance.layoutNextPage(page, null).then(() => {
           this.setAutoHeight(elem, 2);
           frame.finish(page);
@@ -361,7 +360,7 @@ export function toggleNodeExpansion(evt: Event): void {
   const tocNodeElem = elem.parentNode as Element;
   elem.setAttribute("aria-expanded", open ? "true" : "false");
   tocNodeElem.setAttribute("aria-expanded", open ? "true" : "false");
-  let c: Node = tocNodeElem.firstChild;
+  let c: Node | null = tocNodeElem.firstChild;
   while (c) {
     if (c.nodeType === 1) {
       const ce = c as HTMLElement;

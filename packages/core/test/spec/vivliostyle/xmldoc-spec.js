@@ -56,6 +56,29 @@ describe("xml-doc", function () {
         var e = holder.getElement("foobar#baz");
         expect(e).toBeFalsy();
       });
+
+      it("returns an element for a stored alias URL of the same document", function () {
+        var doc = new DOMParser().parseFromString(
+          "<foo><bar id='baz'></bar></foo>",
+          "text/xml",
+        );
+        var holder;
+        var store = {
+          get: function (requestedUrl) {
+            return requestedUrl === "http://example.com/doc.html"
+              ? holder
+              : null;
+          },
+        };
+        holder = new adapt_xmldoc.XMLDocHolder(
+          store,
+          "http://example.com/doc",
+          doc,
+        );
+
+        var e = holder.getElement("http://example.com/doc.html#baz");
+        expect(e instanceof Element).toBe(true);
+      });
     });
   });
 
@@ -89,6 +112,53 @@ describe("xml-doc", function () {
       expect(
         adapt_xmldoc.parseAndReturnNullIfError("<test><t></test>", "text/xml"),
       ).toBe(null);
+    });
+
+    it("returns null when a parsererror element is nested in the document", function () {
+      // A lowercase "<!doctype html>" parsed as XML produces a parsererror
+      // element nested inside <body>, not as a direct child of the
+      // documentElement, so it must be detected anywhere in the document.
+      // (Issue #2101)
+      var parsererrorDoc = new DOMParser().parseFromString(
+        "<html><body><div><parsererror>error</parsererror></div></body></html>",
+        "text/xml",
+      );
+      var stubParser = {
+        parseFromString: function () {
+          return parsererrorDoc;
+        },
+      };
+
+      expect(
+        adapt_xmldoc.parseAndReturnNullIfError(
+          "<test>",
+          "text/xml",
+          stubParser,
+        ),
+      ).toBe(null);
+    });
+
+    it("returns a Document for HTML containing a literal parsererror element", function () {
+      // HTML parsing never generates a parsererror element, so a literal
+      // "<parsererror>" in the source must not be treated as a parse error.
+      // (Issue #2101)
+      var parsererrorDoc = new DOMParser().parseFromString(
+        "<html><body><div><parsererror>content</parsererror></div></body></html>",
+        "text/html",
+      );
+      var stubParser = {
+        parseFromString: function () {
+          return parsererrorDoc;
+        },
+      };
+
+      var d = adapt_xmldoc.parseAndReturnNullIfError(
+        "<test>",
+        "text/html",
+        stubParser,
+      );
+      expect(d).toBeTruthy();
+      expect(d.querySelector("parsererror")).toBeTruthy();
     });
   });
 

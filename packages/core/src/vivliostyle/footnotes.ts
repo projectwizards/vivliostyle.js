@@ -25,7 +25,7 @@ import * as PageFloats from "./page-floats";
 import * as SemanticFootnote from "./semantic-footnote";
 import * as Task from "./task";
 import * as Vtree from "./vtree";
-import { Layout } from "./types";
+import { Layout, PageFloats as PageFloatsType } from "./types";
 
 const PageFloatFragment = PageFloats.PageFloatFragment;
 const LINE_POLICY_EDGE_EPSILON = 0.1;
@@ -166,7 +166,7 @@ function getFirstBlockEndEdgeFromRects(
 }
 
 function getBlockEndEdgeFromViewNode(
-  viewNode: Node | null,
+  viewNode: Element | Text | null,
   vertical: boolean,
 ): number {
   if (!viewNode) {
@@ -261,7 +261,7 @@ export class LineFootnotePolicyLayoutConstraint
 
   constructor(
     public readonly footnote: Footnote,
-    anchorViewNode: Node | null,
+    anchorViewNode: Element | Text | null,
     private readonly vertical: boolean,
   ) {
     // Capture the rendered anchor line when the footnote becomes constrained.
@@ -303,8 +303,8 @@ export class FootnoteLayoutStrategy
 
   /** @override */
   createPageFloat(
-    nodeContext: Vtree.NodeContext,
-    pageFloatLayoutContext: PageFloats.PageFloatLayoutContext,
+    nodeContext: Vtree.FloatNodeContext,
+    pageFloatLayoutContext: PageFloats.AttachedPageFloatLayoutContext,
     column: Layout.Column,
   ): Task.Result<PageFloats.PageFloat> {
     let floatReference = PageFloats.FloatReference.REGION;
@@ -382,16 +382,20 @@ export class FootnoteLayoutStrategy
   /** @override */
   findPageFloatFragment(
     float: PageFloats.PageFloat,
-    pageFloatLayoutContext: PageFloats.PageFloatLayoutContext,
+    pageFloatLayoutContext: PageFloats.AttachedPageFloatLayoutContext,
   ): PageFloats.PageFloatFragment | null {
     const context = pageFloatLayoutContext.getPageFloatLayoutContext(
       float.floatReference,
     );
+    const containerElement = context.container.element;
     const fragments = context.floatFragments.filter(
-      (fr) => fr instanceof FootnoteFragment,
+      (fr) =>
+        fr instanceof FootnoteFragment &&
+        (float.floatReference !== PageFloats.FloatReference.REGION ||
+          !(fr.area as Layout.PageFloatArea).parentElement ||
+          (fr.area as Layout.PageFloatArea).parentElement === containerElement),
     );
-    Asserts.assert(fragments.length <= 1);
-    return fragments[0] || null;
+    return fragments.find((fr) => fr.hasFloat(float)) || fragments[0] || null;
   }
 
   /** @override */
@@ -458,8 +462,8 @@ export class FootnoteLayoutStrategy
         // footnotes." When the page-level context has
         // ignoreFootnoteAreaMaxHeight set (detected after a prior layout
         // pass found no body content), remove max-height. (Issue #1878)
-        let pageCtx: PageFloats.PageFloatLayoutContext | null =
-          column.pageFloatLayoutContext as PageFloats.PageFloatLayoutContext;
+        let pageCtx: PageFloatsType.PageFloatLayoutContext | null =
+          column.pageFloatLayoutContext;
         while (pageCtx) {
           if (pageCtx.ignoreFootnoteAreaMaxHeight) {
             // Clear both logical and physical max-block-size properties
@@ -480,7 +484,7 @@ export class FootnoteLayoutStrategy
   /** @override */
   forbid(
     float: PageFloats.PageFloat,
-    pageFloatLayoutContext: PageFloats.PageFloatLayoutContext,
+    pageFloatLayoutContext: PageFloats.AttachedPageFloatLayoutContext,
   ) {
     const footnote = float as Footnote;
     switch (footnote.footnotePolicy) {
@@ -492,7 +496,9 @@ export class FootnoteLayoutStrategy
         const constraint = new LineFootnotePolicyLayoutConstraint(
           footnote,
           anchorViewNode,
-          pageFloatLayoutContext.getContainer(footnote.floatReference).vertical,
+          pageFloatLayoutContext.getPageFloatLayoutContext(
+            footnote.floatReference,
+          ).container.vertical,
         );
         pageFloatLayoutContext.addLayoutConstraint(
           constraint,

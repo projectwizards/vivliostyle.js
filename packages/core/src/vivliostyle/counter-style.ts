@@ -168,8 +168,8 @@ function validateSystem(value: Css.Val): value is SystemDescriptorValue {
     );
   }
   if (value instanceof Css.SpaceList && value.values.length === 2) {
-    const first = value.values[0]!;
-    const second = value.values[1]!;
+    const first = value.values[0];
+    const second = value.values[1];
     if (first instanceof Css.Ident) {
       const name = first.name;
       return (
@@ -194,8 +194,7 @@ type SystemDescriptors<T extends SystemDescriptorValue> =
 type CyclicDescriptors = SystemDescriptors<CyclicSystemValue>;
 type FixedDescriptors = SystemDescriptors<FixedSystemValue>;
 type SymbolicDescriptors =
-  | CssCascade.ElementStyle
-  | SystemDescriptors<SymbolicSystemValue>;
+  CssCascade.ElementStyle | SystemDescriptors<SymbolicSystemValue>;
 type AlphabeticDescriptors = SystemDescriptors<AlphabeticSystemValue>;
 type NumericDescriptors = SystemDescriptors<NumericSystemValue>;
 type AdditiveDescriptors = SystemDescriptors<AdditiveSystemValue>;
@@ -294,15 +293,14 @@ function extractSymbol(symbol: SymbolType): string {
  * @see https://drafts.csswg.org/css-counter-styles/#descdef-counter-style-negative
  */
 type NegativeDescriptorValue =
-  | SymbolType
-  | (Css.SpaceList & { values: [SymbolType, SymbolType] });
+  SymbolType | (Css.SpaceList & { values: [SymbolType, SymbolType] });
 function validateNegative(value: Css.Val): value is NegativeDescriptorValue {
   if (validateSymbol(value)) {
     return true;
   }
   if (value instanceof Css.SpaceList && value.values.length === 2) {
-    const first = value.values[0]!;
-    const second = value.values[1]!;
+    const first = value.values[0];
+    const second = value.values[1];
     return validateSymbol(first) && validateSymbol(second);
   }
   return false;
@@ -342,8 +340,8 @@ function validateRangeTuple(value: Css.Val): value is RangeTuple {
   if (!(value instanceof Css.SpaceList && value.values.length === 2)) {
     return false;
   }
-  const first = value.values[0]!;
-  const second = value.values[1]!;
+  const first = value.values[0];
+  const second = value.values[1];
   if (!(validateRangeBound(first) && validateRangeBound(second))) {
     return false;
   }
@@ -404,8 +402,8 @@ function validateNonNegativeIntAndSymbolSet(
   if (!(value instanceof Css.SpaceList && value.values.length === 2)) {
     return false;
   }
-  const first = value.values[0]!;
-  const second = value.values[1]!;
+  const first = value.values[0];
+  const second = value.values[1];
   return (
     (first instanceof Css.Int && first.num >= 0 && validateSymbol(second)) ||
     (validateSymbol(first) && second instanceof Css.Int && second.num >= 0)
@@ -868,7 +866,9 @@ abstract class CounterStyle {
   }
 
   protected _getFallback(): CounterStyle | null {
-    return this._store.get(this.#fallbackName) ?? null;
+    return this.#fallbackName != null
+      ? (this._store.get(this.#fallbackName) ?? null)
+      : null;
   }
   protected static _getFallbackFrom(style: CounterStyle): CounterStyle | null {
     return style._getFallback();
@@ -887,8 +887,7 @@ abstract class CounterStyle {
   }
 
   protected _getAdditiveSymbols():
-    | readonly [AdditiveSymbol, ...AdditiveSymbol[]]
-    | null {
+    readonly [AdditiveSymbol, ...AdditiveSymbol[]] | null {
     return this.#additiveSymbols;
   }
   protected static _getAdditiveSymbolsFrom(
@@ -1326,8 +1325,7 @@ class Extends extends CounterStyle {
   }
 
   protected override _getAdditiveSymbols():
-    | readonly [AdditiveSymbol, ...AdditiveSymbol[]]
-    | null {
+    readonly [AdditiveSymbol, ...AdditiveSymbol[]] | null {
     return (
       super._getAdditiveSymbols() ??
       CounterStyle._getAdditiveSymbolsFrom(this.#resolveBaseStyle())
@@ -1720,6 +1718,13 @@ class EthiopicNumeric extends CounterStyle {
 export class CounterStyleStore {
   #store: CounterStyleStoreMap;
 
+  /**
+   * What the cascade sorted the currently winning definition of each name by,
+   * so that a definition parsed later cannot override one from a
+   * higher-priority origin or cascade layer (css-cascade-5 §6.4).
+   */
+  #winners: Map<string, CssCascade.CascadePriority> = new Map();
+
   constructor() {
     this.#store = new Map();
 
@@ -1757,14 +1762,30 @@ export class CounterStyleStore {
     );
   }
 
+  /**
+   * @param priority where the `@counter-style` rule sits in the cascade. When
+   *     omitted, the definition simply overrides the previous one.
+   */
   define(
     name: string,
     descriptors: CssCascade.ElementStyle,
+    priority?: CssCascade.CascadePriority,
   ): CounterStyle | null {
     if (!validateNameForDefinition(name)) {
       return null;
     }
     const counterStyle = CounterStyle.create(this.#store, descriptors);
+    const winner = priority && this.#winners.get(name);
+    if (winner && CssCascade.comparePriority(priority, winner) < 0) {
+      // A definition of the same name in a higher-priority origin or cascade
+      // layer has already won.
+      return counterStyle;
+    }
+    if (priority) {
+      this.#winners.set(name, priority);
+    } else {
+      this.#winners.delete(name);
+    }
     this.#store.set(name, counterStyle);
     return counterStyle;
   }

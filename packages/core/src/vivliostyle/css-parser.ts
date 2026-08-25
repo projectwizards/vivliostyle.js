@@ -77,11 +77,11 @@ export type AttributeSelectorCaseSensitivity = "i" | "s" | null;
 export class ParserHandler implements CssTokenizer.TokenizerHandler {
   flavor: StylesheetFlavor;
 
-  constructor(public scope: Exprs.LexicalScope) {
+  constructor(public readonly scope: Exprs.LexicalScope) {
     this.flavor = StylesheetFlavor.AUTHOR;
   }
 
-  getCurrentToken(): CssTokenizer.Token {
+  getCurrentToken(): CssTokenizer.Token | null {
     return null;
   }
 
@@ -89,7 +89,7 @@ export class ParserHandler implements CssTokenizer.TokenizerHandler {
     return this.scope;
   }
 
-  error(mnemonics: string, token: CssTokenizer.Token): void {}
+  error(mnemonics: string, token: CssTokenizer.Token | null): void {}
 
   startStylesheet(flavor: StylesheetFlavor): void {
     this.flavor = flavor;
@@ -99,9 +99,12 @@ export class ParserHandler implements CssTokenizer.TokenizerHandler {
 
   classSelector(name: string): void {}
 
-  pseudoclassSelector(name: string, params: (number | string)[]): void {}
+  pseudoclassSelector(name: string, params: (number | string)[] | null): void {}
 
-  pseudoelementSelector(name: string, params: (number | string)[]): void {}
+  pseudoelementSelector(
+    name: string,
+    params: (number | string)[] | null,
+  ): void {}
 
   idSelector(id: string): void {}
 
@@ -146,6 +149,19 @@ export class ParserHandler implements CssTokenizer.TokenizerHandler {
   startMediaRule(expr: Css.Expr): void {
     this.startWhenRule(expr);
   }
+
+  /**
+   * Block form of the `@layer` rule.
+   * @param nameList `null` for an anonymous layer, otherwise the parts of the
+   *     `<layer-name>`.
+   */
+  startLayerRule(nameList: string[] | null): void {}
+
+  /**
+   * Statement form of the `@layer` rule (`@layer a, b;`), which only declares
+   * the layer order.
+   */
+  layerStatementRule(nameLists: string[][]): void {}
 
   startFlowRule(flowName: string): void {}
 
@@ -211,25 +227,39 @@ export class ParserHandler implements CssTokenizer.TokenizerHandler {
   }
 }
 
-export class DispatchParserHandler extends ParserHandler {
-  stack: ParserHandler[] = [];
-  tokenizer: CssTokenizer.Tokenizer = null;
-  slave: ParserHandler = null;
+export class Delegation {
+  constructor(readonly outer: ParserHandler) {}
+}
 
-  constructor() {
-    super(null);
+export class DispatchParserHandler<
+  T extends ParserHandler = ParserHandler,
+> extends ParserHandler {
+  tokenizer: CssTokenizer.Tokenizer | null = null;
+
+  readonly initialSlave: T;
+  slave: ParserHandler;
+
+  constructor(
+    scope: Exprs.LexicalScope,
+    makeSlave: (owner: DispatchParserHandler) => T,
+  ) {
+    super(scope);
+    this.initialSlave = this.slave = makeSlave(this);
   }
 
-  pushHandler(slave: ParserHandler): void {
-    this.stack.push(this.slave);
+  delegateTo<S extends ParserHandler>(
+    makeSlave: (delegation: Delegation) => S,
+  ): S {
+    const slave = makeSlave(new Delegation(this.slave));
     this.slave = slave;
+    return slave;
   }
 
-  popHandler(): void {
-    this.slave = this.stack.pop();
+  takeBack(delegation: Delegation): void {
+    this.slave = delegation.outer;
   }
 
-  override getCurrentToken(): CssTokenizer.Token {
+  override getCurrentToken(): CssTokenizer.Token | null {
     if (this.tokenizer) {
       return this.tokenizer.token();
     }
@@ -244,24 +274,21 @@ export class DispatchParserHandler extends ParserHandler {
    * Forwards call to slave.
    * @override
    */
-  error(mnemonics: string, token: CssTokenizer.Token): void {
+  error(mnemonics: string, token: CssTokenizer.Token | null): void {
     this.slave.error(mnemonics, token);
   }
 
   /**
    * Called by a slave.
    */
-  errorMsg(mnemonics: string, token: CssTokenizer.Token): void {
+  errorMsg(mnemonics: string, token: CssTokenizer.Token | null): void {
     Logging.logger.warn(mnemonics, token?.toString() ?? "");
   }
 
   override startStylesheet(flavor: StylesheetFlavor): void {
     super.startStylesheet(flavor);
-    if (this.stack.length > 0) {
-      // This can occur as a result of an error
-      this.slave = this.stack[0];
-      this.stack = [];
-    }
+    // Handlers left delegation by an error are dropped here.
+    this.slave = this.initialSlave;
     this.slave.startStylesheet(flavor);
   }
 
@@ -275,14 +302,14 @@ export class DispatchParserHandler extends ParserHandler {
 
   override pseudoclassSelector(
     name: string,
-    params: (number | string)[],
+    params: (number | string)[] | null,
   ): void {
     this.slave.pseudoclassSelector(name, params);
   }
 
   override pseudoelementSelector(
     name: string,
-    params: (number | string)[],
+    params: (number | string)[] | null,
   ): void {
     this.slave.pseudoelementSelector(name, params);
   }
@@ -361,6 +388,14 @@ export class DispatchParserHandler extends ParserHandler {
     this.slave.startWhenRule(expr);
   }
 
+  override startLayerRule(nameList: string[] | null): void {
+    this.slave.startLayerRule(nameList);
+  }
+
+  override layerStatementRule(nameLists: string[][]): void {
+    this.slave.layerStatementRule(nameLists);
+  }
+
   override startFlowRule(flowName: string): void {
     this.slave.startFlowRule(flowName);
   }
@@ -427,29 +462,33 @@ export class SkippingParserHandler extends ParserHandler {
   constructor(
     scope: Exprs.LexicalScope,
     public owner: DispatchParserHandler,
-    public readonly topLevel,
+    public readonly delegation: Delegation | null,
   ) {
     super(scope);
-    if (owner) {
-      this.flavor = owner.flavor;
-    }
+    this.flavor = owner.flavor;
   }
 
-  override getCurrentToken(): CssTokenizer.Token {
-    return this.owner?.getCurrentToken();
+  override getCurrentToken(): CssTokenizer.Token | null {
+    return this.owner.getCurrentToken();
   }
 
-  override error(mnemonics: string, token: CssTokenizer.Token): void {
-    this.owner?.errorMsg(mnemonics, token);
+  override error(mnemonics: string, token: CssTokenizer.Token | null): void {
+    this.owner.errorMsg(mnemonics, token);
   }
 
   override startRuleBody(): void {
     this.depth++;
   }
 
+  protected endDelegation(): void {
+    if (this.delegation) {
+      this.owner.takeBack(this.delegation);
+    }
+  }
+
   override endRule(): void {
-    if (--this.depth == 0 && !this.topLevel) {
-      this.owner.popHandler();
+    if (--this.depth == 0) {
+      this.endDelegation();
     }
   }
 }
@@ -458,9 +497,9 @@ export class SlaveParserHandler extends SkippingParserHandler {
   constructor(
     scope: Exprs.LexicalScope,
     owner: DispatchParserHandler,
-    topLevel: boolean,
+    delegation: Delegation | null,
   ) {
-    super(scope, owner, topLevel);
+    super(scope, owner, delegation);
   }
 
   report(message: string): void {
@@ -469,8 +508,9 @@ export class SlaveParserHandler extends SkippingParserHandler {
 
   reportAndSkip(message: string): void {
     this.report(message);
-    this.owner.pushHandler(
-      new SkippingParserHandler(this.scope, this.owner, false),
+    this.owner.delegateTo(
+      (delegation) =>
+        new SkippingParserHandler(this.scope, this.owner, delegation),
     );
   }
 
@@ -508,6 +548,16 @@ export class SlaveParserHandler extends SkippingParserHandler {
 
   override startWhenRule(expr: Css.Expr): void {
     this.reportAndSkip("E_CSS_UNEXPECTED_WHEN");
+  }
+
+  override startLayerRule(nameList: string[] | null): void {
+    this.reportAndSkip("E_CSS_UNEXPECTED_LAYER");
+  }
+
+  override layerStatementRule(nameLists: string[][]): void {
+    // Only reported: the statement form has no block, so a skipping handler
+    // would never be taken back.
+    this.report("E_CSS_UNEXPECTED_LAYER");
   }
 
   override startFlowRule(flowName: string): void {
@@ -815,10 +865,12 @@ export class Parser {
   propName: string | null = null;
   propImportant: boolean = false;
   exprContext: ExprContext;
-  result: Css.Val = null;
+  result: Css.Val | null = null;
   importReady: boolean = false;
   importURL: string | null = null;
-  importCondition: Css.Expr = null;
+  importCondition: Css.Expr | null = null;
+  importHasLayer: boolean = false;
+  importLayerNames: string[] | null = null;
   errorBrackets: number[] = [];
   ruleStack: string[] = [];
   regionRule: boolean = false;
@@ -853,7 +905,7 @@ export class Parser {
     return arr;
   }
 
-  valStackReduce(sep: string, token: CssTokenizer.Token): Css.Val {
+  valStackReduce(sep: string, token: CssTokenizer.Token): Css.Val | null {
     const valStack = this.valStack;
     let index = valStack.length;
     let parLevel = 0;
@@ -905,7 +957,7 @@ export class Parser {
       // Check invalid var()
       if (func.name === "var") {
         const name = func.values[0] instanceof Css.Ident && func.values[0].name;
-        if (!Css.isCustomPropName(name)) {
+        if (!Css.isCustomPropName(name || undefined)) {
           this.handler.error(`E_CSS_INVALID_VAR ${func.toString()}`, token);
           this.actions = actionsErrorDecl;
         }
@@ -977,10 +1029,9 @@ export class Parser {
         }
         if (tok == TokenType.O_PAR) {
           if (val.isMediaName()) {
-            val = new Exprs.MediaTest(
+            val = new Exprs.MediaBooleanTest(
               handler.getScope(),
               val as Exprs.MediaName,
-              null,
             );
           }
           op = TokenType.EOF;
@@ -1115,13 +1166,37 @@ export class Parser {
     return false;
   }
 
-  readSupportsTest(token: CssTokenizer.Token): Exprs.SupportsTest {
+  /**
+   * Reads a `<layer-name>` (`<ident> [ '.' <ident> ]*`) at the current position
+   * and returns its parts, or null if there is none.
+   */
+  readLayerName(): string[] | null {
+    const tokenizer = this.tokenizer;
+    let token = tokenizer.token();
+    if (token.type !== TokenType.IDENT) {
+      return null;
+    }
+    const names = [token.text];
+    tokenizer.consume();
+    for (;;) {
+      token = tokenizer.token();
+      // A `.foo` after an ident is tokenized as a class token; the dot must not
+      // be separated from the preceding ident by whitespace.
+      if (token.type !== TokenType.CLASS || token.precededBySpace) {
+        return names;
+      }
+      names.push(token.text);
+      tokenizer.consume();
+    }
+  }
+
+  readSupportsTest(token: CssTokenizer.Token): Exprs.SupportsTest | null {
     // `@supports (prop-name:...)`
     // `@supports func-name(...)`
     const isFunc = token.type === TokenType.FUNC;
     const tokenizer = this.tokenizer;
     let startPosition: number;
-    let name: string;
+    let name = "";
     if (isFunc) {
       name = token.text;
       startPosition = token.position + name.length + 1;
@@ -1149,7 +1224,8 @@ export class Parser {
       return null;
     }
     let parLevel = 0;
-    let tokenN: CssTokenizer.Token;
+    // the loop runs at least once
+    let tokenN!: CssTokenizer.Token;
     let commaCount = 0;
     while (parLevel >= 0) {
       tokenizer.consume();
@@ -1191,7 +1267,7 @@ export class Parser {
   }
 
   readPseudoParams(): (number | string)[] {
-    const arr = [];
+    const arr: (number | string)[] = [];
     while (true) {
       const token = this.tokenizer.token();
       switch (token.type) {
@@ -1367,11 +1443,11 @@ export class Parser {
     return null;
   }
 
-  makeCondition(classes: string | null, condition: Exprs.Val): Css.Expr {
+  makeCondition(
+    classes: string | null,
+    condition: Exprs.Val | null,
+  ): Css.Expr | null {
     const scope = this.handler.getScope();
-    if (!scope) {
-      return null;
-    }
     condition = condition || scope._true;
     if (classes) {
       const classList = classes.split(/\s+/);
@@ -1447,8 +1523,8 @@ export class Parser {
     let ns: string | null;
     let text: string | null;
     let num: number;
-    let val: Css.Val;
-    let params: (number | string)[];
+    let val: Css.Val | null = null;
+    let params: (number | string)[] | null;
     let selectorStartPosition: number | null = null;
 
     if (parsingStyleAttr) {
@@ -1695,7 +1771,7 @@ export class Parser {
               }
               continue;
             case TokenType.FUNC:
-              text = token.text;
+              text = token.text.toLowerCase();
               tokenizer.consume();
               switch (text) {
                 case "is":
@@ -1807,6 +1883,17 @@ export class Parser {
                   } else {
                     break;
                   }
+                case "dir":
+                  token = tokenizer.token();
+                  if (
+                    token.type === TokenType.IDENT &&
+                    tokenizer.nthToken(1).type === TokenType.C_PAR
+                  ) {
+                    params = [token.text];
+                    tokenizer.consume();
+                    break;
+                  }
+                // fall through
                 default:
                   params = [];
                   if (!this.skipPseudoFunctionContents()) {
@@ -1849,7 +1936,7 @@ export class Parser {
               tokenizer.consume();
               continue;
             case TokenType.FUNC:
-              text = token.text;
+              text = token.text.toLowerCase();
               tokenizer.consume();
               if (text == "nth-fragment") {
                 params = this.readNthPseudoParams();
@@ -2373,6 +2460,31 @@ export class Parser {
                 tokenizer.consume();
                 token = tokenizer.token();
                 if (
+                  token.type == TokenType.IDENT &&
+                  token.text.toLowerCase() == "layer"
+                ) {
+                  this.importHasLayer = true;
+                  this.importLayerNames = null;
+                  tokenizer.consume();
+                  token = tokenizer.token();
+                } else if (
+                  token.type == TokenType.FUNC &&
+                  token.text.toLowerCase() == "layer"
+                ) {
+                  tokenizer.consume();
+                  const nameList = this.readLayerName();
+                  token = tokenizer.token();
+                  if (!nameList || token.type != TokenType.C_PAR) {
+                    handler.error("E_CSS_IMPORT_SYNTAX", token);
+                    this.actions = actionsError;
+                    continue;
+                  }
+                  this.importHasLayer = true;
+                  this.importLayerNames = nameList;
+                  tokenizer.consume();
+                  token = tokenizer.token();
+                }
+                if (
                   token.type == TokenType.SEMICOL ||
                   token.type == TokenType.EOF
                 ) {
@@ -2565,6 +2677,47 @@ export class Parser {
               this.actions = actionsExprVal;
               valStack.push("{");
               continue;
+            case "layer": {
+              tokenizer.consume();
+              token = tokenizer.token();
+              if (token.type == TokenType.O_BRC) {
+                // anonymous layer block
+                tokenizer.consume();
+                handler.startLayerRule(null);
+                this.ruleStack.push(text);
+                handler.startRuleBody();
+                continue;
+              }
+              const nameLists: string[][] = [];
+              for (;;) {
+                const nameList = this.readLayerName();
+                if (!nameList) {
+                  nameLists.length = 0;
+                  break;
+                }
+                nameLists.push(nameList);
+                if (tokenizer.token().type != TokenType.COMMA) {
+                  break;
+                }
+                tokenizer.consume();
+              }
+              if (nameLists.length > 0) {
+                token = tokenizer.token();
+                if (token.type == TokenType.SEMICOL) {
+                  tokenizer.consume();
+                  handler.layerStatementRule(nameLists);
+                  continue;
+                }
+                if (token.type == TokenType.O_BRC && nameLists.length == 1) {
+                  tokenizer.consume();
+                  handler.startLayerRule(nameLists[0]);
+                  this.ruleStack.push(text);
+                  handler.startRuleBody();
+                  continue;
+                }
+              }
+              break;
+            }
             case "-epubx-flow":
               if (
                 tokenizer.nthToken(1).type == TokenType.IDENT &&
@@ -2895,57 +3048,53 @@ export class Parser {
 }
 
 export class ErrorHandler extends ParserHandler {
-  constructor(public readonly scope: Exprs.LexicalScope) {
-    super(null);
+  constructor(scope: Exprs.LexicalScope) {
+    super(scope);
   }
 
-  override error(mnemonics: string, token: CssTokenizer.Token): void {
+  override error(mnemonics: string, token: CssTokenizer.Token | null): void {
     // throw new Error(mnemonics + " " + token);
     Logging.logger.warn(mnemonics, token.toString());
   }
-
-  override getScope(): Exprs.LexicalScope {
-    return this.scope;
-  }
 }
 
+/**
+ * Parses a stylesheet. Sub-handlers for selector functions and at-rules take
+ * over the parse by delegating from the dispatch handler (see `delegateTo()`).
+ */
 export function parseStylesheet(
   tokenizer: CssTokenizer.Tokenizer,
-  handler: ParserHandler,
-  baseURL: string,
+  handler: DispatchParserHandler,
+  baseURL: string | null,
   classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
-  const parserHandler = normalizeParserHandler(handler);
+  // A style sheet given as text alone has no base. resolveURL() reads the
+  // empty string as no base.
+  const base = baseURL ?? "";
   const expandedText = expandNesting(tokenizer.input);
   if (expandedText !== tokenizer.input) {
     return parseStylesheetInternal(
-      new CssTokenizer.Tokenizer(expandedText, parserHandler),
-      parserHandler,
-      baseURL,
+      new CssTokenizer.Tokenizer(expandedText, handler),
+      handler,
+      base,
       classes,
       media,
     );
   }
-  return parseStylesheetInternal(
-    tokenizer,
-    parserHandler,
-    baseURL,
-    classes,
-    media,
-  );
+  return parseStylesheetInternal(tokenizer, handler, base, classes, media);
 }
 
 function parseStylesheetInternal(
   tokenizer: CssTokenizer.Tokenizer,
-  handler: ParserHandler,
+  handler: DispatchParserHandler,
   baseURL: string,
   classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
   const frame: Task.Frame<boolean> = Task.newFrame("parseStylesheet");
   const parser = new Parser(actionsBase, tokenizer, handler, baseURL);
-  let condition: Css.Expr = null;
+  let condition: Css.Expr | null = null;
   if (media) {
     condition = parseMediaQuery(
       new CssTokenizer.Tokenizer(media, handler),
@@ -2966,6 +3115,10 @@ function parseStylesheetInternal(
             parser.importURL as string,
             baseURL,
           );
+          if (parser.importHasLayer) {
+            handler.startLayerRule(parser.importLayerNames);
+            handler.startRuleBody();
+          }
           if (parser.importCondition) {
             handler.startMediaRule(parser.importCondition);
             handler.startRuleBody();
@@ -2977,9 +3130,14 @@ function parseStylesheetInternal(
             if (parser.importCondition) {
               handler.endRule();
             }
+            if (parser.importHasLayer) {
+              handler.endRule();
+            }
             parser.importReady = false;
             parser.importURL = null;
             parser.importCondition = null;
+            parser.importHasLayer = false;
+            parser.importLayerNames = null;
             innerFrame.finish(true);
           });
           return innerFrame.result();
@@ -3002,19 +3160,16 @@ function parseStylesheetInternal(
 
 export function parseStylesheetFromText(
   text: string,
-  handler: ParserHandler,
-  baseURL: string,
+  handler: DispatchParserHandler,
+  baseURL: string | null,
   classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
-  const parserHandler = normalizeParserHandler(handler);
   return Task.handle(
     "parseStylesheetFromText",
     (frame) => {
-      const tok = new CssTokenizer.Tokenizer(text, parserHandler);
-      parseStylesheet(tok, parserHandler, baseURL, classes, media).thenFinish(
-        frame,
-      );
+      const tok = new CssTokenizer.Tokenizer(text, handler);
+      parseStylesheet(tok, handler, baseURL, classes, media).thenFinish(frame);
     },
     (frame, err) => {
       Logging.logger.warn(err, `Failed to parse stylesheet text: ${text}`);
@@ -3023,29 +3178,9 @@ export function parseStylesheetFromText(
   );
 }
 
-function normalizeParserHandler(handler: ParserHandler): ParserHandler {
-  if (handler instanceof DispatchParserHandler) {
-    return handler;
-  }
-  if (handler instanceof SlaveParserHandler) {
-    if (handler.owner) {
-      return handler.owner;
-    }
-    // Some parser entry points are passed a top-level slave handler. Wrap it in
-    // a dispatch handler once so selector functions parse through the normal
-    // dispatch path and the slave retains a stable owner reference.
-    const dispatchHandler = new DispatchParserHandler();
-    dispatchHandler.flavor = handler.flavor;
-    dispatchHandler.slave = handler;
-    handler.owner = dispatchHandler;
-    return dispatchHandler;
-  }
-  return handler;
-}
-
 export function parseStylesheetFromURL(
   url: string,
-  handler: ParserHandler,
+  handler: DispatchParserHandler,
   classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
@@ -3122,8 +3257,8 @@ export const numProp: { [key: string]: boolean } = {
   utilization: true,
 };
 
-export function takesOnlyNum(propName: string): boolean {
-  return !!numProp[propName];
+export function takesOnlyNum(propName: string | undefined): boolean {
+  return !!(propName && numProp[propName]);
 }
 
 /**
@@ -3132,7 +3267,7 @@ export function takesOnlyNum(propName: string): boolean {
 export function evaluateExprToCSS(
   context: Exprs.Context,
   val: Exprs.Val,
-  propName: string,
+  propName: string | undefined,
 ): Css.Val {
   // Preserve viv-leader expressions as Css.Expr (Issue #1563)
   // leader() must be processed by ContentPropertyHandler, not evaluated here

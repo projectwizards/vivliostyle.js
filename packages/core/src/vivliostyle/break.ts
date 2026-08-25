@@ -88,10 +88,7 @@ export function setBoxBreakFlag(
  * inline-end: the inline-end margin is discarded
  */
 type MarginDiscardFlag =
-  | "block-start"
-  | "block-end"
-  | "inline-start"
-  | "inline-end";
+  "block-start" | "block-end" | "inline-start" | "inline-end";
 
 export function getMarginDiscardFlags(element: Element): MarginDiscardFlag[] {
   const val = element.getAttribute("data-viv-margin-discard");
@@ -157,7 +154,7 @@ export const forcedBreakValues: { [key: string]: boolean | null } = {
  * @param value The break value to be judged. Treats null as 'auto'.
  */
 export function isForcedBreakValue(value: string | null): boolean {
-  return !!forcedBreakValues[value];
+  return value != null && !!forcedBreakValues[value];
 }
 
 export const spreadBreakValues: { [key: string]: boolean | null } = {
@@ -172,7 +169,7 @@ export const spreadBreakValues: { [key: string]: boolean | null } = {
  * @param value The break value to be judged. Treats null as 'auto'.
  */
 export function isSpreadBreakValue(value: string | null): boolean {
-  return !!spreadBreakValues[value];
+  return value != null && !!spreadBreakValues[value];
 }
 
 /**
@@ -196,7 +193,7 @@ export const avoidBreakValues: { [key: string]: boolean | null } = {
  * @param value The break value to be judged. Treats null as 'auto'.
  */
 export function isAvoidBreakValue(value: string | null): boolean {
-  return !!avoidBreakValues[value];
+  return value != null && !!avoidBreakValues[value];
 }
 
 /**
@@ -258,7 +255,9 @@ export function resolveEffectiveBreakValue(
 }
 
 export function breakValueToStartBreakType(breakValue: string | null): string {
-  return isForcedBreakValue(breakValue) ? breakValue : "auto";
+  return breakValue != null && isForcedBreakValue(breakValue)
+    ? breakValue
+    : "auto";
 }
 
 Plugin.registerHook("SIMPLE_PROPERTY", convertPageBreakAliases);

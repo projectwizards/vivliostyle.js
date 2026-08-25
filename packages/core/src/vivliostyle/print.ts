@@ -10,7 +10,7 @@ interface IFrameWindowForPrint {
 export interface PrintConfig {
   title: string;
   printCallback: (iframeWin: Window) => void;
-  errorCallback: (message: string) => void | null;
+  errorCallback: ((message: string) => void) | null;
   hideIframe: boolean;
   removeIframe: boolean;
 }
@@ -19,11 +19,11 @@ class VivliostylePrint {
   htmlDoc: string;
   title: string;
   printCallback: (iframeWin: Window) => void;
-  errorCallback: (message: string) => void;
+  errorCallback: ((message: string) => void) | null;
   hideIframe: boolean;
   removeIframe: boolean;
   iframe: HTMLIFrameElement;
-  iframeWin: Window;
+  iframeWin: Window | null = null;
   window: Window & typeof globalThis & IFrameWindowForPrint;
 
   constructor(
@@ -42,9 +42,7 @@ class VivliostylePrint {
     this.errorCallback = errorCallback;
     this.hideIframe = hideIframe;
     this.removeIframe = removeIframe;
-  }
 
-  init() {
     this.iframe = document.createElement("iframe");
 
     if (this.hideIframe) {
@@ -119,7 +117,7 @@ class VivliostylePrint {
           const message =
             payload.content.error?.toString() ??
             payload.content.messages.join("\n");
-          this.errorCallback(message);
+          this.errorCallback?.(message);
         });
       }
 
@@ -136,12 +134,13 @@ class VivliostylePrint {
   cleanUp() {
     delete this.window.printInstance;
     if (this.removeIframe) {
-      this.iframe.parentElement.removeChild(this.iframe);
+      this.iframe.remove();
     }
   }
 }
 
 export function printHTML(htmlDoc: string, config: PrintConfig) {
-  const instance = new VivliostylePrint(htmlDoc, config);
-  instance.init();
+  // the instance registers itself as window.printInstance and starts printing
+  // eslint-disable-next-line no-new
+  new VivliostylePrint(htmlDoc, config);
 }

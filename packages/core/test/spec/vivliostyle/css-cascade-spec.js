@@ -22,241 +22,305 @@ import * as adapt_cssvalid from "../../../src/vivliostyle/css-validator";
 import * as adapt_exprs from "../../../src/vivliostyle/exprs";
 import * as adapt_cssparse from "../../../src/vivliostyle/css-parser";
 import * as adapt_csstok from "../../../src/vivliostyle/css-tokenizer";
+import * as adapt_task from "../../../src/vivliostyle/task";
 import * as vivliostyle_plugin from "../../../src/vivliostyle/plugin";
 import * as vivliostyle_test_util_mock_plugin from "../../util/mock/vivliostyle/plugin-mock";
 
 describe("css-cascade", function () {
+  function cascadeParserHandler(scope, validatorSet) {
+    const dispatchHandler = new adapt_cssparse.DispatchParserHandler(
+      scope,
+      (owner) =>
+        new adapt_csscasc.CascadeParserHandler(
+          scope,
+          owner,
+          null,
+          null,
+          null,
+          validatorSet,
+          null,
+        ),
+    );
+    return dispatchHandler.initialSlave;
+  }
+
   describe("IsNthSiblingAction", function () {
     it("when a=0, matches if currentSiblingOrder=b", function () {
       var action = new adapt_csscasc.IsNthSiblingAction(0, 3);
-      var chained = (action.chained = jasmine.createSpyObj("chianed", [
-        "apply",
-      ]));
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 1 });
+      wired.apply({ instance: { currentSiblingOrder: 1 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 3 });
+      wired.apply({ instance: { currentSiblingOrder: 3 } });
       expect(chained.apply).toHaveBeenCalled();
     });
 
     it("when a is non-zero, matches if non-negative n which satisfies currentSiblingOrder=an+b exists", function () {
       var action = new adapt_csscasc.IsNthSiblingAction(3, 0);
-      var chained = (action.chained = jasmine.createSpyObj("chianed", [
-        "apply",
-      ]));
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 1 });
+      wired.apply({ instance: { currentSiblingOrder: 1 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 2 });
+      wired.apply({ instance: { currentSiblingOrder: 2 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 3 });
+      wired.apply({ instance: { currentSiblingOrder: 3 } });
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 4 });
+      wired.apply({ instance: { currentSiblingOrder: 4 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 5 });
+      wired.apply({ instance: { currentSiblingOrder: 5 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 6 });
+      wired.apply({ instance: { currentSiblingOrder: 6 } });
       expect(chained.apply).toHaveBeenCalled();
 
       action = new adapt_csscasc.IsNthSiblingAction(2, 3);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 1 });
+      wired.apply({ instance: { currentSiblingOrder: 1 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 2 });
+      wired.apply({ instance: { currentSiblingOrder: 2 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 3 });
+      wired.apply({ instance: { currentSiblingOrder: 3 } });
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 4 });
+      wired.apply({ instance: { currentSiblingOrder: 4 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 5 });
+      wired.apply({ instance: { currentSiblingOrder: 5 } });
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 6 });
+      wired.apply({ instance: { currentSiblingOrder: 6 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 7 });
+      wired.apply({ instance: { currentSiblingOrder: 7 } });
       expect(chained.apply).toHaveBeenCalled();
 
       action = new adapt_csscasc.IsNthSiblingAction(-3, 0);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 1 });
+      wired.apply({ instance: { currentSiblingOrder: 1 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 2 });
+      wired.apply({ instance: { currentSiblingOrder: 2 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 3 });
+      wired.apply({ instance: { currentSiblingOrder: 3 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
       action = new adapt_csscasc.IsNthSiblingAction(-2, 5);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 1 });
+      wired.apply({ instance: { currentSiblingOrder: 1 } });
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 2 });
+      wired.apply({ instance: { currentSiblingOrder: 2 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 3 });
+      wired.apply({ instance: { currentSiblingOrder: 3 } });
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 4 });
+      wired.apply({ instance: { currentSiblingOrder: 4 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 5 });
+      wired.apply({ instance: { currentSiblingOrder: 5 } });
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply({ currentSiblingOrder: 6 });
+      wired.apply({ instance: { currentSiblingOrder: 6 } });
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply({ currentSiblingOrder: 7 });
+      wired.apply({ instance: { currentSiblingOrder: 7 } });
       expect(chained.apply).not.toHaveBeenCalled();
     });
   });
 
   describe("IsNthSiblingOfTypeAction", function () {
-    function dummyCascadeInstance(counts) {
-      var element = { namespaceURI: "foo", localName: "bar" };
-      var currentSiblingTypeCounts = {};
-      currentSiblingTypeCounts[element.namespaceURI] = counts;
+    function dummyCascadeInstance(counts, namespaceURI) {
+      var ns = namespaceURI === undefined ? "foo" : namespaceURI;
+      var element = { namespaceURI: ns, localName: "bar" };
+      var currentSiblingTypeCounts = { byNamespace: {}, noNamespace: null };
+      if (ns === null) {
+        currentSiblingTypeCounts.noNamespace = counts;
+      } else {
+        currentSiblingTypeCounts.byNamespace[ns] = counts;
+      }
       return {
-        currentSiblingTypeCounts: currentSiblingTypeCounts,
-        currentNamespace: element.namespaceURI,
-        currentLocalName: element.localName,
+        instance: {
+          currentSiblingTypeCounts: currentSiblingTypeCounts,
+          currentNamespace: element.namespaceURI,
+          currentLocalName: element.localName,
+        },
       };
     }
 
     it("when a=0, matches if currentSiblingTypeCounts[namespace][locaName]=b", function () {
       var action = new adapt_csscasc.IsNthSiblingOfTypeAction(0, 3);
-      var chained = (action.chained = jasmine.createSpyObj("chianed", [
-        "apply",
-      ]));
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 1, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 1, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 3, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 3, baz: 3 }));
       expect(chained.apply).toHaveBeenCalled();
     });
 
     it("when a is non-zero, matches if non-negative n which satisfies currentSiblingTypeCounts[namespace][locaName]=an+b exists", function () {
       var action = new adapt_csscasc.IsNthSiblingOfTypeAction(3, 0);
-      var chained = (action.chained = jasmine.createSpyObj("chianed", [
-        "apply",
-      ]));
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 1, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 1, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 2, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 2, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 3, baz: 1 }));
+      wired.apply(dummyCascadeInstance({ bar: 3, baz: 1 }));
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 4, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 4, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 5, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 5, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 6, baz: 1 }));
+      wired.apply(dummyCascadeInstance({ bar: 6, baz: 1 }));
       expect(chained.apply).toHaveBeenCalled();
 
       action = new adapt_csscasc.IsNthSiblingOfTypeAction(2, 3);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 1, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 1, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 2, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 2, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 3, baz: 1 }));
+      wired.apply(dummyCascadeInstance({ bar: 3, baz: 1 }));
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 4, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 4, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 5, baz: 1 }));
+      wired.apply(dummyCascadeInstance({ bar: 5, baz: 1 }));
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 6, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 6, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 7, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 7, baz: 3 }));
       expect(chained.apply).toHaveBeenCalled();
 
       action = new adapt_csscasc.IsNthSiblingOfTypeAction(-3, 0);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 1, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 1, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 2, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 2, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 3, baz: 3 }));
+      wired.apply(dummyCascadeInstance({ bar: 3, baz: 3 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
       action = new adapt_csscasc.IsNthSiblingOfTypeAction(-2, 5);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 1, baz: 2 }));
+      wired.apply(dummyCascadeInstance({ bar: 1, baz: 2 }));
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 2, baz: 1 }));
+      wired.apply(dummyCascadeInstance({ bar: 2, baz: 1 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 3, baz: 2 }));
+      wired.apply(dummyCascadeInstance({ bar: 3, baz: 2 }));
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 4, baz: 1 }));
+      wired.apply(dummyCascadeInstance({ bar: 4, baz: 1 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 5, baz: 2 }));
+      wired.apply(dummyCascadeInstance({ bar: 5, baz: 2 }));
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
-      action.apply(dummyCascadeInstance({ bar: 6, baz: 1 }));
+      wired.apply(dummyCascadeInstance({ bar: 6, baz: 1 }));
       expect(chained.apply).not.toHaveBeenCalled();
 
-      action.apply(dummyCascadeInstance({ bar: 7, baz: 1 }));
+      wired.apply(dummyCascadeInstance({ bar: 7, baz: 1 }));
+      expect(chained.apply).not.toHaveBeenCalled();
+    });
+
+    it("counts an element without a namespace in the no-namespace slot", function () {
+      var action = new adapt_csscasc.IsNthSiblingOfTypeAction(0, 3);
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
+
+      wired.apply(dummyCascadeInstance({ bar: 1, baz: 3 }, null));
+      expect(chained.apply).not.toHaveBeenCalled();
+
+      wired.apply(dummyCascadeInstance({ bar: 3, baz: 3 }, null));
+      expect(chained.apply).toHaveBeenCalled();
+    });
+
+    it("does not read namespaced counts for an element without a namespace", function () {
+      var action = new adapt_csscasc.IsNthSiblingOfTypeAction(0, 3);
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
+
+      var cascadeInstance = dummyCascadeInstance({ bar: 1 }, null);
+      cascadeInstance.instance.currentSiblingTypeCounts.byNamespace["foo"] = {
+        bar: 3,
+      };
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
     });
   });
@@ -264,176 +328,186 @@ describe("css-cascade", function () {
   describe("IsNthLastSiblingAction", function () {
     function dummyCascadeInstance(count) {
       return {
-        currentFollowingSiblingOrder: null,
-        currentSiblingOrder: 3,
+        instance: {
+          currentFollowingSiblingOrder: null,
+          currentSiblingOrder: 3,
+        },
         currentElement: { parentNode: { childElementCount: count } },
       };
     }
 
     it("when a=0, matches if currentFollowingSiblingOrder=b", function () {
       var action = new adapt_csscasc.IsNthLastSiblingAction(0, 3);
-      var chained = (action.chained = jasmine.createSpyObj("chianed", [
-        "apply",
-      ]));
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
 
       var cascadeInstance = dummyCascadeInstance(4);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(2);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(2);
 
       cascadeInstance = dummyCascadeInstance(5);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(3);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(3);
     });
 
     it("when a is non-zero, matches if non-negative n which satisfies currentFollowingSiblingOrder=an+b exists", function () {
       var action = new adapt_csscasc.IsNthLastSiblingAction(3, 0);
-      var chained = (action.chained = jasmine.createSpyObj("chianed", [
-        "apply",
-      ]));
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
 
       var cascadeInstance = dummyCascadeInstance(3);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(1);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(1);
 
       cascadeInstance = dummyCascadeInstance(4);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(2);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(2);
 
       cascadeInstance = dummyCascadeInstance(5);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(3);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(3);
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance(6);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(4);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(4);
 
       cascadeInstance = dummyCascadeInstance(7);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(5);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(5);
 
       cascadeInstance = dummyCascadeInstance(8);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(6);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(6);
 
       action = new adapt_csscasc.IsNthLastSiblingAction(2, 3);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance(3);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(1);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(1);
 
       cascadeInstance = dummyCascadeInstance(4);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(2);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(2);
 
       cascadeInstance = dummyCascadeInstance(5);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(3);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(3);
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance(6);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(4);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(4);
 
       cascadeInstance = dummyCascadeInstance(7);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(5);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(5);
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance(8);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(6);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(6);
 
       cascadeInstance = dummyCascadeInstance(9);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(7);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(7);
 
       action = new adapt_csscasc.IsNthLastSiblingAction(-3, 0);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance(3);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(1);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(1);
 
       cascadeInstance = dummyCascadeInstance(4);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(2);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(2);
 
       cascadeInstance = dummyCascadeInstance(5);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(3);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(3);
 
       action = new adapt_csscasc.IsNthLastSiblingAction(-2, 5);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance(3);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(1);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(1);
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance(4);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(2);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(2);
 
       cascadeInstance = dummyCascadeInstance(5);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(3);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(3);
 
       cascadeInstance = dummyCascadeInstance(6);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(4);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(4);
 
       cascadeInstance = dummyCascadeInstance(7);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(5);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(5);
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance(8);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(6);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(6);
 
       cascadeInstance = dummyCascadeInstance(9);
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingOrder).toBe(7);
+      expect(cascadeInstance.instance.currentFollowingSiblingOrder).toBe(7);
     });
   });
 
   describe("IsNthLastSiblingOfTypeAction", function () {
-    function dummyCascadeInstance(counts) {
-      var currentElement = { namespaceURI: "foo", localName: "bar" };
+    function dummyCascadeInstance(counts, namespaceURI) {
+      var ns = namespaceURI === undefined ? "foo" : namespaceURI;
+      var currentElement = { namespaceURI: ns, localName: "bar" };
       var element = currentElement;
       Object.keys(counts).forEach(function (name) {
         for (var i = counts[name]; i > 0; i--) {
@@ -444,221 +518,493 @@ describe("css-cascade", function () {
         }
       });
       return {
-        currentFollowingSiblingTypeCounts: {},
-        currentNamespace: currentElement.namespaceURI,
-        currentLocalName: currentElement.localName,
+        instance: {
+          currentFollowingSiblingTypeCounts: {
+            byNamespace: {},
+            noNamespace: null,
+          },
+          currentNamespace: currentElement.namespaceURI,
+          currentLocalName: currentElement.localName,
+        },
         currentElement: currentElement,
       };
     }
 
     it("when a=0, matches if currentFollowingSiblingTypeCounts[namespace][locaName]=b", function () {
       var action = new adapt_csscasc.IsNthLastSiblingOfTypeAction(0, 3);
-      var chained = (action.chained = jasmine.createSpyObj("chianed", [
-        "apply",
-      ]));
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
 
       var cascadeInstance = dummyCascadeInstance({ bar: 1, baz: 2 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 2, baz: 2 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 2, baz: 2 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 2, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 3, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 3, baz: 1 } },
+        noNamespace: null,
       });
     });
 
     it("when a is non-zero, matches if non-negative n which satisfies currentFollowingSiblingTypeCounts[namespace][locaName]=an+b exists", function () {
       var action = new adapt_csscasc.IsNthLastSiblingOfTypeAction(3, 0);
-      var chained = (action.chained = jasmine.createSpyObj("chianed", [
-        "apply",
-      ]));
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
 
       var cascadeInstance = dummyCascadeInstance({ bar: 0, baz: 2 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 1, baz: 2 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 1, baz: 2 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 1, baz: 2 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 2, baz: 2 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 2, baz: 2 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 2, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 3, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 3, baz: 1 } },
+        noNamespace: null,
       });
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 3, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 4, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 4, baz: 3 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 4, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 5, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 5, baz: 3 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 5, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 6, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 6, baz: 1 } },
+        noNamespace: null,
       });
 
       action = new adapt_csscasc.IsNthLastSiblingOfTypeAction(2, 3);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 0, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 1, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 1, baz: 3 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 1, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 2, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 2, baz: 3 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 2, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 3, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 3, baz: 1 } },
+        noNamespace: null,
       });
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 3, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 4, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 4, baz: 3 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 4, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 5, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 5, baz: 1 } },
+        noNamespace: null,
       });
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 5, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 6, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 6, baz: 3 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 6, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 7, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 7, baz: 3 } },
+        noNamespace: null,
       });
 
       action = new adapt_csscasc.IsNthLastSiblingOfTypeAction(-3, 0);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 0, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 1, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 1, baz: 3 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 1, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 2, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 2, baz: 3 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 2, baz: 3 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 3, baz: 3 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 3, baz: 3 } },
+        noNamespace: null,
       });
 
       action = new adapt_csscasc.IsNthLastSiblingOfTypeAction(-2, 5);
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 0, baz: 2 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 1, baz: 2 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 1, baz: 2 } },
+        noNamespace: null,
       });
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 1, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 2, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 2, baz: 1 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 2, baz: 2 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 3, baz: 2 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 3, baz: 2 } },
+        noNamespace: null,
       });
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 3, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 4, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 4, baz: 1 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 4, baz: 2 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 5, baz: 2 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 5, baz: 2 } },
+        noNamespace: null,
       });
 
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
 
       cascadeInstance = dummyCascadeInstance({ bar: 5, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 6, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 6, baz: 1 } },
+        noNamespace: null,
       });
 
       cascadeInstance = dummyCascadeInstance({ bar: 6, baz: 1 });
-      action.apply(cascadeInstance);
+      wired.apply(cascadeInstance);
       expect(chained.apply).not.toHaveBeenCalled();
-      expect(cascadeInstance.currentFollowingSiblingTypeCounts).toEqual({
-        foo: { bar: 7, baz: 1 },
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 7, baz: 1 } },
+        noNamespace: null,
       });
+    });
+
+    it("fills the no-namespace slot when the element has no namespace", function () {
+      var action = new adapt_csscasc.IsNthLastSiblingOfTypeAction(0, 3);
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+      var wired = action.wire(chained);
+
+      var cascadeInstance = dummyCascadeInstance({ bar: 1, baz: 2 }, null);
+      wired.apply(cascadeInstance);
+      expect(chained.apply).not.toHaveBeenCalled();
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: {},
+        noNamespace: { bar: 2, baz: 2 },
+      });
+
+      cascadeInstance = dummyCascadeInstance({ bar: 2, baz: 1 }, null);
+      wired.apply(cascadeInstance);
+      expect(chained.apply).toHaveBeenCalled();
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: {},
+        noNamespace: { bar: 3, baz: 1 },
+      });
+    });
+
+    it("keeps namespaced and no-namespace siblings in separate slots", function () {
+      var currentElement = {
+        namespaceURI: "foo",
+        localName: "bar",
+        nextElementSibling: {
+          namespaceURI: null,
+          localName: "bar",
+          nextElementSibling: {
+            namespaceURI: "foo",
+            localName: "bar",
+            nextElementSibling: null,
+          },
+        },
+      };
+      var cascadeInstance = {
+        instance: {
+          currentFollowingSiblingTypeCounts: {
+            byNamespace: {},
+            noNamespace: null,
+          },
+          currentNamespace: currentElement.namespaceURI,
+          currentLocalName: currentElement.localName,
+        },
+        currentElement: currentElement,
+      };
+      var action = new adapt_csscasc.IsNthLastSiblingOfTypeAction(0, 2);
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+
+      action.wire(chained).apply(cascadeInstance);
+
+      expect(
+        cascadeInstance.instance.currentFollowingSiblingTypeCounts,
+      ).toEqual({
+        byNamespace: { foo: { bar: 2 } },
+        noNamespace: { bar: 1 },
+      });
+      expect(chained.apply).toHaveBeenCalled();
+    });
+  });
+
+  describe("IsNthSiblingOfSelectorAction", function () {
+    function dummyElement(namespaceURI, localName) {
+      return {
+        namespaceURI: namespaceURI,
+        localName: localName,
+        previousElementSibling: null,
+        getAttribute: function () {
+          return null;
+        },
+      };
+    }
+
+    it("probes a sibling without a namespace against the no-namespace counts", function () {
+      var first = dummyElement(null, "bar");
+      var current = dummyElement(null, "bar");
+      current.previousElementSibling = first;
+      var instance = {
+        currentNamespace: null,
+        currentLocalName: "bar",
+        currentId: null,
+        currentSiblingOrder: 2,
+        currentSiblingTypeCounts: {
+          byNamespace: {},
+          noNamespace: { bar: 2 },
+        },
+      };
+      var cascadeInstance = {
+        instance: instance,
+        currentStyle: {},
+        currentClassNames: [],
+        currentEpubTypes: [],
+        currentElement: current,
+      };
+      var action = new adapt_csscasc.IsNthSiblingOfSelectorAction(0, 2, [
+        [new adapt_csscasc.IsNthSiblingOfTypeAction(0, 2)],
+      ]);
+      var chained = jasmine.createSpyObj("chained", ["apply"]);
+
+      action.wire(chained).apply(cascadeInstance);
+
+      // The probe reads the same slot the main walk writes, so no "" bucket
+      // is created on the side.
+      expect(instance.currentSiblingTypeCounts).toEqual({
+        byNamespace: {},
+        noNamespace: { bar: 2 },
+      });
+      expect(chained.apply).toHaveBeenCalled();
+      expect(instance.currentNamespace).toBeNull();
+      expect(instance.currentLocalName).toBe("bar");
+      expect(instance.currentSiblingOrder).toBe(2);
+    });
+
+    it("probes a sibling in a window carrying that sibling", function () {
+      var first = dummyElement("http://www.w3.org/1999/xhtml", "p");
+      first.classList = ["first"];
+      var current = dummyElement("http://www.w3.org/1999/xhtml", "p");
+      current.previousElementSibling = first;
+      var instance = {
+        currentNamespace: "http://www.w3.org/1999/xhtml",
+        currentLocalName: "p",
+        currentId: null,
+        currentSiblingOrder: 2,
+      };
+      var mainStyle = {};
+      var mainEpubTypes = ["chapter"];
+      var cascadeInstance = {
+        instance: instance,
+        currentStyle: mainStyle,
+        currentClassNames: ["current"],
+        currentEpubTypes: mainEpubTypes,
+        currentElement: current,
+      };
+      var seen = [];
+      var recorder = new adapt_csscasc.ChainedAction();
+      recorder.matches = function (window) {
+        seen.push(window);
+        return true;
+      };
+      var action = new adapt_csscasc.IsNthSiblingOfSelectorAction(0, 2, [
+        [recorder],
+      ]);
+
+      action
+        .wire(jasmine.createSpyObj("chained", ["apply"]))
+        .apply(cascadeInstance);
+
+      expect(seen.length).toBe(2);
+      var probe = seen[1];
+      expect(probe.currentElement).toBe(first);
+      expect(probe.currentClassNames).toEqual(["first"]);
+      expect(probe.currentStyle).toBe(mainStyle);
+      expect(probe.currentEpubTypes).toBe(mainEpubTypes);
+      expect(probe.instance).toBe(instance);
+    });
+  });
+
+  describe("AfterPseudoelementItem", function () {
+    it("processes the after props against the style captured for its element", function () {
+      var afterprop = { content: "after content" };
+      var element = { localName: "p" };
+      var elementStyle = { display: "block" };
+      var item = new adapt_csscasc.AfterPseudoelementItem(
+        afterprop,
+        element,
+        elementStyle,
+      );
+      var cascadeInstance = jasmine.createSpyObj("cascadeInstance", [
+        "processPseudoelementProps",
+      ]);
+
+      expect(item.pop(cascadeInstance, 0)).toBe(true);
+
+      expect(cascadeInstance.processPseudoelementProps).toHaveBeenCalledWith(
+        afterprop,
+        element,
+        elementStyle,
+      );
     });
   });
 
@@ -675,18 +1021,20 @@ describe("css-cascade", function () {
 
     var action = new adapt_csscasc.IsEmptyAction();
     var chained;
+    var wired;
 
     beforeEach(function () {
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
     });
 
     it("applies if the element has no children", function () {
-      action.apply(dummyCascadeInstance(null));
+      wired.apply(dummyCascadeInstance(null));
       expect(chained.apply).toHaveBeenCalled();
     });
 
     it("applies if the element has only comment nodes or empty text nodes (length=0) as its children", function () {
-      action.apply(
+      wired.apply(
         dummyCascadeInstance([
           { nodeType: Node.COMMENT_NODE, length: 10 },
           { nodeType: Node.TEXT_NODE, length: 0 },
@@ -696,12 +1044,12 @@ describe("css-cascade", function () {
     });
 
     it("not applies if the element has an element child", function () {
-      action.apply(dummyCascadeInstance([{ nodeType: Node.ELEMENT_NODE }]));
+      wired.apply(dummyCascadeInstance([{ nodeType: Node.ELEMENT_NODE }]));
       expect(chained.apply).not.toHaveBeenCalled();
     });
 
     it("not applies if the element has a non-empty text node as a child", function () {
-      action.apply(
+      wired.apply(
         dummyCascadeInstance([{ nodeType: Node.TEXT_NODE, length: 1 }]),
       );
       expect(chained.apply).not.toHaveBeenCalled();
@@ -711,23 +1059,25 @@ describe("css-cascade", function () {
   describe("IsEnabledAction", function () {
     var action = new adapt_csscasc.IsEnabledAction();
     var chained;
+    var wired;
 
     beforeEach(function () {
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
     });
 
     it("applies if the element's 'disabled' property is false (not undefined)", function () {
-      action.apply({ currentElement: { disabled: false } });
+      wired.apply({ currentElement: { disabled: false } });
       expect(chained.apply).toHaveBeenCalled();
     });
 
     it("not applies if the element's 'disabled' property is true", function () {
-      action.apply({ currentElement: { disabled: true } });
+      wired.apply({ currentElement: { disabled: true } });
       expect(chained.apply).not.toHaveBeenCalled();
     });
 
-    it("applies if the element does not have 'disabled' property", function () {
-      action.apply({ currentElement: {} });
+    it("not applies if the element does not have 'disabled' property", function () {
+      wired.apply({ currentElement: {} });
       expect(chained.apply).not.toHaveBeenCalled();
     });
   });
@@ -735,23 +1085,25 @@ describe("css-cascade", function () {
   describe("IsDisabledAction", function () {
     var action = new adapt_csscasc.IsDisabledAction();
     var chained;
+    var wired;
 
     beforeEach(function () {
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
     });
 
     it("applies if the element's 'disabled' property is true", function () {
-      action.apply({ currentElement: { disabled: true } });
+      wired.apply({ currentElement: { disabled: true } });
       expect(chained.apply).toHaveBeenCalled();
     });
 
     it("not applies if the element's 'disabled' property is false (not undefined)", function () {
-      action.apply({ currentElement: { disabled: false } });
+      wired.apply({ currentElement: { disabled: false } });
       expect(chained.apply).not.toHaveBeenCalled();
     });
 
-    it("applies if the element does not have 'disabled' property", function () {
-      action.apply({ currentElement: {} });
+    it("not applies if the element does not have 'disabled' property", function () {
+      wired.apply({ currentElement: {} });
       expect(chained.apply).not.toHaveBeenCalled();
     });
   });
@@ -759,34 +1111,803 @@ describe("css-cascade", function () {
   describe("IsCheckedAction", function () {
     var action = new adapt_csscasc.IsCheckedAction();
     var chained;
+    var wired;
 
     beforeEach(function () {
-      chained = action.chained = jasmine.createSpyObj("chianed", ["apply"]);
+      chained = jasmine.createSpyObj("chained", ["apply"]);
+      wired = action.wire(chained);
     });
 
     it("applies if the element's 'selected' property is true", function () {
-      action.apply({ currentElement: { selected: true } });
+      wired.apply({ currentElement: { selected: true } });
       expect(chained.apply).toHaveBeenCalled();
     });
 
     it("applies if the element's 'checked' property is true", function () {
-      action.apply({ currentElement: { checked: true } });
+      wired.apply({ currentElement: { checked: true } });
       expect(chained.apply).toHaveBeenCalled();
     });
 
     it("not applies if the element's 'selected' property is false (not undefined)", function () {
-      action.apply({ currentElement: { selected: false } });
+      wired.apply({ currentElement: { selected: false } });
       expect(chained.apply).not.toHaveBeenCalled();
     });
 
     it("not applies if the element's 'checked' property is false (not undefined)", function () {
-      action.apply({ currentElement: { checked: false } });
+      wired.apply({ currentElement: { checked: false } });
       expect(chained.apply).not.toHaveBeenCalled();
     });
 
-    it("applies if the element does not have 'selected' nor 'checked' property", function () {
-      action.apply({ currentElement: {} });
+    it("not applies if the element does not have 'selected' nor 'checked' property", function () {
+      wired.apply({ currentElement: {} });
       expect(chained.apply).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the selector under parse", function () {
+    function parseCascade(cssText, done, callback) {
+      var handler = cascadeParserHandler(
+        new adapt_exprs.LexicalScope(null),
+        adapt_cssvalid.baseValidatorSet(),
+      );
+      parseCascade.handler = handler;
+      handler.owner.startStylesheet(adapt_cssparse.StylesheetFlavor.AUTHOR);
+      adapt_task.start(function () {
+        adapt_cssparse
+          .parseStylesheetFromText(cssText, handler.owner, null, null, null)
+          .then(function (parsed) {
+            expect(parsed).toBe(true);
+            callback(handler.finish());
+            done();
+          });
+        return adapt_task.newResult(true);
+      });
+    }
+
+    describe("a syntax error inside the argument", function () {
+      it("fails a list whose only alternative was voided", function (done) {
+        parseCascade("div:is(!!!) { color: red }", done, function (cascade) {
+          var action = cascade.tags["div"];
+          expect(action).toEqual(
+            jasmine.any(adapt_csscasc.WiredConditionScope),
+          );
+          expect(action.condition.condition).toBe("");
+        });
+      });
+
+      it("drops the voided alternative and keeps the rest", function (done) {
+        parseCascade(
+          "div:is(!!!, .x) { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["div"]).toBeUndefined();
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(1);
+          },
+        );
+      });
+
+      it("voids :nth-child(An+B of S) whose alternative was voided", function (done) {
+        // Selectors Level 4 gives S a <complex-real-selector-list>.
+        parseCascade(
+          "div:nth-child(2n of !!!, .x) { color: red }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual([]);
+          },
+        );
+      });
+
+      it("voids :has() whose alternative was voided", function (done) {
+        // Selectors Level 4 gives `:has()` a <relative-selector-list>.
+        parseCascade(
+          "div:has(# p, q) { color: red }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual([]);
+          },
+        );
+      });
+
+      it("drops a voided unforgiving list from the forgiving list around it", function (done) {
+        parseCascade(
+          "div:is(:has(.x, # p), .z) span { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(1);
+          },
+        );
+      });
+
+      it("takes the alternative the parser rebuilds after recovering", function (done) {
+        parseCascade(
+          "div:is(!!!}p, .x) { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(2);
+          },
+        );
+      });
+
+      it("voids the rule when an unforgiving list is voided", function (done) {
+        // A style rule takes a selector list that is not forgiving either, so
+        // the selectors after the comma go with it.
+        parseCascade(
+          "x:not(u|y, .c d, z) { color: red }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual([]);
+            expect(Object.keys(cascade.classes)).toEqual([]);
+          },
+        );
+      });
+
+      it("voids the selectors that precede the invalid one", function (done) {
+        parseCascade(
+          "a, b:has(# p), c { color: red } e { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["e"]);
+          },
+        );
+      });
+
+      it("emits nothing for a combinator in a voided alternative", function (done) {
+        // The condition a combinator registers is read by the rest of that
+        // alternative, which is dropped.
+        parseCascade(
+          "div:is(# p q, .x) { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(1);
+          },
+        );
+      });
+
+      it("leaves the specificity of a voided alternative out of the list", function (done) {
+        // Selectors 4 computes the specificity of a forgiving list from the
+        // alternatives it keeps.
+        parseCascade(
+          "div:is(# #i, .x) { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].chained.chained.specificity).toBe(257);
+          },
+        );
+      });
+
+      it("keeps a pseudo-element of a voided alternative out of the enclosing selector", function (done) {
+        // Recording a pseudo-element does not touch the selector under parse,
+        // so the parser reaches `::before` with the alternative already voided.
+        parseCascade(
+          "div:is(.x, # ::before) span { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["span"]).toEqual(
+              jasmine.any(adapt_csscasc.WiredConditionScope),
+            );
+            expect(cascade.tags["span"].chained).toEqual(
+              jasmine.any(adapt_csscasc.ApplyRuleAction),
+            );
+          },
+        );
+      });
+
+      it("leaves the specificity of a pseudo-element in a voided alternative out of the list", function (done) {
+        parseCascade(
+          "div:is(*, # ::before) { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["div"].chained.specificity).toBe(1);
+          },
+        );
+      });
+
+      it("keeps the view condition of the voided selector out of the next rule", function (done) {
+        parseCascade(
+          "p::nth-fragment(2n+1):not(# a) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["q"].viewConditionId).toBeNull();
+          },
+        );
+      });
+
+      it("drops a rule whose selector never finished", function (done) {
+        // The rule never reaches its body, so nothing it built is taken.
+        parseCascade(
+          "div:is(!!!}p>{}) span { color: red }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual([]);
+          },
+        );
+      });
+    });
+
+    describe("a pseudo-element inside the argument", function () {
+      it("drops the alternative from a forgiving list", function (done) {
+        parseCascade(
+          "div:is(.x, ::before) span { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(1);
+            expect(cascade.tags["span"]).toEqual(
+              jasmine.any(adapt_csscasc.WiredConditionScope),
+            );
+          },
+        );
+      });
+
+      it("voids the rule when the list is not forgiving", function (done) {
+        parseCascade(
+          "div:not(.x, ::before) span { color: red }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual([]);
+          },
+        );
+      });
+
+      it("matches nothing when it was the only alternative", function (done) {
+        parseCascade(
+          "div:is(::before) span { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["div"].condition.condition).toBe("");
+          },
+        );
+      });
+
+      it("keeps a pseudo-element outside such a list", function (done) {
+        parseCascade(
+          "div:is(.x) ::before { color: red }",
+          done,
+          function (cascade) {
+            var applied = cascade.tags["*"].list[1].chained;
+            expect(applied.pseudoelement).toBe("before");
+          },
+        );
+      });
+    });
+
+    describe("an unknown pseudo-class", function () {
+      it("voids the rule", function (done) {
+        parseCascade(
+          "p:unknown-pseudo, div { color: red }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual([]);
+          },
+        );
+      });
+
+      it("keeps the rules that follow", function (done) {
+        parseCascade(
+          "p:unknown-pseudo { color: red } div { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["div"]);
+          },
+        );
+      });
+
+      it("keeps the view condition of the voided selector out of the next rule", function (done) {
+        parseCascade(
+          "p::nth-fragment(2n+1):unknown-pseudo { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["q"].viewConditionId).toBeNull();
+          },
+        );
+      });
+
+      it("drops only the alternative inside a forgiving list", function (done) {
+        parseCascade(
+          "div:is(.x, :unknown-pseudo) span { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(1);
+            expect(cascade.tags["span"]).toEqual(
+              jasmine.any(adapt_csscasc.WiredConditionScope),
+            );
+          },
+        );
+      });
+    });
+
+    describe("a pseudo-class in the wrong form", function () {
+      it("voids the rule for the functional form of a plain pseudo-class", function (done) {
+        parseCascade(
+          "p:empty(x) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+
+      it("voids the rule for the functional form of :link", function (done) {
+        parseCascade(
+          "a:link(x) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+
+      [
+        "dir",
+        "href-epub-type",
+        "href-role-type",
+        "lang",
+        "nth-child",
+        "nth-last-child",
+        "nth-last-of-type",
+        "nth-of-type",
+      ].forEach(function (name) {
+        it("voids the rule for a bare :" + name, function (done) {
+          parseCascade(
+            "p:" + name + " { color: red } q { color: blue }",
+            done,
+            function (cascade) {
+              expect(Object.keys(cascade.tags)).toEqual(["q"]);
+            },
+          );
+        });
+      });
+
+      it("voids the selectors around a bare href-epub-type", function (done) {
+        parseCascade(
+          "a:href-epub-type, q { color: red } r { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["r"]);
+          },
+        );
+      });
+
+      it("keeps the view condition out of the next rule when the void comes first", function (done) {
+        parseCascade(
+          "p:lang::nth-fragment(2n+1) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+            expect(cascade.tags["q"].viewConditionId).toBeNull();
+          },
+        );
+      });
+
+      it("does not delegate a pseudo-class only because the browser supports it", function (done) {
+        expect(CSS.supports("selector(:focus-visible)")).toBe(true);
+        parseCascade(
+          "p:focus-visible { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+    });
+
+    describe("a pseudo-element name case", function () {
+      it("takes a pseudo-element name case-insensitively", function (done) {
+        parseCascade("p:BEFORE, h1 { color: red }", done, function (cascade) {
+          expect(Object.keys(cascade.tags)).toEqual(["p", "h1"]);
+          expect(cascade.tags["p"].pseudoelement).toBe("before");
+        });
+      });
+
+      it("takes a functional pseudo-element name case-insensitively", function (done) {
+        parseCascade(
+          "p::NTH-FRAGMENT(2n+1) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["p", "q"]);
+            expect(cascade.tags["p"].viewConditionId).toBe("NFS_2_1");
+          },
+        );
+      });
+
+      it("voids the rule for the functional form of a pseudo-element alias", function (done) {
+        parseCascade(
+          "p:before(x) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+    });
+
+    describe(":any-link", function () {
+      it("matches as :link does", function (done) {
+        parseCascade(":any-link { color: red }", done, function (cascade) {
+          expect(Object.keys(cascade.tags)).toEqual(["a"]);
+          expect(cascade.tags["a"].condition).toEqual(
+            jasmine.any(adapt_csscasc.CheckAttributePresentAction),
+          );
+          expect(cascade.tags["a"].condition.ns).toBe("");
+          expect(cascade.tags["a"].condition.name).toBe("href");
+          expect(cascade.tags["a"].chained.specificity).toBe(256);
+        });
+      });
+
+      it("keeps the source text :has() takes for :any-link", function (done) {
+        parseCascade(
+          "div:has(:any-link) { color: red }",
+          done,
+          function (cascade) {
+            var action = cascade.tags["div"].condition;
+            expect(action).toEqual(
+              jasmine.any(adapt_csscasc.MatchesRelationalAction),
+            );
+            expect(action.selectorTexts).toEqual([":any-link"]);
+          },
+        );
+      });
+
+      it("voids the rule for the functional form", function (done) {
+        parseCascade(
+          ":any-link(x) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+    });
+
+    describe(":dir()", function () {
+      it("compiles to a directionality check", function (done) {
+        parseCascade("p:dir(rtl) { color: red }", done, function (cascade) {
+          expect(cascade.tags["p"]).toEqual(
+            jasmine.any(adapt_csscasc.WiredGuard),
+          );
+          expect(cascade.tags["p"].condition).toEqual(
+            jasmine.any(adapt_csscasc.MatchesNativeSelectorAction),
+          );
+          expect(cascade.tags["p"].condition.selector).toBe(":dir(rtl)");
+          expect(cascade.tags["p"].chained.specificity).toBe(257);
+        });
+      });
+
+      it("takes the name and the argument case-insensitively", function (done) {
+        parseCascade(
+          "p:DIR(RTL) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["p", "q"]);
+            expect(cascade.tags["p"].condition.selector).toBe(":dir(rtl)");
+          },
+        );
+      });
+
+      it("matches nothing for an identifier other than ltr and rtl", function (done) {
+        parseCascade(
+          "p:dir(foo) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["p", "q"]);
+            expect(cascade.tags["p"]).toEqual(
+              jasmine.any(adapt_csscasc.WiredConditionScope),
+            );
+            expect(cascade.tags["p"].condition.condition).toBe("");
+            expect(cascade.tags["p"].chained.specificity).toBe(257);
+          },
+        );
+      });
+
+      it("voids the rule when the argument is missing", function (done) {
+        parseCascade(
+          "p:dir() { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+
+      it("voids the rule when the argument is not a single identifier", function (done) {
+        parseCascade(
+          "p:dir(ltr rtl) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+
+      it("voids the rule when the argument is a string", function (done) {
+        parseCascade(
+          'p:dir("ltr") { color: red } q { color: blue }',
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+
+      it("voids the rule when used without an argument list", function (done) {
+        parseCascade(
+          "p:dir { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+
+      it("voids only the enclosing rule inside :not()", function (done) {
+        parseCascade(
+          "p:not(:dir()) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+
+      it("drops only the alternative from a forgiving list", function (done) {
+        parseCascade(
+          "div:is(:dir(), .x) span { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(1);
+            expect(cascade.tags["span"]).toBeDefined();
+          },
+        );
+      });
+
+      it("keeps the selectors after the comma when the only alternative is voided", function (done) {
+        parseCascade(
+          "p:is(:dir()), q { color: red }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["p", "q"]);
+            expect(cascade.tags["p"].condition.condition).toBe("");
+          },
+        );
+      });
+
+      it("drops only the alternative when the void starts two lists deep", function (done) {
+        parseCascade(
+          "div:is(:not(:dir()), .x) span { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(1);
+            expect(cascade.tags["span"]).toBeDefined();
+          },
+        );
+      });
+
+      it("voids the selectors before and after when :has() holds it", function (done) {
+        parseCascade(
+          "a, b:has(:dir()), c { color: red } e { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["e"]);
+          },
+        );
+      });
+
+      it("balances nested parentheses in an invalid argument", function (done) {
+        parseCascade(
+          "div:is(:dir(a(b)), .x) span { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition.firstActions.length).toBe(1);
+            expect(cascade.tags["span"]).toBeDefined();
+          },
+        );
+      });
+
+      it("keeps the source text of a forgiving list :has() takes", function (done) {
+        parseCascade(
+          "div:has(:is(:dir())) { color: red }",
+          done,
+          function (cascade) {
+            var action = cascade.tags["div"].condition;
+            expect(action).toEqual(
+              jasmine.any(adapt_csscasc.MatchesRelationalAction),
+            );
+            expect(action.selectorTexts).toEqual([":is(:dir())"]);
+          },
+        );
+      });
+
+      it("voids the rule when the of-S list holds it", function (done) {
+        parseCascade(
+          "li:nth-child(2n of :dir()) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["q"]);
+          },
+        );
+      });
+
+      it("keeps the selectors after the comma inside :where()", function (done) {
+        parseCascade(
+          "p:where(:dir()), q { color: red }",
+          done,
+          function (cascade) {
+            expect(Object.keys(cascade.tags)).toEqual(["p", "q"]);
+            expect(cascade.tags["p"].condition.condition).toBe("");
+          },
+        );
+      });
+
+      it("keeps the rule inside :not()", function (done) {
+        parseCascade(
+          ":not(:dir(ltr)) + div { color: red }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["*"].condition).toEqual(
+              jasmine.any(adapt_csscasc.MatchesNoneAction),
+            );
+            expect(
+              cascade.tags["*"].condition.firstActions[0].condition,
+            ).toEqual(jasmine.any(adapt_csscasc.MatchesNativeSelectorAction));
+            expect(cascade.tags["*"].chained).toEqual(
+              jasmine.any(adapt_csscasc.ConditionItemAction),
+            );
+            expect(cascade.tags["div"]).toBeDefined();
+          },
+        );
+      });
+
+      it("keeps the source text of the alternative :has() takes", function (done) {
+        parseCascade(
+          "div:has(*:dir(ltr)) { color: red }",
+          done,
+          function (cascade) {
+            var action = cascade.tags["div"].condition;
+            expect(action).toEqual(
+              jasmine.any(adapt_csscasc.MatchesRelationalAction),
+            );
+            expect(action.selectorTexts).toEqual(["*:dir(ltr)"]);
+          },
+        );
+      });
+    });
+
+    describe("without a syntax error", function () {
+      it("registers a sibling condition before the chain restarts", function (done) {
+        // The condition item is read by the rest of the selector, so it must
+        // not be guarded by the condition it sets.
+        parseCascade("div + p { color: red }", done, function (cascade) {
+          expect(cascade.tags["div"]).toEqual(
+            jasmine.any(adapt_csscasc.ConditionItemAction),
+          );
+        });
+      });
+
+      it("registers a following sibling condition before the chain restarts", function (done) {
+        parseCascade("div ~ p { color: red }", done, function (cascade) {
+          expect(cascade.tags["div"]).toEqual(
+            jasmine.any(adapt_csscasc.ConditionItemAction),
+          );
+        });
+      });
+
+      it("keeps the source text of the alternatives :has() takes", function (done) {
+        parseCascade("div:has(p, q) { color: red }", done, function (cascade) {
+          var action = cascade.tags["div"].condition;
+          expect(action).toEqual(
+            jasmine.any(adapt_csscasc.MatchesRelationalAction),
+          );
+          expect(action.selectorTexts).toEqual(["p", " q"]);
+        });
+      });
+
+      it("takes the alternatives of :nth-last-child(An+B of S)", function (done) {
+        parseCascade(
+          "div:nth-last-child(2n of .x) { color: red }",
+          done,
+          function (cascade) {
+            var action = cascade.tags["div"].condition;
+            expect(action).toEqual(
+              jasmine.any(adapt_csscasc.IsNthLastSiblingOfSelectorAction),
+            );
+            expect(action.firstActions.length).toBe(1);
+          },
+        );
+      });
+
+      it("takes the selector in the order the parser reports it", function (done) {
+        // The first action decides which table the rule is indexed under, and
+        // the id table is looked up by `currentId` while CheckIdAction also
+        // accepts `currentXmlId`.
+        parseCascade("#a#b { color: red }", done, function (cascade) {
+          expect(Object.keys(cascade.ids)).toEqual(["a"]);
+        });
+      });
+
+      it("leaves no selector behind once the rule is applied", function () {
+        // A handler that answers an at-rule itself, as ops does for
+        // `@-epubx-page-template`, receives a second rule body with no
+        // selector rule in between.
+        var handler = cascadeParserHandler(
+          new adapt_exprs.LexicalScope(null),
+          adapt_cssvalid.baseValidatorSet(),
+        );
+        handler.startSelectorRule();
+        handler.tagSelector(null, "div");
+        handler.startRuleBody();
+        handler.startRuleBody();
+
+        var cascade = handler.finish();
+        expect(Object.keys(cascade.tags)).toEqual(["div"]);
+        expect(cascade.tags["div"]).toEqual(
+          jasmine.any(adapt_csscasc.ApplyRuleAction),
+        );
+      });
+
+      it("keeps the view condition of a selector out of the next rule", function (done) {
+        parseCascade(
+          "p::nth-fragment(2n+1) { color: red } q { color: blue }",
+          done,
+          function (cascade) {
+            expect(cascade.tags["q"].viewConditionId).toBeNull();
+          },
+        );
+      });
+    });
+  });
+
+  describe("MatchesNativeSelectorAction", function () {
+    function matches(element, selector) {
+      return new adapt_csscasc.MatchesNativeSelectorAction(selector).matches({
+        currentElement: element,
+      });
+    }
+
+    it("matches in an XHTML document", function () {
+      var doc = new DOMParser().parseFromString(
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body>' +
+          '<section dir="rtl"><p></p></section></body></html>',
+        "application/xhtml+xml",
+      );
+      var element = doc.getElementsByTagName("p")[0];
+      expect(matches(element, ":dir(rtl)")).toBe(true);
+      expect(matches(element, ":dir(ltr)")).toBe(false);
+    });
+
+    it("hands the selector to the matcher for every element it answers for", function () {
+      var first = {
+        matches: jasmine.createSpy("matches").and.returnValue(true),
+      };
+      var second = {
+        matches: jasmine.createSpy("matches").and.returnValue(false),
+      };
+      var third = {
+        matches: jasmine.createSpy("matches").and.returnValue(true),
+      };
+      var action = new adapt_csscasc.MatchesNativeSelectorAction(":dir(rtl)");
+      expect(action.matches({ currentElement: first })).toBe(true);
+      expect(action.matches({ currentElement: second })).toBe(false);
+      expect(action.matches({ currentElement: third })).toBe(true);
+      expect(first.matches).toHaveBeenCalledWith(":dir(rtl)");
+      expect(second.matches).toHaveBeenCalledWith(":dir(rtl)");
+      expect(third.matches).toHaveBeenCalledWith(":dir(rtl)");
+    });
+
+    it("matches nothing without an element", function () {
+      var action = new adapt_csscasc.MatchesNativeSelectorAction(":dir(ltr)");
+      // A rule cascade carries no element at all.
+      expect(action.matches({})).toBe(false);
+      expect(action.matches({ currentElement: null })).toBe(false);
+    });
+
+    it("matches nothing when the native matcher throws", function () {
+      var element = {
+        matches: jasmine
+          .createSpy("matches")
+          .and.throwError(new DOMException("Invalid selector", "SyntaxError")),
+      };
+      var action = new adapt_csscasc.MatchesNativeSelectorAction(":dir(rtl)");
+      expect(action.matches({ currentElement: element })).toBe(false);
+      expect(element.matches).toHaveBeenCalledWith(":dir(rtl)");
     });
   });
 
@@ -811,7 +1932,10 @@ describe("css-cascade", function () {
           };
         }
 
-        var handler = new adapt_csscasc.CascadeParserHandler();
+        var handler = cascadeParserHandler(
+          new adapt_exprs.LexicalScope(null),
+          adapt_cssvalid.baseValidatorSet(),
+        );
         var style = (handler.elementStyle = {});
         handler.simpleProperty("foo", adapt_css.getName("bar"), false);
         var originalPriority = style["foo"].priority;
@@ -838,7 +1962,10 @@ describe("css-cascade", function () {
       var handler;
 
       beforeEach(function () {
-        handler = new adapt_csscasc.CascadeParserHandler();
+        handler = cascadeParserHandler(
+          new adapt_exprs.LexicalScope(null),
+          adapt_cssvalid.baseValidatorSet(),
+        );
         handler.startSelectorRule();
       });
 
@@ -851,8 +1978,8 @@ describe("css-cascade", function () {
             null,
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributePresentAction),
           );
@@ -870,8 +1997,8 @@ describe("css-cascade", function () {
             "bar",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeEqAction),
           );
@@ -890,8 +2017,8 @@ describe("css-cascade", function () {
             "i",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeEqAction),
           );
@@ -908,8 +2035,8 @@ describe("css-cascade", function () {
             "bar",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
           );
@@ -929,8 +2056,8 @@ describe("css-cascade", function () {
             "b c",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckConditionAction),
           );
@@ -945,8 +2072,8 @@ describe("css-cascade", function () {
             "",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckConditionAction),
           );
@@ -963,8 +2090,8 @@ describe("css-cascade", function () {
             "bar",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
           );
@@ -985,8 +2112,8 @@ describe("css-cascade", function () {
             "",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
           );
@@ -1008,8 +2135,8 @@ describe("css-cascade", function () {
             "bar",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
           );
@@ -1031,8 +2158,8 @@ describe("css-cascade", function () {
             "i",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
           );
@@ -1049,8 +2176,8 @@ describe("css-cascade", function () {
             "i",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
           );
@@ -1066,8 +2193,8 @@ describe("css-cascade", function () {
             "",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckConditionAction),
           );
@@ -1084,8 +2211,8 @@ describe("css-cascade", function () {
             "bar",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
           );
@@ -1106,8 +2233,8 @@ describe("css-cascade", function () {
             "",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckConditionAction),
           );
@@ -1124,8 +2251,8 @@ describe("css-cascade", function () {
             "bar",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckAttributeRegExpAction),
           );
@@ -1146,8 +2273,8 @@ describe("css-cascade", function () {
             "",
           );
 
-          expect(handler.chain.length).toBe(1);
-          var action = handler.chain[0];
+          expect(handler.chain.actions.length).toBe(1);
+          var action = handler.chain.actions[0];
           expect(action).toEqual(
             jasmine.any(adapt_csscasc.CheckConditionAction),
           );
@@ -1155,13 +2282,11 @@ describe("css-cascade", function () {
         });
       });
 
-      it("represents nothing when an unsupported operator is passed", function () {
+      it("voids the selector when an unsupported operator is passed", function () {
         handler.attributeSelector("ns", "foo", null, "bar");
 
-        expect(handler.chain.length).toBe(1);
-        var action = handler.chain[0];
-        expect(action).toEqual(jasmine.any(adapt_csscasc.CheckConditionAction));
-        expect(action.condition).toBe("");
+        expect(handler.chain.actions).toBeUndefined();
+        expect(handler.selectorListVoided).toBe(true);
       });
     });
   });
@@ -1178,17 +2303,17 @@ describe("css-cascade", function () {
           "",
           "data-Case",
         );
-        var chained = (action.chained = jasmine.createSpyObj("chained", [
-          "apply",
-        ]));
+        var chained = jasmine.createSpyObj("chained", ["apply"]);
+        var wired = action.wire(chained);
 
-        action.apply({ currentElement: element });
+        wired.apply({ currentElement: element });
         expect(chained.apply).toHaveBeenCalled();
 
         action = new adapt_csscasc.CheckAttributePresentAction("", "data-case");
-        chained = action.chained = jasmine.createSpyObj("chained", ["apply"]);
+        chained = jasmine.createSpyObj("chained", ["apply"]);
+        wired = action.wire(chained);
 
-        action.apply({ currentElement: element });
+        wired.apply({ currentElement: element });
         expect(chained.apply).not.toHaveBeenCalled();
       });
 
@@ -1204,11 +2329,10 @@ describe("css-cascade", function () {
           "open",
           "i",
         );
-        var chained = (action.chained = jasmine.createSpyObj("chained", [
-          "apply",
-        ]));
+        var chained = jasmine.createSpyObj("chained", ["apply"]);
+        var wired = action.wire(chained);
 
-        action.apply({ currentElement: element });
+        wired.apply({ currentElement: element });
         expect(chained.apply).toHaveBeenCalled();
       });
 
@@ -1224,11 +2348,10 @@ describe("css-cascade", function () {
           "ä",
           "i",
         );
-        var chained = (action.chained = jasmine.createSpyObj("chained", [
-          "apply",
-        ]));
+        var chained = jasmine.createSpyObj("chained", ["apply"]);
+        var wired = action.wire(chained);
 
-        action.apply({ currentElement: element });
+        wired.apply({ currentElement: element });
         expect(chained.apply).not.toHaveBeenCalled();
       });
 
@@ -1244,11 +2367,10 @@ describe("css-cascade", function () {
           "open",
           "s",
         );
-        var chained = (action.chained = jasmine.createSpyObj("chained", [
-          "apply",
-        ]));
+        var chained = jasmine.createSpyObj("chained", ["apply"]);
+        var wired = action.wire(chained);
 
-        action.apply({ currentElement: element });
+        wired.apply({ currentElement: element });
         expect(chained.apply).not.toHaveBeenCalled();
       });
     });
@@ -1311,20 +2433,20 @@ describe("css-cascade", function () {
         defaultValues: {},
       };
 
-      var styler = {
-        root: element,
-        validatorSet: validatorSet,
-        scope: validatorSet.scope,
-        getStyle: function (currentElement) {
-          return styleMap.get(currentElement) || null;
-        },
-      };
       var cascadeInstance = {
         context: {},
+        root: element,
+        scope: new adapt_exprs.LexicalScope(null),
+        validatorSet: validatorSet,
+        styles: {
+          styleOf: function (currentElement) {
+            return styleMap.get(currentElement) || null;
+          },
+        },
       };
       cascadeInstance.applyVarFilter =
         adapt_csscasc.CascadeInstance.prototype.applyVarFilter;
-      cascadeInstance.applyVarFilter([style], styler, element);
+      cascadeInstance.applyVarFilter([style], element);
     }
 
     it("keeps self-referential custom properties guaranteed-invalid instead of using their fallback", function () {
@@ -1502,6 +2624,33 @@ describe("css-cascade", function () {
       expect(style.color.value.toString()).toBe("green");
     });
 
+    it("treats unresolved var() in ordinary properties as unset", function () {
+      var element = document.createElement("div");
+      var style = {
+        color: createCascadeValue("var(--missing)"),
+      };
+
+      applyVarFilter(style, element);
+
+      expect(style.color.value).toBe(adapt_css.ident.unset);
+    });
+
+    it("treats inherited custom property keywords that resolve nowhere as unset in ordinary properties", function () {
+      var element = document.createElement("a");
+      var root = document.createElement("div");
+      root.appendChild(element);
+      var rootStyle = {
+        "--toc-anchor-color": createCascadeValue("inherit"),
+      };
+      var style = {
+        color: createCascadeValue("var(--toc-anchor-color)"),
+      };
+
+      applyVarFilter(style, element, [{ element: root, style: rootStyle }]);
+
+      expect(style.color.value).toBe(adapt_css.ident.unset);
+    });
+
     it("expands all with var-substituted CSS-wide values into browser-backed longhands", function () {
       var element = document.createElement("div");
       var validatorSet = adapt_cssvalid.baseValidatorSet();
@@ -1518,6 +2667,28 @@ describe("css-cascade", function () {
       expect(style["transition-duration"]).toBeDefined();
       expect(style["transition-property"].value).toBe(adapt_css.ident.initial);
       expect(style["transition-duration"].value).toBe(adapt_css.ident.initial);
+    });
+
+    it("keeps var-substituted properties that Vivliostyle validates itself (Issue #2116)", function () {
+      var element = document.createElement("div");
+      var validatorSet = adapt_cssvalid.baseValidatorSet();
+      var style = {
+        "--pos": createCascadeValue("15mm 12.6mm"),
+        "background-position": createCascadeValue("var(--pos)"),
+        overflow: createCascadeValue("var(--ov)"),
+        "--ov": createCascadeValue("hidden"),
+      };
+
+      applyVarFilter(style, element, null, validatorSet);
+
+      expect(style["background-position"]).toBeDefined();
+      expect(style["background-position"].value.toString()).toBe("15mm 12.6mm");
+      expect(style["background-position-x"]).toBeUndefined();
+      expect(style["background-position-y"]).toBeUndefined();
+      expect(style.overflow).toBeDefined();
+      expect(style.overflow.value.toString()).toBe("hidden");
+      expect(style["overflow-x"]).toBeUndefined();
+      expect(style["overflow-y"]).toBeUndefined();
     });
   });
 
@@ -1537,22 +2708,15 @@ describe("css-cascade", function () {
     function applyAttrFilter(style, element, validatorSet) {
       validatorSet = validatorSet || adapt_cssvalid.baseValidatorSet();
 
-      var styler = {
-        root: element,
-        validatorSet: validatorSet,
-        scope: validatorSet.scope,
-        getStyle: function () {
-          return style;
-        },
-      };
       var cascadeInstance = {
-        currentStyle: style,
+        scope: new adapt_exprs.LexicalScope(null),
+        validatorSet: validatorSet,
       };
       cascadeInstance.applyAttrFilter =
         adapt_csscasc.CascadeInstance.prototype.applyAttrFilter;
       cascadeInstance.applyAttrFilterInner =
         adapt_csscasc.CascadeInstance.prototype.applyAttrFilterInner;
-      cascadeInstance.applyAttrFilter(element, styler);
+      cascadeInstance.applyAttrFilter(element, style);
     }
 
     it("treats missing typed attr() without fallback as unset", function () {
@@ -1610,6 +2774,189 @@ describe("css-cascade", function () {
       applyAttrFilter(style, element);
 
       expect(style["font-size"].value.toString()).toBe("50px");
+    });
+  });
+
+  describe("rollback keywords", function () {
+    beforeEach(function () {
+      // Every style sheet is parsed before the cascade runs, so the property
+      // is known to need its losing declarations kept before any of them is
+      // merged in.
+      adapt_csscasc.noteRollbackDeclaration("color", adapt_css.ident.revert);
+    });
+
+    function declare(style, value, priority, layer, ruleId) {
+      adapt_csscasc.setPropCascadeValue(
+        style,
+        "color",
+        new adapt_csscasc.CascadeValue(
+          value,
+          priority,
+          layer || null,
+          ruleId || 0,
+        ),
+      );
+    }
+
+    function resolved(style) {
+      adapt_csscasc.resolveRollbackValues(style);
+      return style.color.value;
+    }
+
+    var green = adapt_css.getName("green");
+    var red = adapt_css.getName("red");
+    var blue = adapt_css.getName("blue");
+
+    it("rolls an author declaration back to the user-agent origin", function () {
+      var style = {};
+      declare(style, green, adapt_cssparse.SPECIFICITY_USER_AGENT);
+      declare(style, red, adapt_cssparse.SPECIFICITY_AUTHOR);
+      declare(
+        style,
+        adapt_css.ident.revert,
+        adapt_cssparse.SPECIFICITY_AUTHOR + 1,
+      );
+
+      expect(resolved(style)).toBe(green);
+    });
+
+    it("rolls a user declaration back past the author origin", function () {
+      var style = {};
+      declare(style, green, adapt_cssparse.SPECIFICITY_USER_AGENT);
+      declare(style, red, adapt_cssparse.SPECIFICITY_AUTHOR_IMPORTANT);
+      declare(
+        style,
+        adapt_css.ident.revert,
+        adapt_cssparse.SPECIFICITY_USER_IMPORTANT,
+      );
+
+      expect(resolved(style)).toBe(green);
+    });
+
+    it("is left to the browser when there is nothing left to roll back to", function () {
+      var style = {};
+      declare(style, red, adapt_cssparse.SPECIFICITY_AUTHOR);
+      declare(
+        style,
+        adapt_css.ident.revert,
+        adapt_cssparse.SPECIFICITY_AUTHOR + 1,
+      );
+
+      expect(resolved(style)).toBe(adapt_css.ident.revert);
+    });
+
+    it("leaves revert-layer to the browser when there is nothing left to roll back to", function () {
+      var tree = new adapt_csscasc.CascadeLayerTree();
+      var first = tree.register(null, ["first"]);
+      var style = {};
+      declare(style, red, adapt_cssparse.SPECIFICITY_AUTHOR, first);
+      declare(
+        style,
+        adapt_css.ident.revert_layer,
+        adapt_cssparse.SPECIFICITY_AUTHOR + 1,
+        first,
+      );
+
+      expect(resolved(style)).toBe(adapt_css.ident.revert_layer);
+    });
+
+    it("leaves revert-rule to the browser when there is nothing left to roll back to", function () {
+      var style = {};
+      declare(style, red, adapt_cssparse.SPECIFICITY_AUTHOR, null, 1);
+      declare(
+        style,
+        adapt_css.ident.revert_rule,
+        adapt_cssparse.SPECIFICITY_AUTHOR + 1,
+        null,
+        1,
+      );
+
+      expect(resolved(style)).toBe(adapt_css.ident.revert_rule);
+    });
+
+    it("rolls revert-layer back to the previous layer", function () {
+      var tree = new adapt_csscasc.CascadeLayerTree();
+      var first = tree.register(null, ["first"]);
+      var second = tree.register(null, ["second"]);
+      var style = {};
+      declare(style, green, adapt_cssparse.SPECIFICITY_AUTHOR, first);
+      declare(
+        style,
+        adapt_css.ident.revert_layer,
+        adapt_cssparse.SPECIFICITY_AUTHOR,
+        second,
+      );
+
+      expect(resolved(style)).toBe(green);
+    });
+
+    // WPT css/css-cascade/revert-layer-005.html
+    it("rolls an important revert-layer back to the earlier layer, dropping the later layer's important declaration", function () {
+      var tree = new adapt_csscasc.CascadeLayerTree();
+      var a = tree.register(null, ["a"]);
+      var b = tree.register(null, ["b"]);
+      var c = tree.register(null, ["c"]);
+      var style = {};
+      declare(style, green, adapt_cssparse.SPECIFICITY_AUTHOR, a);
+      declare(
+        style,
+        adapt_css.ident.revert_layer,
+        adapt_cssparse.SPECIFICITY_AUTHOR_IMPORTANT,
+        b,
+      );
+      declare(style, red, adapt_cssparse.SPECIFICITY_AUTHOR_IMPORTANT, c);
+
+      expect(resolved(style)).toBe(green);
+    });
+
+    // WPT css/css-cascade/revert-layer-009.html
+    it("rolls revert-layer in the style attribute back to the author style sheets", function () {
+      var style = {};
+      declare(style, green, adapt_cssparse.SPECIFICITY_AUTHOR);
+      declare(style, red, adapt_cssparse.SPECIFICITY_STYLE);
+      declare(
+        style,
+        adapt_css.ident.revert_layer,
+        adapt_cssparse.SPECIFICITY_STYLE + 1,
+      );
+
+      expect(resolved(style)).toBe(green);
+    });
+
+    it("skips every declaration of its own rule for revert-rule", function () {
+      var style = {};
+      declare(style, green, adapt_cssparse.SPECIFICITY_AUTHOR, null, 1);
+      declare(style, red, adapt_cssparse.SPECIFICITY_AUTHOR + 1, null, 2);
+      declare(
+        style,
+        adapt_css.ident.revert_rule,
+        adapt_cssparse.SPECIFICITY_AUTHOR + 2,
+        null,
+        2,
+      );
+
+      expect(resolved(style)).toBe(green);
+    });
+
+    it("takes declarations caught in a revert-rule cycle out of the cascade", function () {
+      var style = {};
+      declare(style, blue, adapt_cssparse.SPECIFICITY_AUTHOR, null, 1);
+      declare(
+        style,
+        adapt_css.ident.revert_rule,
+        adapt_cssparse.SPECIFICITY_AUTHOR + 1,
+        null,
+        2,
+      );
+      declare(
+        style,
+        adapt_css.ident.revert_rule,
+        adapt_cssparse.SPECIFICITY_AUTHOR + 2,
+        null,
+        3,
+      );
+
+      expect(resolved(style)).toBe(blue);
     });
   });
 });

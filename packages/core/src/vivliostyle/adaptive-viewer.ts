@@ -26,6 +26,7 @@ import * as Epub from "./epub";
 import * as Exprs from "./exprs";
 import * as Font from "./font";
 import * as Logging from "./logging";
+import * as OPS from "./ops";
 import * as Plugin from "./plugin";
 import * as Profile from "./profile";
 import * as Scripts from "./scripts";
@@ -79,35 +80,41 @@ export class AdaptiveViewer {
   pageSheetSizeAlreadySet: boolean = false;
   renderTask: Task.Task | null = null;
   actions: { [key: string]: Action };
-  readyState: Constants.ReadyState;
-  packageURL: string[];
-  opf: Epub.OPFDoc;
-  touchActive: boolean;
-  touchX: number;
-  touchY: number;
-  needResize: boolean;
-  resized: boolean;
-  needRefresh: boolean;
-  viewportSize: ViewportSize | null;
-  currentPage: Vtree.Page;
-  currentSpread: Vtree.Spread | null;
-  pagePosition: Epub.Position | null;
-  fontSize: number;
-  zoom: number;
-  fitToScreen: boolean;
-  pageViewMode: PageViewMode;
-  waitForLoading: boolean;
-  renderAllPages: boolean;
-  pref: Exprs.Preferences;
-  pageSizes: { width: number; height: number }[];
-  pixelRatio: number;
-  pixelRatioLimit: number;
+  readyState: Constants.ReadyState = Constants.ReadyState.LOADING;
+  packageURL: string[] = [];
+  opf: Epub.OPFDoc | null = null;
+  needResize: boolean = false;
+  resized: boolean = false;
+  needRefresh: boolean = false;
+  viewportSize: ViewportSize | null = null;
+  currentPage: Vtree.Page | null = null;
+  currentSpread: Vtree.Spread | null = null;
+  pagePosition: Epub.Position | null = null;
+  fontSize: number = 16;
+  zoom: number = 1;
+  fitToScreen: boolean = false;
+  pageViewMode: PageViewMode = PageViewMode.SINGLE_PAGE;
+  waitForLoading: boolean = false;
+  renderAllPages: boolean = true;
+  pref: Exprs.Preferences = Exprs.defaultPreferences();
+  pageSizes: { width: number; height: number }[] = [];
+
+  // Pixel ratio emulation on PDF output (PR #1079) does not work with
+  // non-Chromium browsers.
+  pixelRatioLimit: number =
+    Base.browserType === "chromium" &&
+    // Check non-legacy CSS zoom support (Chromium>=128)
+    "currentCSSZoom" in Element.prototype
+      ? 16 // max pixelRatio value on Chromium browsers
+      : 0; // disable pixelRatio emulation on non-Chromium browsers
+  pixelRatio: number = Math.min(8, this.pixelRatioLimit);
 
   // force relayout
-  viewport: Vgen.Viewport | null;
-  opfView: Epub.OPFView;
+  viewport: Vgen.Viewport | null = null;
+  opfView: Epub.OPFView | null = null;
   cmykReserveMap: CmykStore.CmykReserveMapEntry[] | undefined;
   cmykReserveMapUrl: string | undefined;
+  private paginationProgressHook: Plugin.PaginationProgressHook | null = null;
 
   constructor(
     public readonly window: Window,
@@ -150,7 +157,6 @@ export class AdaptiveViewer {
     }
     viewportElement.setAttribute(VIEWPORT_STATUS_ATTRIBUTE, "loading");
     this.fontMapper = new Font.Mapper(document.head, viewportElement);
-    this.init();
     this.kick = () => {};
     this.sendCommand = () => {};
     this.resizeListener = () => {
@@ -173,40 +179,6 @@ export class AdaptiveViewer {
     this.addLogListeners();
   }
 
-  private init(): void {
-    this.readyState = Constants.ReadyState.LOADING;
-    this.packageURL = [];
-    this.opf = null;
-    this.touchActive = false;
-    this.touchX = 0;
-    this.touchY = 0;
-    this.needResize = false;
-    this.resized = false;
-    this.needRefresh = false;
-    this.viewportSize = null;
-    this.currentPage = null;
-    this.currentSpread = null;
-    this.pagePosition = null;
-    this.fontSize = 16;
-    this.zoom = 1;
-    this.fitToScreen = false;
-    this.pageViewMode = PageViewMode.SINGLE_PAGE;
-    this.waitForLoading = false;
-    this.renderAllPages = true;
-    this.pref = Exprs.defaultPreferences();
-    this.pageSizes = [];
-
-    // Pixel ratio emulation on PDF output (PR #1079) does not work with
-    // non-Chromium browsers.
-    this.pixelRatioLimit =
-      Base.browserType === "chromium" &&
-      // Check non-legacy CSS zoom support (Chromium>=128)
-      "currentCSSZoom" in Element.prototype
-        ? 16 // max pixelRatio value on Chromium browsers
-        : 0; // disable pixelRatio emulation on non-Chromium browsers
-    this.pixelRatio = Math.min(8, this.pixelRatioLimit);
-  }
-
   addLogListeners() {
     const logLevel = Logging.LogLevel;
     Logging.logger.addListener(logLevel.DEBUG, (info) => {
@@ -221,6 +193,32 @@ export class AdaptiveViewer {
     Logging.logger.addListener(logLevel.ERROR, (info) => {
       this.callback({ t: "error", content: info });
     });
+  }
+
+  /**
+   * Register the PAGINATION_PROGRESS plugin hook lazily, so that viewers
+   * without a progress listener do not pay the cost of the progress
+   * calculation.
+   */
+  ensurePaginationProgressListener() {
+    if (this.paginationProgressHook) {
+      return;
+    }
+    const hook: Plugin.PaginationProgressHook = (payload) => {
+      this.callback({ t: "paginationprogress", ...payload });
+    };
+    this.paginationProgressHook = hook;
+    Plugin.registerHook(Plugin.HOOKS.PAGINATION_PROGRESS, hook);
+  }
+
+  removePaginationProgressListener() {
+    if (this.paginationProgressHook) {
+      Plugin.removeHook(
+        Plugin.HOOKS.PAGINATION_PROGRESS,
+        this.paginationProgressHook,
+      );
+      this.paginationProgressHook = null;
+    }
   }
 
   private callback(message: Base.JSON): void {
@@ -252,38 +250,35 @@ export class AdaptiveViewer {
     this.setReadyState(Constants.ReadyState.LOADING);
     const url = command["url"] as string;
     const fragment = command["fragment"] as string | null;
-    const authorStyleSheet = command["authorStyleSheet"] as {
-      url: string | null;
-      text: string | null;
-    }[];
-    const userStyleSheet = command["userStyleSheet"] as {
-      url: string | null;
-      text: string | null;
-    }[];
+    const authorStyleSheet = command[
+      "authorStyleSheet"
+    ] as OPS.StyleSheetParam[];
+    const userStyleSheet = command["userStyleSheet"] as OPS.StyleSheetParam[];
     this.cmykReserveMapUrl = command["cmykReserveMapUrl"] as string | undefined;
     this.viewport = null;
     const frame: Task.Frame<boolean> = Task.newFrame("loadPublication");
     this.configure(command).then(() => {
-      const store = new Epub.EPUBDocStore();
-      store.init(authorStyleSheet, userStyleSheet).then(() => {
-        const pubURL = Base.resolveURL(
-          Base.convertSpecialURL(url),
-          this.window.location.href,
-        );
-        this.packageURL = [pubURL];
-        store.loadPubDoc(pubURL).then((opf) => {
-          if (opf) {
-            this.opf = opf;
-            this.loadCmykReserveMap(store).then(() => {
-              this.render(fragment).then(() => {
-                frame.finish(true);
+      Epub.EPUBDocStore.create(authorStyleSheet, userStyleSheet).then(
+        (store) => {
+          const pubURL = Base.resolveURL(
+            Base.convertSpecialURL(url),
+            this.window.location.href,
+          );
+          this.packageURL = [pubURL];
+          store.loadPubDoc(pubURL).then((opf) => {
+            if (opf) {
+              this.opf = opf;
+              this.loadCmykReserveMap(store).then(() => {
+                this.render(fragment).then(() => {
+                  frame.finish(true);
+                });
               });
-            });
-          } else {
-            frame.finish(false);
-          }
-        });
-      });
+            } else {
+              frame.finish(false);
+            }
+          });
+        },
+      );
     });
     return frame.result();
   }
@@ -294,41 +289,42 @@ export class AdaptiveViewer {
     const params: SingleDocumentParam[] = command["url"];
     const doc = command["document"] as Document;
     const fragment = command["fragment"] as string | null;
-    const authorStyleSheet = command["authorStyleSheet"] as {
-      url: string | null;
-      text: string | null;
-    }[];
-    const userStyleSheet = command["userStyleSheet"] as {
-      url: string | null;
-      text: string | null;
-    }[];
+    const authorStyleSheet = command[
+      "authorStyleSheet"
+    ] as OPS.StyleSheetParam[];
+    const userStyleSheet = command["userStyleSheet"] as OPS.StyleSheetParam[];
     this.cmykReserveMapUrl = command["cmykReserveMapUrl"] as string | undefined;
 
     // force relayout
     this.viewport = null;
     const frame: Task.Frame<boolean> = Task.newFrame("loadXML");
     this.configure(command).then(() => {
-      const store = new Epub.EPUBDocStore();
-      store.init(authorStyleSheet, userStyleSheet).then(() => {
-        const resolvedParams: Epub.OPFItemParam[] = params.map((p, index) => ({
-          url: Base.resolveURL(
-            Base.convertSpecialURL(p.url),
-            this.window.location.href,
-          ),
-          index,
-          startPage: p.startPage,
-          skipPagesBefore: p.skipPagesBefore,
-        }));
-        this.packageURL = resolvedParams.map((p) => p.url);
-        this.opf = new Epub.OPFDoc(store, "");
-        this.opf.initWithChapters(resolvedParams, doc).then(() => {
-          this.loadCmykReserveMap(store).then(() => {
-            this.render(fragment).then(() => {
-              frame.finish(true);
-            });
-          });
-        });
-      });
+      Epub.EPUBDocStore.create(authorStyleSheet, userStyleSheet).then(
+        (store) => {
+          const resolvedParams: Epub.OPFItemParam[] = params.map(
+            (p, index) => ({
+              url: Base.resolveURL(
+                Base.convertSpecialURL(p.url),
+                this.window.location.href,
+              ),
+              index,
+              startPage: p.startPage,
+              skipPagesBefore: p.skipPagesBefore,
+            }),
+          );
+          this.packageURL = resolvedParams.map((p) => p.url);
+          Epub.OPFDoc.fromChapters(store, "", resolvedParams, doc).then(
+            (opf) => {
+              this.opf = opf;
+              this.loadCmykReserveMap(store).then(() => {
+                this.render(fragment).then(() => {
+                  frame.finish(true);
+                });
+              });
+            },
+          );
+        },
+      );
     });
     return frame.result();
   }
@@ -353,7 +349,7 @@ export class AdaptiveViewer {
   private resolveLength(specified: string): number {
     const value = parseFloat(specified);
     const unitPattern = /[a-z]+$/;
-    let matched: RegExpMatchArray;
+    let matched: RegExpMatchArray | null;
     if (
       typeof specified === "string" &&
       (matched = specified.match(unitPattern))
@@ -530,13 +526,17 @@ export class AdaptiveViewer {
    * Iterate through currently displayed pages and do something
    */
   private forCurrentPages(fn: (p1: Vtree.Page) => any) {
-    const pages = [];
+    const pages: Vtree.Page[] = [];
     if (this.currentPage) {
       pages.push(this.currentPage);
     }
     if (this.currentSpread) {
-      pages.push(this.currentSpread.left);
-      pages.push(this.currentSpread.right);
+      if (this.currentSpread.left) {
+        pages.push(this.currentSpread.left);
+      }
+      if (this.currentSpread.right) {
+        pages.push(this.currentSpread.right);
+      }
     }
     pages.forEach((page) => {
       if (page) {
@@ -669,7 +669,7 @@ export class AdaptiveViewer {
   }
 
   private resolveSpreadView(
-    viewport: Vgen.Viewport,
+    viewport: Vgen.Viewport | null,
     pageSize: { width: number; height: number } | null,
   ): boolean {
     switch (this.pageViewMode) {
@@ -759,7 +759,7 @@ export class AdaptiveViewer {
     pageIndex: number,
   ) {
     this.pageSizes[pageIndex] = pageSize;
-    this.setPageSizePageRules(pageSheetSize, spineIndex, pageIndex);
+    this.setPageSizePageRules(pageIndex);
     if (
       pageIndex === 0 &&
       this.pageViewMode === PageViewMode.AUTO_SPREAD &&
@@ -769,11 +769,7 @@ export class AdaptiveViewer {
     }
   }
 
-  private setPageSizePageRules(
-    pageSheetSize: { [key: string]: { width: number; height: number } },
-    spineIndex: number,
-    pageIndex: number,
-  ) {
+  private setPageSizePageRules(pageIndex: number) {
     // In this implementation, it generates one page rule with the largest
     // page size both in width and height in the multiple page sizes.
     // (Resolve issue #751)
@@ -880,7 +876,7 @@ export class AdaptiveViewer {
 
     if (spreadView) {
       return this.opfView
-        .getSpread(this.pagePosition, sync)
+        .getSpread(this.pagePosition, !!sync)
         .thenAsync((spread) => {
           if (!spread.left && !spread.right) {
             return Task.newResult(null);
@@ -1054,12 +1050,10 @@ export class AdaptiveViewer {
 
               // Update(2019-03): to avoid unexpected page move (first page to next),
               // keep pageIndex == 0 when offsetInItem == 0
-              if (
-                !(
-                  this.pagePosition.pageIndex == 0 &&
-                  this.pagePosition.offsetInItem == 0
-                )
-              ) {
+              if (!(
+                this.pagePosition.pageIndex == 0 &&
+                this.pagePosition.offsetInItem == 0
+              )) {
                 this.pagePosition.pageIndex = -1;
               }
             }
@@ -1166,17 +1160,15 @@ export class AdaptiveViewer {
       metadata: this.opf.metadata,
       docTitle: this.opf.spine[page.spineIndex].title,
     };
-    this.opf
-      .getEPageFromPosition(this.pagePosition as Epub.Position)
-      .then((epage) => {
-        notification["epage"] = epage;
-        notification["epageCount"] = this.opf.epageCount;
-        if (cfi) {
-          notification["cfi"] = cfi;
-        }
-        this.callback(notification);
-        frame.finish(true);
-      });
+    this.opf.getEPageFromPosition(this.pagePosition).then((epage) => {
+      notification["epage"] = epage;
+      notification["epageCount"] = this.opf.epageCount;
+      if (cfi) {
+        notification["cfi"] = cfi;
+      }
+      this.callback(notification);
+      frame.finish(true);
+    });
     return frame.result();
   }
 
@@ -1233,10 +1225,8 @@ export class AdaptiveViewer {
         default:
           return Task.newResult(true);
       }
-      if (m) {
-        method = () =>
-          m.call(this.opfView, this.pagePosition, !this.renderAllPages);
-      }
+      method = () =>
+        m.call(this.opfView, this.pagePosition, !this.renderAllPages);
     } else if (typeof command["epage"] == "number") {
       const epage = command["epage"] as number;
       method = () =>
@@ -1443,7 +1433,7 @@ class RenderingCanceledError extends Error {
     // Set the prototype explicitly.
     // https://github.com/Microsoft/TypeScript/wiki/Breaking-Changes#extending-built-ins-like-error-array-and-map-may-no-longer-work
     Object.setPrototypeOf(this, RenderingCanceledError.prototype);
-    this.stack = new Error().stack;
+    this.stack = new Error().stack ?? "";
   }
 }
 

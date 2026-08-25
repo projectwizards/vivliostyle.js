@@ -7,6 +7,10 @@ module.exports = [
     category: "General",
     files: [
       { file: "counter_in_running.html", title: "Counter in running element" },
+      {
+        file: "filename%23hash.html",
+        title: "Reserved character in filename (Issue #2076)",
+      },
       { file: "print_media/index.html", title: "Print media" },
       {
         file: "vivliostyle_media/index.html",
@@ -32,12 +36,81 @@ module.exports = [
         skipLayoutRegression: true,
       },
       { file: "case_sensitivity/html.html", title: "HTML case sensitivity" },
+      {
+        file: "lowercase-doctype",
+        title: "Lowercase doctype must not cause parser error (Issue #2101)",
+      },
       { file: "ruby-broken-pagination.html", title: "Ruby broken pagination" },
       {
         file: "css-parse-error/gradient-background-image.html",
         title: "Gradient background-image",
       },
+      {
+        file: "css-parse-error/forgiving-selector-list.html",
+        title: "Syntax error in a forgiving selector list",
+      },
+      {
+        file: "css-parse-error/voided-alternative-pseudo-element.html",
+        title: "Pseudo-element in a voided alternative",
+      },
+      {
+        file: "css-parse-error/unforgiving-selector-list.html",
+        title: "Syntax error in an unforgiving selector list",
+      },
+      {
+        file: "css-parse-error/invalid-selector-in-a-rule.html",
+        title: "Invalid selector in a rule",
+      },
+      {
+        file: "css-parse-error/pseudo-element-in-a-selector-list.html",
+        title: "Pseudo-element in a selector list",
+      },
+      {
+        file: "css-parse-error/unknown-pseudo-class.html",
+        title: "Unknown pseudo-class in a selector list",
+      },
+      {
+        file: "css-parse-error/dir-pseudo-class.html",
+        title: ":dir() pseudo-class",
+      },
+      {
+        file: "css-parse-error/any-link-pseudo-class.html",
+        title: ":any-link pseudo-class",
+      },
+      {
+        file: "pseudo-element-context/after-float-footnote-increment.html",
+        title:
+          "Explicit counter-increment on an element with a footnote ::after",
+      },
+      {
+        file: "pseudo-element-context/after-content-function.html",
+        title: "content(before) in the ::after of an element with children",
+      },
+      {
+        file: "pseudo-element-context/after-list-item-counter.html",
+        title: "list-item counter in the pseudo-elements of an ordered list",
+      },
       { file: "rem_in_page_margin.html", title: "rem in page margin" },
+      {
+        file: "rlh_unit/root-line-height-normal.html",
+        title: "rlh with root line-height: normal",
+      },
+      {
+        file: "rlh_unit/root-line-height-numeric.html",
+        title: "rlh with numeric root line-height",
+      },
+      {
+        file: "rlh_unit/root-self-reference.html",
+        title: "lh/rlh on the root element itself",
+      },
+      {
+        file: "rlh_unit/root-calc-line-height.html",
+        title: "lh in calc() on the root line-height",
+      },
+      {
+        file: "rlh_unit/root-calc-font-size.html",
+        title: "lh in calc() on the root font-size",
+      },
       {
         file: "root-font-var-calc.html",
         title: "rem/rlh with font shorthand var() calc() (Issue #1955)",
@@ -84,6 +157,19 @@ module.exports = [
         file: "outline-offset-at-page.html",
         title: "outline-offset on @page (Issue #2000)",
       },
+      {
+        file: "page-writing-mode.html",
+        title: "writing-mode on @page (Issue #2001)",
+      },
+      {
+        file: "page-writing-mode-vertical.html",
+        title: "writing-mode on @page, vertical root (Issue #2001)",
+      },
+      {
+        file: "writing-mode-body-page-context.html",
+        title:
+          "writing-mode on body not inherited by page context (Issue #1122)",
+      },
       { file: "font-feature-settings.html", title: "Font feature settings" },
       {
         file: "font-variation-settings.html",
@@ -101,6 +187,15 @@ module.exports = [
       },
       { file: "math-sample.html", title: "MathJax" },
       { file: "background-shorthand.html", title: "Background shorthand" },
+      {
+        file: "background-position-var.html",
+        title: "background-position with var() (Issue #2116)",
+      },
+      {
+        file: "background-position-longhand-root.html",
+        title:
+          "background-position longhands on the root background (Issue #2116)",
+      },
       { file: "prefixed_properties.html", title: "Prefixed properties" },
       { file: "filter_property.html", title: "Filter property" },
       { file: "attr-type.html", title: "Typed attr() values (Issue #1485)" },
@@ -226,6 +321,60 @@ module.exports = [
     ],
   },
   {
+    category: "Cascade Layers",
+    files: [
+      {
+        file: "cascade-layers.html",
+        title: "Cascade layers (Issue #977)",
+      },
+      {
+        file: "cascade-layers-important.html",
+        title: "Cascade layers with !important (Issue #977)",
+      },
+      {
+        file: "cascade-layers-page.html",
+        title: "Cascade layers with @page (Issue #977)",
+      },
+      {
+        file: "cascade-layers-import.html",
+        title: "Cascade layers with @import (Issue #977)",
+      },
+      {
+        file: "cascade-layers-counter-style.html",
+        title: "Cascade layers with @counter-style (Issue #2110)",
+      },
+      {
+        file: "cascade-layers-font-face.html",
+        title: "Cascade layers with @font-face (Issue #2110)",
+      },
+    ],
+  },
+  {
+    category: "Explicit Defaulting Keywords",
+    files: [
+      {
+        file: "revert.html",
+        title: "revert keyword (Issue #2111)",
+      },
+      {
+        file: "revert-layer.html",
+        title: "revert-layer keyword (Issue #2111)",
+      },
+      {
+        file: "revert-rule.html",
+        title: "revert-rule keyword (Issue #2111)",
+      },
+      {
+        file: "revert-page.html",
+        title: "Rollback keywords in @page (Issue #2111)",
+      },
+      {
+        file: "toc-hidden.html",
+        title: "hidden attribute in the table of contents (PR #1269)",
+      },
+    ],
+  },
+  {
     category: "Spread inside/outside properties",
     files: [
       {
@@ -257,6 +406,10 @@ module.exports = [
       {
         file: "target-counter-default-page-type.html",
         title: "target-counter() with default page type",
+      },
+      {
+        file: "issue2043-theme-base-toc/publication.json",
+        title: "theme-base TOC vars with target-counter() (Issue #2043)",
       },
       {
         file: "target-counter-named-page-style.html",
@@ -380,6 +533,10 @@ module.exports = [
         title: "::marker pseudo-element",
       },
       {
+        file: "counter-style/marker-font-face.html",
+        title: "Font family defined by @font-face on ::marker",
+      },
+      {
         file: "counter-style/marker-block-child.html",
         title: "::marker with block child in list item (Issue #1831)",
       },
@@ -434,8 +591,20 @@ module.exports = [
         title: "Text-spacing on generated content (vertical writing-mode)",
       },
       {
+        file: "text-spacing/vo-tr-quotes-vertical.html",
+        title: "Vertical vo=Tr characters fallback (Issue #2023)",
+      },
+      {
         file: "text-spacing/text-spacing-trim-start-code.html",
         title: "text-spacing-trim after code element (Issue #1863)",
+      },
+      {
+        file: "text-spacing/inherited-spacing-properties.html",
+        title: "Text-spacing fillers with inherited spacing properties",
+      },
+      {
+        file: "text-spacing/text-decoration.html",
+        title: "Continuous text decorations across text-autospace",
       },
     ],
   },
@@ -1029,6 +1198,15 @@ module.exports = [
         file: "footnotes/footnote-policy-line-break-vertical.html",
         title:
           "footnote-policy: line break before anchor line (vertical writing-mode) (Issue #2006)",
+      },
+      {
+        file: "footnotes/footnote-policy-line-long.html",
+        title: "Long footnote with footnote-policy: line (Issue #2029)",
+      },
+      {
+        file: "footnotes/footnote-fragmentation-target-counter.html",
+        title:
+          "Long footnote fragmentation with target-counter() (Issue #2026)",
       },
       {
         file: "footnotes/named-page-deferred-text.html",

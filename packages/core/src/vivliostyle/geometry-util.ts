@@ -104,7 +104,7 @@ export class Shape {
   }
 
   withOffset(offsetX: number, offsetY: number): Shape {
-    const points = [];
+    const points: Point[] = [];
     for (const p of this.points) {
       points.push(new Point(p.x + offsetX, p.y + offsetY));
     }
@@ -138,15 +138,6 @@ export function shapeForRect(
     new Point(x2, y1),
     new Point(x2, y2),
     new Point(x1, y2),
-  ]);
-}
-
-export function shapeForRectObj(r: Rect): Shape {
-  return new Shape([
-    new Point(r.x1, r.y1),
-    new Point(r.x2, r.y1),
-    new Point(r.x2, r.y2),
-    new Point(r.x1, r.y2),
   ]);
 }
 
@@ -545,7 +536,8 @@ export function findBottommostFullyOpenRect(
     return rect;
   }
   let bottomEdge = rect.y2;
-  let band: Band;
+  // the loop runs at least once
+  let band!: Band;
   let i: number;
   for (i = bands.length - 1; i >= 0; i--) {
     band = bands[i];
@@ -635,7 +627,7 @@ export function addFloatToBands(
   box: Rect,
   bands: Band[],
   floatBox: Rect,
-  floatBands: Band[],
+  floatBands: Band[] | null,
   side: string,
 ): void {
   if (!floatBands) {

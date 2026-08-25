@@ -84,8 +84,6 @@ export const Special = {
 
 export type Result = string | number | boolean | undefined;
 
-export type PendingResult = Special | Result;
-
 export function letterbox(
   viewW: number,
   viewH: number,
@@ -132,13 +130,13 @@ export class LexicalScope {
   one: Const;
   _true: Const;
   _false: Const;
-  values: { [key: string]: Val } = {};
+  values: { [key: string]: Val | null } = {};
   funcs: { [key: string]: Val } = {};
   builtIns: { [key: string]: (...p1: Result[]) => Result } = {};
 
   constructor(
-    public parent: LexicalScope,
-    public resolver?: (p1: string, p2: boolean) => Val,
+    public parent: LexicalScope | null,
+    public resolver?: (p1: string, p2: boolean) => Val | null,
   ) {
     this.scopeKey = `S${nextKeyIndex++}`;
     this.zero = new Const(this, 0);
@@ -206,7 +204,7 @@ export class LexicalScope {
     this.values[name] = new Native(this, fn, name);
   }
 
-  defineName(qualifiedName: string, val: Val): void {
+  defineName(qualifiedName: string, val: Val | null): void {
     this.values[qualifiedName] = val;
   }
 
@@ -327,7 +325,8 @@ export class Context {
   rootFontSize: number | null = null;
   isRelativeRootFontSize: boolean | null = null;
   fontSize: () => number;
-  rootLineHeight: number | null = null;
+  rootLineHeight: number;
+  isRootLineHeightFromRelativeCalc: boolean = false;
   pref: Preferences;
   scopes: { [key: string]: ScopeContext } = {};
   pageAreaWidth: number | null = null;
@@ -341,6 +340,7 @@ export class Context {
     public readonly viewportWidth: number,
     public readonly viewportHeight: number,
     fontSize: number,
+    rootLineHeight: number,
   ) {
     this.pageWidth = function () {
       if (this.actualPageWidth) {
@@ -359,6 +359,7 @@ export class Context {
       }
     };
     this.initialFontSize = fontSize;
+    this.rootLineHeight = rootLineHeight;
     this.fontSize = function () {
       if (this.rootFontSize) {
         return this.rootFontSize;
@@ -432,19 +433,20 @@ export class Context {
   }
 
   evalName(scope: LexicalScope, qualifiedName: string): Val {
-    do {
-      let val = scope.values[qualifiedName];
+    let s: LexicalScope | null = scope;
+    while (s) {
+      let val: Val | null = s.values[qualifiedName];
       if (val) {
         return val;
       }
-      if (scope.resolver) {
-        val = scope.resolver.call(this, qualifiedName, false);
+      if (s.resolver) {
+        val = s.resolver.call(this, qualifiedName, false);
         if (val) {
           return val;
         }
       }
-      scope = scope.parent;
-    } while (scope);
+      s = s.parent;
+    }
     throw new Error(`Name '${qualifiedName}' is undefined`);
   }
 
@@ -457,30 +459,31 @@ export class Context {
     params: Val[],
     noBuiltInEval: boolean,
   ): Val {
-    do {
-      let body = scope.funcs[qualifiedName];
+    let s: LexicalScope | null = scope;
+    while (s) {
+      let body: Val | null = s.funcs[qualifiedName];
       if (body) {
         return body; // will be expanded by callee
       }
-      if (scope.resolver) {
-        body = scope.resolver.call(this, qualifiedName, true);
+      if (s.resolver) {
+        body = s.resolver.call(this, qualifiedName, true);
         if (body) {
           return body;
         }
       }
-      const fn = scope.builtIns[qualifiedName];
+      const fn = s.builtIns[qualifiedName];
       if (fn) {
         if (noBuiltInEval) {
-          return scope.zero;
+          return s.zero;
         }
         const args = Array(params.length);
         for (let i = 0; i < params.length; i++) {
           args[i] = params[i].evaluate(this);
         }
-        return new Const(scope, fn.apply(this, args));
+        return new Const(s, fn.apply(this, args));
       }
-      scope = scope.parent;
-    } while (scope);
+      s = s.parent;
+    }
     throw new Error(`Function '${qualifiedName}' is undefined`);
   }
 
@@ -489,56 +492,61 @@ export class Context {
     return not ? !enabled : enabled;
   }
 
-  evalMediaTest(feature: string, value: Val): boolean {
+  private parseMediaFeature(feature: string): {
+    feature: string;
+    prefix: string;
+  } {
     let prefix = "";
     const r = feature.match(/^(min|max)-(.*)$/);
     if (r) {
       prefix = r[1];
       feature = r[2];
     }
-    let req: Result | null = null;
-    let actual: number | null = null;
+
+    return { feature, prefix };
+  }
+
+  private actualMediaFeatureValue(feature: string): number | null {
     switch (feature) {
       case "width":
+        return this.pageWidth();
       case "height":
+        return this.pageHeight();
       case "device-width":
+        return window.screen.availWidth;
       case "device-height":
+        return window.screen.availHeight;
       case "color":
-        if (value) {
-          req = value.evaluate(this);
-        }
-        break;
+        return window.screen.pixelDepth;
+      default:
+        return null;
     }
-    switch (feature) {
-      case "width":
-        actual = this.pageWidth();
-        break;
-      case "height":
-        actual = this.pageHeight();
-        break;
-      case "device-width":
-        actual = window.screen.availWidth;
-        break;
-      case "device-height":
-        actual = window.screen.availHeight;
-        break;
-      case "color":
-        actual = window.screen.pixelDepth;
-        break;
+  }
+
+  evalMediaBooleanTest(feature: string): boolean {
+    const parsedFeature = this.parseMediaFeature(feature);
+    const actual = this.actualMediaFeatureValue(parsedFeature.feature);
+    return actual != null && actual !== 0;
+  }
+
+  evalMediaTest(feature: string, value: Val): boolean {
+    const parsedFeature = this.parseMediaFeature(feature);
+    const actual = this.actualMediaFeatureValue(parsedFeature.feature);
+    if (actual == null) {
+      return false;
     }
-    if (actual != null && req != null) {
-      switch (prefix) {
-        case "min":
-          return actual >= Number(req);
-        case "max":
-          return actual <= Number(req);
-        default:
-          return actual == req;
-      }
-    } else if (actual != null && value == null) {
-      return actual !== 0;
+    const req = value.evaluate(this);
+    if (req == null) {
+      return false;
     }
-    return false;
+    switch (parsedFeature.prefix) {
+      case "min":
+        return actual >= Number(req);
+      case "max":
+        return actual <= Number(req);
+      default:
+        return actual == req;
+    }
   }
 
   evalSupportsTest(name: string, value: string, isFunc: boolean): boolean {
@@ -546,7 +554,7 @@ export class Context {
   }
 
   queryVal(scope: LexicalScope, key: string): Result | undefined {
-    const s = scope && this.scopes[scope.scopeKey];
+    const s = this.scopes[scope.scopeKey];
     return s ? s[key] : undefined;
   }
 
@@ -560,28 +568,22 @@ export type DependencyCache = {
   [key: string]: boolean | Special;
 };
 
-export class Val {
+export abstract class Val {
   key: string;
 
-  constructor(public scope: LexicalScope) {
-    this.scope = scope;
+  constructor(public readonly scope: LexicalScope) {
     this.key = `_${nextKeyIndex++}`;
   }
 
-  /** @override */
   toString(): string {
     const buf = new Base.StringBuffer();
     this.appendTo(buf, 0);
     return buf.toString();
   }
 
-  appendTo(buf: Base.StringBuffer, priority: number): void {
-    throw new Error("F_ABSTRACT");
-  }
+  abstract appendTo(buf: Base.StringBuffer, priority: number): void;
 
-  protected evaluateCore(context: Context): Result {
-    throw new Error("F_ABSTRACT");
-  }
+  protected abstract evaluateCore(context: Context): Result;
 
   expand(context: Context, params: Val[]): Val {
     return this;
@@ -624,9 +626,7 @@ export class Val {
       return result;
     }
     result = this.evaluateCore(context);
-    if (this.scope) {
-      context.storeVal(this.scope, this.key, result);
-    }
+    context.storeVal(this.scope, this.key, result);
     return result;
   }
 
@@ -635,7 +635,7 @@ export class Val {
   }
 }
 
-export class Prefix extends Val {
+export abstract class Prefix extends Val {
   constructor(
     scope: LexicalScope,
     public val: Val,
@@ -643,13 +643,9 @@ export class Prefix extends Val {
     super(scope);
   }
 
-  protected getOp(): string {
-    throw new Error("F_ABSTRACT");
-  }
+  protected abstract getOp(): string;
 
-  evalPrefix(val: Result): Result {
-    throw new Error("F_ABSTRACT");
-  }
+  abstract evalPrefix(val: Result): Result;
 
   override evaluateCore(context: Context): Result {
     const val = this.val.evaluate(context);
@@ -687,7 +683,7 @@ export class Prefix extends Val {
   }
 }
 
-export class Infix extends Val {
+export abstract class Infix extends Val {
   constructor(
     scope: LexicalScope,
     public lhs: Val,
@@ -696,23 +692,9 @@ export class Infix extends Val {
     super(scope);
   }
 
-  getPriority(): number {
-    throw new Error("F_ABSTRACT");
-  }
+  abstract getPriority(): number;
 
-  getOp(): string {
-    throw new Error("F_ABSTRACT");
-  }
-
-  evalInfix(lhs: Result, rhs: Result): Result {
-    throw new Error("F_ABSTRACT");
-  }
-
-  override evaluateCore(context: Context): Result {
-    const lhs = this.lhs.evaluate(context);
-    const rhs = this.rhs.evaluate(context);
-    return this.evalInfix(lhs, rhs);
-  }
+  abstract getOp(): string;
 
   override dependCore(
     other: Val,
@@ -750,7 +732,17 @@ export class Infix extends Val {
   }
 }
 
-export class Logical extends Infix {
+export abstract class EagerInfix extends Infix {
+  abstract evalInfix(lhs: Result, rhs: Result): Result;
+
+  override evaluateCore(context: Context): Result {
+    const lhs = this.lhs.evaluate(context);
+    const rhs = this.rhs.evaluate(context);
+    return this.evalInfix(lhs, rhs);
+  }
+}
+
+export abstract class Logical extends Infix {
   constructor(scope: LexicalScope, lhs: Val, rhs: Val) {
     super(scope, lhs, rhs);
   }
@@ -760,7 +752,7 @@ export class Logical extends Infix {
   }
 }
 
-export class Comparison extends Infix {
+export abstract class Comparison extends EagerInfix {
   constructor(scope: LexicalScope, lhs: Val, rhs: Val) {
     super(scope, lhs, rhs);
   }
@@ -770,7 +762,7 @@ export class Comparison extends Infix {
   }
 }
 
-export class Additive extends Infix {
+export abstract class Additive extends EagerInfix {
   constructor(scope: LexicalScope, lhs: Val, rhs: Val) {
     super(scope, lhs, rhs);
   }
@@ -780,7 +772,7 @@ export class Additive extends Infix {
   }
 }
 
-export class Multiplicative extends Infix {
+export abstract class Multiplicative extends EagerInfix {
   constructor(scope: LexicalScope, lhs: Val, rhs: Val) {
     super(scope, lhs, rhs);
   }
@@ -824,7 +816,7 @@ export class Negate extends Prefix {
   }
 
   override evalPrefix(val: Result): Result {
-    return -val;
+    return -Number(val);
   }
 }
 
@@ -896,7 +888,9 @@ export class Lt extends Comparison {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return lhs < rhs;
+    return typeof lhs === "string" && typeof rhs === "string"
+      ? lhs < rhs
+      : Number(lhs) < Number(rhs);
   }
 }
 
@@ -910,7 +904,9 @@ export class Le extends Comparison {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return lhs <= rhs;
+    return typeof lhs === "string" && typeof rhs === "string"
+      ? lhs <= rhs
+      : Number(lhs) <= Number(rhs);
   }
 }
 
@@ -924,7 +920,9 @@ export class Gt extends Comparison {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return lhs > rhs;
+    return typeof lhs === "string" && typeof rhs === "string"
+      ? lhs > rhs
+      : Number(lhs) > Number(rhs);
   }
 }
 
@@ -938,7 +936,9 @@ export class Ge extends Comparison {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return lhs >= rhs;
+    return typeof lhs === "string" && typeof rhs === "string"
+      ? lhs >= rhs
+      : Number(lhs) >= Number(rhs);
   }
 }
 
@@ -980,7 +980,9 @@ export class Add extends Additive {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return (lhs as any) + rhs;
+    return typeof lhs === "string" || typeof rhs === "string"
+      ? `${lhs}${rhs}`
+      : Number(lhs) + Number(rhs);
   }
 }
 
@@ -994,7 +996,7 @@ export class Subtract extends Additive {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return (lhs as any) - (rhs as any);
+    return Number(lhs) - Number(rhs);
   }
 }
 
@@ -1008,7 +1010,7 @@ export class Multiply extends Multiplicative {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return (lhs as any) * (rhs as any);
+    return Number(lhs) * Number(rhs);
   }
 }
 
@@ -1022,7 +1024,7 @@ export class Divide extends Multiplicative {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return (lhs as any) / (rhs as any);
+    return Number(lhs) / Number(rhs);
   }
 }
 
@@ -1036,7 +1038,7 @@ export class Modulo extends Multiplicative {
   }
 
   override evalInfix(lhs: Result, rhs: Result): Result {
-    return (lhs as any) % (rhs as any);
+    return Number(lhs) % Number(rhs);
   }
 }
 
@@ -1182,14 +1184,6 @@ export function expandValArray(
     }
   }
   return expanded;
-}
-
-export function evalValArray(context: Context, arr: Val[]): Result[] {
-  const result: Result[] = Array(arr.length);
-  for (let i = 0; i < arr.length; i++) {
-    result[i] = arr[i].evaluate(context);
-  }
-  return result;
 }
 
 export class Call extends Val {
@@ -1339,6 +1333,25 @@ export class Const extends Val {
   }
 }
 
+export class MediaBooleanTest extends Val {
+  constructor(
+    scope: LexicalScope,
+    public name: MediaName,
+  ) {
+    super(scope);
+  }
+
+  override appendTo(buf: Base.StringBuffer, priority: number): void {
+    buf.append("(");
+    buf.append(Base.escapeCSSIdent(this.name.name));
+    buf.append(")");
+  }
+
+  override evaluateCore(context: Context): Result {
+    return context.evalMediaBooleanTest(this.name.name);
+  }
+}
+
 export class MediaTest extends Val {
   constructor(
     scope: LexicalScope,
@@ -1350,7 +1363,7 @@ export class MediaTest extends Val {
 
   override appendTo(buf: Base.StringBuffer, priority: number): void {
     buf.append("(");
-    buf.append(Base.escapeCSSStr(this.name.name));
+    buf.append(Base.escapeCSSIdent(this.name.name));
     buf.append(":");
     this.value.appendTo(buf, 0);
     buf.append(")");
@@ -1421,6 +1434,10 @@ export class Param extends Val {
     buf.append(this.index.toString());
   }
 
+  override evaluateCore(context: Context): Result {
+    throw new Error(`Parameter not expanded: ${this.index}`);
+  }
+
   override expand(context: Context, params: Val[]): Val {
     const v = params[this.index];
     if (!v) {
@@ -1448,7 +1465,7 @@ export function and(scope: LexicalScope, v1: Val, v2: Val): Val {
   return new And(scope, v1, v2);
 }
 
-export function add(scope: LexicalScope, v1: Val, v2: Val): Val {
+export function add(scope: LexicalScope, v1: Val | null, v2: Val | null): Val {
   if (v1 === scope.zero) {
     return v2;
   }
@@ -1458,7 +1475,7 @@ export function add(scope: LexicalScope, v1: Val, v2: Val): Val {
   return new Add(scope, v1, v2);
 }
 
-export function sub(scope: LexicalScope, v1: Val, v2: Val): Val {
+export function sub(scope: LexicalScope, v1: Val | null, v2: Val | null): Val {
   if (v1 === scope.zero) {
     return new Negate(scope, v2);
   }

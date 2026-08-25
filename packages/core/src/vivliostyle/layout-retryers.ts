@@ -24,15 +24,16 @@ import { Layout, Vtree } from "./types";
  * @abstract
  */
 export abstract class AbstractLayoutRetryer {
-  initialBreakPositions: Layout.BreakPosition[] = null;
-  initialStateOfFormattingContext: Vtree.NodeContext = null;
-  initialPosition: Vtree.NodeContext;
-  initialFragmentLayoutConstraints: Layout.FragmentLayoutConstraint[];
+  initialBreakPositions: Layout.BreakPosition[] | null = null;
+  initialStateOfFormattingContext: unknown = null;
+  initialPosition: Vtree.NodeContext | null = null;
+  initialFragmentLayoutConstraints: Layout.FragmentLayoutConstraint[] | null =
+    null;
 
   layout(
     nodeContext: Vtree.NodeContext,
     column: Layout.Column,
-  ): Task.Result<Vtree.NodeContext> {
+  ): Task.Result<Vtree.NodeContext | null> {
     this.prepareLayout(nodeContext, column);
     return this.tryLayout(nodeContext, column);
   }
@@ -40,8 +41,8 @@ export abstract class AbstractLayoutRetryer {
   private tryLayout(
     nodeContext: Vtree.NodeContext,
     column: Layout.Column,
-  ): Task.Result<Vtree.NodeContext> {
-    const frame = Task.newFrame<Vtree.NodeContext>(
+  ): Task.Result<Vtree.NodeContext | null> {
+    const frame = Task.newFrame<Vtree.NodeContext | null>(
       "AbstractLayoutRetryer.tryLayout",
     );
     this.saveState(nodeContext, column);
@@ -75,36 +76,37 @@ export abstract class AbstractLayoutRetryer {
 
   clearNodes(initialPosition: Vtree.NodeContext) {
     const viewNode =
-      initialPosition.viewNode || initialPosition.parent.viewNode;
-    let child: Node;
+      initialPosition.viewNode ?? initialPosition.parent?.viewNode;
+    if (!viewNode) {
+      return;
+    }
+    let child: Node | null;
     while ((child = viewNode.lastChild)) {
       viewNode.removeChild(child);
     }
-    let sibling: Node;
+    let sibling: ChildNode | null;
     while ((sibling = viewNode.nextSibling)) {
-      sibling.parentNode.removeChild(sibling);
+      sibling.remove();
     }
   }
 
   saveState(nodeContext: Vtree.NodeContext, column: Layout.Column) {
     this.initialPosition = nodeContext.copy();
-    this.initialBreakPositions = [].concat(column.breakPositions);
-    this.initialFragmentLayoutConstraints = [].concat(
-      column.fragmentLayoutConstraints,
+    this.initialBreakPositions = ([] as Layout.BreakPosition[]).concat(
+      column.breakPositions,
     );
-    if (nodeContext.formattingContext) {
-      this.initialStateOfFormattingContext =
-        nodeContext.formattingContext.saveState();
-    }
+    this.initialFragmentLayoutConstraints = (
+      [] as Layout.FragmentLayoutConstraint[]
+    ).concat(column.fragmentLayoutConstraints);
+    this.initialStateOfFormattingContext =
+      nodeContext.formattingContext.saveState();
   }
 
   restoreState(nodeContext: Vtree.NodeContext, column: Layout.Column) {
     column.breakPositions = this.initialBreakPositions;
     column.fragmentLayoutConstraints = this.initialFragmentLayoutConstraints;
-    if (nodeContext.formattingContext) {
-      nodeContext.formattingContext.restoreState(
-        this.initialStateOfFormattingContext,
-      );
-    }
+    nodeContext.formattingContext.restoreState(
+      this.initialStateOfFormattingContext,
+    );
   }
 }

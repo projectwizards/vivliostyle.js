@@ -19,6 +19,7 @@
 import * as adapt_epub from "../../../src/vivliostyle/epub";
 import * as adapt_task from "../../../src/vivliostyle/task";
 import * as adapt_xmldoc from "../../../src/vivliostyle/xml-doc";
+import * as vivliostyle_plugin from "../../../src/vivliostyle/plugin";
 
 describe("epub", function () {
   describe("EPUBDocStore", function () {
@@ -81,17 +82,21 @@ describe("epub", function () {
   });
 
   describe("OPFDoc", function () {
-    describe("initWithWebPubManifest", function () {
+    describe("fromWebPubManifest", function () {
       it("creates a primary entry for data: URL documents", function (done) {
         var store = new adapt_epub.EPUBDocStore();
-        var opf = new adapt_epub.OPFDoc(store, "data:text/html,");
         var doc = new DOMParser().parseFromString(
           "<html xmlns='http://www.w3.org/1999/xhtml'><head><title>Blank</title></head><body></body></html>",
           "text/html",
         );
 
         adapt_task.start(function () {
-          opf.initWithWebPubManifest({}, doc).then(function () {
+          adapt_epub.OPFDoc.fromWebPubManifest(
+            store,
+            "data:text/html,",
+            {},
+            doc,
+          ).then(function (opf) {
             expect(opf.items.length).toBe(1);
             expect(opf.spine.length).toBe(1);
             expect(opf.items[0].src).toBe("data:text/html,");
@@ -103,14 +108,18 @@ describe("epub", function () {
 
       it("creates a primary entry when the publication URL is the root document", function (done) {
         var store = new adapt_epub.EPUBDocStore();
-        var opf = new adapt_epub.OPFDoc(store, "https://example.com/webpub/");
         var doc = new DOMParser().parseFromString(
           "<html xmlns='http://www.w3.org/1999/xhtml'><head><title>Root</title></head><body></body></html>",
           "text/html",
         );
 
         adapt_task.start(function () {
-          opf.initWithWebPubManifest({}, doc).then(function () {
+          adapt_epub.OPFDoc.fromWebPubManifest(
+            store,
+            "https://example.com/webpub/",
+            {},
+            doc,
+          ).then(function (opf) {
             expect(opf.items.length).toBe(1);
             expect(opf.spine.length).toBe(1);
             expect(opf.items[0].src).toBe("https://example.com/webpub/");
@@ -119,14 +128,39 @@ describe("epub", function () {
           return adapt_task.newResult(true);
         });
       });
+
+      ["%23", "%3F", "%3A"].forEach(function (encodedCharacter) {
+        it(
+          "preserves " + encodedCharacter + " in the primary entry filename",
+          function (done) {
+            var store = new adapt_epub.EPUBDocStore();
+            var doc = new DOMParser().parseFromString(
+              "<html xmlns='http://www.w3.org/1999/xhtml'><head><title>Reserved character</title></head><body></body></html>",
+              "text/html",
+            );
+            var url =
+              "https://example.com/book/file" + encodedCharacter + "name.html";
+
+            adapt_task.start(function () {
+              adapt_epub.OPFDoc.fromWebPubManifest(store, url, {}, doc).then(
+                function (opf) {
+                  expect(opf.spine.length).toBe(1);
+                  expect(opf.spine[0].src).toBe(url);
+                  done();
+                },
+              );
+              return adapt_task.newResult(true);
+            });
+          },
+        );
+      });
     });
 
     describe("OPFDocumentURLTransformer", function () {
-      var opfDoc = new adapt_epub.OPFDoc(null, null);
-      opfDoc.spine = opfDoc.items = [
-        { src: "http://example.com:8000/foo/bar1.html" },
-        { src: "http://example.com:8000/foo/bar2.html" },
-      ];
+      var opfDoc = adapt_epub.OPFDoc.fromChapters(null, "", [
+        { url: "http://example.com:8000/foo/bar1.html", index: 0 },
+        { url: "http://example.com:8000/foo/bar2.html", index: 1 },
+      ]).get();
       var transformer = opfDoc.createDocumentURLTransformer();
 
       var illegalCharRegexp = /[^-a-zA-Z0-9_:]/;
@@ -147,6 +181,31 @@ describe("epub", function () {
 
           restored = transformer.restoreURL("#" + transformed);
           expect(restored).toEqual([baseURL, fragment]);
+        });
+
+        it("canonicalizes a redirected loaded document URL to the spine source URL", function () {
+          var store = {
+            get: function (url) {
+              return url === "http://example.com:8000/foo/bar1.html"
+                ? { url: "http://example.com:8000/foo/bar1" }
+                : null;
+            },
+          };
+          var redirectedOpfDoc = adapt_epub.OPFDoc.fromChapters(store, "", [
+            { url: "http://example.com:8000/foo/bar1.html", index: 0 },
+          ]).get();
+          var redirectedTransformer =
+            redirectedOpfDoc.createDocumentURLTransformer();
+
+          var redirectedBaseURL = "http://example.com:8000/foo/bar1";
+          var redirectedTransformed = redirectedTransformer.transformFragment(
+            fragment,
+            redirectedBaseURL,
+          );
+
+          expect(
+            redirectedTransformer.restoreURL(redirectedTransformed),
+          ).toEqual(["http://example.com:8000/foo/bar1.html", fragment]);
         });
       });
 
@@ -176,6 +235,33 @@ describe("epub", function () {
 
           transformed = transformer.transformURL(baseURL + "#" + fragment);
           expect(transformed).toBe(baseURL + "#" + fragment);
+        });
+
+        it("transforms a redirected same-document URL using the canonical spine URL", function () {
+          var store = {
+            get: function (url) {
+              return url === "http://example.com:8000/foo/bar1.html"
+                ? { url: "http://example.com:8000/foo/bar1" }
+                : null;
+            },
+          };
+          var redirectedOpfDoc = adapt_epub.OPFDoc.fromChapters(store, "", [
+            { url: "http://example.com:8000/foo/bar1.html", index: 0 },
+          ]).get();
+          var redirectedTransformer =
+            redirectedOpfDoc.createDocumentURLTransformer();
+          var redirectedBaseURL = "http://example.com:8000/foo/bar1";
+
+          var transformed = redirectedTransformer.transformURL(
+            "#" + fragment,
+            redirectedBaseURL,
+          );
+          expect(transformed.charAt(0)).toBe("#");
+
+          expect(redirectedTransformer.restoreURL(transformed)).toEqual([
+            "http://example.com:8000/foo/bar1.html",
+            fragment,
+          ]);
         });
       });
     });
@@ -308,6 +394,228 @@ describe("epub", function () {
           },
         },
       ]);
+    });
+  });
+  describe("OPFView page rendering", function () {
+    it("stops tracking a render task after a synchronous error", function (done) {
+      adapt_task.start(function () {
+        var view = Object.create(adapt_epub.OPFView.prototype);
+        view.renderingPageTasks = new Map();
+        var error = new Error("render failed");
+        spyOn(view, "renderPageTracked").and.throwError(error);
+
+        return adapt_task.handle(
+          "testRenderErrorCleanup",
+          function () {
+            view.renderPage({
+              spineIndex: 0,
+              pageIndex: 0,
+              offsetInItem: -1,
+            });
+          },
+          function (frame, caughtError) {
+            expect(caughtError).toBe(error);
+            expect(view.renderingPageTasks.size).toBe(0);
+            frame.finish(true);
+            done();
+          },
+        );
+      });
+    });
+
+    it("waits for a pending page being rendered by another task", function (done) {
+      adapt_task.start(function () {
+        var view = Object.create(adapt_epub.OPFView.prototype);
+        view.renderingPageTasks = new Map();
+        var page = {};
+        var viewItem = {
+          complete: false,
+          layoutPositions: [{ page: 0 }, { page: 1 }],
+          pages: [{}],
+        };
+        spyOn(view, "waitForPreviousSpines").and.returnValue(
+          adapt_task.newResult(true),
+        );
+        spyOn(view, "getPageViewItem").and.returnValue(
+          adapt_task.newResult(viewItem),
+        );
+        spyOn(view, "renderPage").and.callThrough();
+        var scheduler = adapt_task.currentTask().getScheduler();
+        var backgroundTask = scheduler.run(function () {
+          var frame = adapt_task.newFrame("backgroundRender");
+          view.beginRenderingPage(adapt_task.currentTask());
+          frame.sleep(50).then(function () {
+            viewItem.pages[1] = page;
+            view.endRenderingPage(adapt_task.currentTask());
+            frame.finish(true);
+          });
+          return frame.result();
+        });
+        var testFrame = adapt_task.newFrame("testPendingPageWait");
+        testFrame.sleep(10).then(function () {
+          view
+            .findPage({ spineIndex: 0, pageIndex: 1, offsetInItem: -1 }, false)
+            .then(function (result) {
+              expect(result.page).toBe(page);
+              expect(view.renderPage).not.toHaveBeenCalled();
+              backgroundTask.join().then(function () {
+                testFrame.finish(true);
+                done();
+              });
+            });
+        });
+        return testFrame.result();
+      });
+    });
+  });
+  describe("OPFView pagination progress", function () {
+    function createFakeView(totalOffsets) {
+      var view = Object.create(adapt_epub.OPFView.prototype);
+      view.spineItems = [];
+      view.paginationProgress = {
+        totalOffsetsBySpine: [],
+        renderedOffsetsBySpine: [],
+        totalOffsetsReady: false,
+        lastReportedPages: 0,
+        lastReportedFraction: 0,
+      };
+      view.opf = {
+        spine: totalOffsets.map(function (offset, i) {
+          return { src: "doc-" + i, spineIndex: i };
+        }),
+        store: {
+          load: function (src) {
+            var index = Number(src.replace("doc-", ""));
+            return adapt_task.newResult({
+              getTotalOffset: function () {
+                return totalOffsets[index];
+              },
+            });
+          },
+        },
+      };
+      return view;
+    }
+
+    function createFakeViewItem(view, spineIndex, totalOffset) {
+      return {
+        item: view.opf.spine[spineIndex],
+        xmldoc: {
+          getTotalOffset: function () {
+            return totalOffset;
+          },
+        },
+        instance: {
+          getPosition: function () {
+            return 0;
+          },
+        },
+        pages: [{ fetchers: [] }],
+      };
+    }
+
+    var payloads;
+    var hook = function (payload) {
+      payloads.push(payload);
+    };
+
+    beforeEach(function () {
+      payloads = [];
+      vivliostyle_plugin.registerHook(
+        vivliostyle_plugin.HOOKS.PAGINATION_PROGRESS,
+        hook,
+      );
+    });
+
+    afterEach(function () {
+      vivliostyle_plugin.removeHook(
+        vivliostyle_plugin.HOOKS.PAGINATION_PROGRESS,
+        hook,
+      );
+    });
+
+    it("reports the fraction of the paginated content in a single document", function () {
+      var view = createFakeView([100]);
+      var viewItem = createFakeViewItem(view, 0, 100);
+      view.spineItems[0] = viewItem;
+
+      // A page finished at the half of the document
+      viewItem.instance.getPosition = function () {
+        return 50;
+      };
+      view.reportPaginationProgress(viewItem, { page: 1 });
+      expect(payloads[0].fraction).toBeCloseTo(0.5, 5);
+      expect(payloads[0].pages).toBe(1);
+
+      // The last page finished (no next layout position)
+      view.reportPaginationProgress(viewItem, null);
+      expect(payloads[1].fraction).toBe(1);
+    });
+
+    it("does not report 100% until the last of multiple documents is paginated", function (done) {
+      var view = createFakeView([100, 100, 100]);
+
+      adapt_task.start(function () {
+        view.collectTotalOffsets().then(function () {
+          // Each spine item is loaded and fully paginated in order
+          for (var i = 0; i < 3; i++) {
+            var viewItem = createFakeViewItem(view, i, 100);
+            view.spineItems[i] = viewItem;
+            view.reportPaginationProgress(viewItem, null);
+          }
+          expect(payloads[0].fraction).toBeCloseTo(1 / 3, 5);
+          expect(payloads[1].fraction).toBeCloseTo(2 / 3, 5);
+          expect(payloads[2].fraction).toBe(1);
+          done();
+        });
+        return adapt_task.newResult(true);
+      });
+    });
+
+    it("reports the initial render fraction against the whole publication, not just the first document", function (done) {
+      var view = createFakeView([100, 100, 100]);
+      // renderSinglePage() dependencies, stubbed to isolate the collect + report
+      view.counterStore = { finishPage: function () {} };
+      view.isInCounterResolveScope = function () {
+        return false;
+      };
+      view.preparePageCountersForRender = function () {
+        return null;
+      };
+      view.makePage = function () {
+        return { spineIndex: 0, offset: 0, fetchers: [] };
+      };
+      view.resolvePageTypeForRenderSlot = function () {};
+      view.finishPageContainer = function () {};
+      view.maybeRelayoutFollowingPage = function () {
+        return adapt_task.newResult(true);
+      };
+      view.resolveUnresolvedReferencesForPage = function (viewItem, page) {
+        return adapt_task.newResult(page);
+      };
+
+      var viewItem = createFakeViewItem(view, 0, 100);
+      view.spineItems[0] = viewItem;
+      viewItem.instance.getPageNumberContextDepth = function () {
+        return 0;
+      };
+      viewItem.instance.pushPageNumberContext = function () {};
+      viewItem.instance.restorePageNumberContextDepth = function () {};
+      // A page finished at the half of the first document
+      viewItem.instance.getPosition = function () {
+        return 50;
+      };
+      viewItem.instance.layoutNextPage = function () {
+        return adapt_task.newResult({ page: 1 });
+      };
+
+      adapt_task.start(function () {
+        view.renderSinglePage(viewItem, { page: 0 }).then(function () {
+          expect(payloads[0].fraction).toBeCloseTo(1 / 6, 5);
+          done();
+        });
+        return adapt_task.newResult(true);
+      });
     });
   });
 });

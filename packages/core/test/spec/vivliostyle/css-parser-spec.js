@@ -19,11 +19,16 @@
 import * as adapt_cssparse from "../../../src/vivliostyle/css-parser";
 import * as adapt_cssnesting from "../../../src/vivliostyle/css-nesting";
 import * as adapt_csstok from "../../../src/vivliostyle/css-tokenizer";
+import * as adapt_exprs from "../../../src/vivliostyle/exprs";
 import * as adapt_task from "../../../src/vivliostyle/task";
 
 describe("css-parser", function () {
   describe("Parser", function () {
-    var handler = new adapt_cssparse.ParserHandler(null);
+    var scope = new adapt_exprs.LexicalScope(null);
+    var handler = new adapt_cssparse.DispatchParserHandler(
+      scope,
+      () => new adapt_cssparse.ParserHandler(scope),
+    );
 
     beforeEach(function () {
       spyOn(handler, "error");
@@ -75,6 +80,44 @@ describe("css-parser", function () {
         tokenizer.consume();
       }
     }
+
+    function parseMediaQuery(text) {
+      const mediaScope = new adapt_exprs.LexicalScope(null);
+      const mediaHandler = new adapt_cssparse.ParserHandler(mediaScope);
+      const tokenizer = new adapt_csstok.Tokenizer(text, mediaHandler);
+      const expression = adapt_cssparse
+        .parseMediaQuery(tokenizer, mediaHandler, "")
+        .toExpr();
+      return { expression, mediaScope };
+    }
+
+    describe("media queries", function () {
+      it("represents value-less and value-bearing features separately", function () {
+        const valueLess = parseMediaQuery("(color)").expression;
+        const valueBearing = parseMediaQuery("(min-width: 600px)").expression;
+
+        expect(valueLess).toEqual(jasmine.any(adapt_exprs.MediaBooleanTest));
+        expect(valueLess.toString()).toBe("(color)");
+        expect(valueBearing).toEqual(jasmine.any(adapt_exprs.MediaTest));
+      });
+
+      it("serializes escaped feature names as identifiers", function () {
+        const valueLess = parseMediaQuery("(foo\\20 bar)").expression;
+        const valueBearing = parseMediaQuery("(foo\\20 bar: 1)").expression;
+
+        expect(valueLess.toString()).toBe("(foo\\20 bar)");
+        expect(valueBearing.toString()).toBe("(foo\\20 bar:1)");
+      });
+
+      it("evaluates both feature variants in one condition", function () {
+        const { expression, mediaScope } = parseMediaQuery(
+          "(width) and (min-width: 600px)",
+        );
+        const context = new adapt_exprs.Context(mediaScope, 800, 600, 16, 20);
+
+        expect(expression.evaluate(context)).toBe(true);
+      });
+    });
 
     describe("css nesting", function () {
       it("expands nested selectors using :is() semantics", function () {
@@ -333,6 +376,101 @@ describe("css-parser", function () {
           parse(done, ":lang(2) {}", function () {
             expect(handler.error).toHaveBeenCalled();
             expect(handler.pseudoclassSelector).not.toHaveBeenCalled();
+          });
+        });
+      });
+
+      describe(":dir", function () {
+        it("takes one identifier as an argument", function (done) {
+          parse(done, ":dir(rtl) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.pseudoclassSelector).toHaveBeenCalledWith("dir", [
+              "rtl",
+            ]);
+          });
+        });
+
+        it("allows white space around the argument", function (done) {
+          parse(done, ":dir( rtl ) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.pseudoclassSelector).toHaveBeenCalledWith("dir", [
+              "rtl",
+            ]);
+          });
+        });
+
+        // Unlike :lang(), which errors out and cannot recover inside a
+        // forgiving list, an invalid argument reaches the handler with an
+        // empty params array (the same contract unknown functional
+        // pseudo-classes follow). The handler can void the selector and an
+        // enclosing forgiving list can recover.
+        it("hands an empty argument list to the handler instead of erroring", function (done) {
+          parse(done, ":dir() {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.pseudoclassSelector).toHaveBeenCalledWith("dir", []);
+          });
+        });
+
+        it("consumes an argument that is not a single identifier", function (done) {
+          parse(done, ":dir(ltr rtl) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.pseudoclassSelector).toHaveBeenCalledWith("dir", []);
+          });
+        });
+
+        it("balances nested parentheses in an invalid argument", function (done) {
+          parse(done, ":dir(a(b)) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.pseudoclassSelector).toHaveBeenCalledWith("dir", []);
+          });
+        });
+
+        it("errors when the argument list is never closed", function (done) {
+          parse(done, ":dir(rtl", function () {
+            expect(handler.error).toHaveBeenCalled();
+            expect(handler.pseudoclassSelector).not.toHaveBeenCalled();
+          });
+        });
+      });
+
+      describe("function name case", function () {
+        it("matches the selector functions case-insensitively", function (done) {
+          parse(done, ":IS(.x) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.startFuncWithSelector).toHaveBeenCalledWith("is");
+          });
+        });
+
+        it("matches :NOT() case-insensitively", function (done) {
+          parse(done, ":NOT(.x) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.startFuncWithSelector).toHaveBeenCalledWith("not");
+          });
+        });
+
+        it("matches :HAS() case-insensitively", function (done) {
+          parse(done, ":HAS(q) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.startFuncWithSelector).toHaveBeenCalledWith("has");
+          });
+        });
+
+        it("matches :lang() case-insensitively", function (done) {
+          parse(done, ":LANG(ja) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.pseudoclassSelector).toHaveBeenCalledWith("lang", [
+              "ja",
+            ]);
+          });
+        });
+
+        it("matches :nth-child() case-insensitively", function (done) {
+          parse(done, ":NTH-CHILD(2n) {}", function () {
+            expect(handler.error).not.toHaveBeenCalled();
+            expect(handler.pseudoclassSelector).toHaveBeenCalledWith(
+              "nth-child",
+              [2, 0],
+            );
           });
         });
       });
@@ -1377,6 +1515,139 @@ describe("css-parser", function () {
           expect(expr.expr.name).toBe("--a");
           expect(expr.expr.value).toBe("  red ");
           expect(expr.expr.toString()).toBe("(--a:  red )");
+        });
+      });
+    });
+
+    describe("@layer parsing", function () {
+      beforeEach(function () {
+        spyOn(handler, "startLayerRule");
+        spyOn(handler, "layerStatementRule");
+      });
+
+      it("parses an anonymous layer block", function (done) {
+        parse(done, "@layer { a { color: red } }", function () {
+          expect(handler.startLayerRule).toHaveBeenCalledWith(null);
+          expect(handler.error).not.toHaveBeenCalled();
+        });
+      });
+
+      it("parses a named layer block", function (done) {
+        parse(done, "@layer A { }", function () {
+          expect(handler.startLayerRule).toHaveBeenCalledWith(["A"]);
+          expect(handler.error).not.toHaveBeenCalled();
+        });
+      });
+
+      it("parses a layer name with sub-layers", function (done) {
+        parse(done, "@layer A.B.C { }", function () {
+          expect(handler.startLayerRule).toHaveBeenCalledWith(["A", "B", "C"]);
+          expect(handler.error).not.toHaveBeenCalled();
+        });
+      });
+
+      it("parses the statement form", function (done) {
+        parse(done, "@layer A, B.C, D;", function () {
+          expect(handler.layerStatementRule).toHaveBeenCalledWith([
+            ["A"],
+            ["B", "C"],
+            ["D"],
+          ]);
+          expect(handler.error).not.toHaveBeenCalled();
+        });
+      });
+
+      it("rejects @layer without a name or block", function (done) {
+        parse(done, "@layer;", function () {
+          expect(handler.startLayerRule).not.toHaveBeenCalled();
+          expect(handler.layerStatementRule).not.toHaveBeenCalled();
+          expect(handler.error).toHaveBeenCalled();
+        });
+      });
+
+      it("rejects a layer name with whitespace around the dot", function (done) {
+        parse(done, "@layer A . B { }", function () {
+          expect(handler.startLayerRule).not.toHaveBeenCalled();
+          expect(handler.error).toHaveBeenCalled();
+        });
+      });
+
+      it("rejects a block with multiple layer names", function (done) {
+        parse(done, "@layer A, B { }", function () {
+          expect(handler.startLayerRule).not.toHaveBeenCalled();
+          expect(handler.layerStatementRule).not.toHaveBeenCalled();
+          expect(handler.error).toHaveBeenCalled();
+        });
+      });
+
+      it("reports the statement form in a context where it is not allowed without skipping the rest", function (done) {
+        var slaveScope = new adapt_exprs.LexicalScope(null);
+        var dispatch = new adapt_cssparse.DispatchParserHandler(
+          slaveScope,
+          (owner) =>
+            new adapt_cssparse.SlaveParserHandler(slaveScope, owner, null),
+        );
+        spyOn(dispatch, "errorMsg");
+        var tokenizer = new adapt_csstok.Tokenizer("@layer A;", dispatch);
+
+        adapt_task.start(function () {
+          adapt_cssparse
+            .parseStylesheet(tokenizer, dispatch, null, null, null)
+            .then(function () {
+              expect(dispatch.errorMsg).toHaveBeenCalled();
+              // A skipping handler would never be taken back, swallowing
+              // everything that follows.
+              expect(dispatch.slave).toBe(dispatch.initialSlave);
+              done();
+            });
+          return adapt_task.newResult(true);
+        });
+      });
+    });
+
+    describe("@import with a cascade layer", function () {
+      // Imported through `data:` URLs so that the async import path in
+      // parseStylesheet() is actually taken.
+      var emptySheet = '"data:text/css,"';
+
+      beforeEach(function () {
+        spyOn(handler, "startLayerRule");
+      });
+
+      it("wraps an anonymous layer around the imported style sheet", function (done) {
+        parse(done, "@import " + emptySheet + " layer;", function () {
+          expect(handler.startLayerRule).toHaveBeenCalledWith(null);
+          expect(handler.error).not.toHaveBeenCalled();
+        });
+      });
+
+      it("wraps a named layer around the imported style sheet", function (done) {
+        parse(done, "@import " + emptySheet + " layer(A.B);", function () {
+          expect(handler.startLayerRule).toHaveBeenCalledWith(["A", "B"]);
+          expect(handler.error).not.toHaveBeenCalled();
+        });
+      });
+
+      it("keeps the layer when the @import also has a media query", function (done) {
+        parse(done, "@import " + emptySheet + " layer(A) print;", function () {
+          expect(handler.startLayerRule).toHaveBeenCalledWith(["A"]);
+          expect(handler.error).not.toHaveBeenCalled();
+        });
+      });
+
+      it("does not carry the layer over to the next @import", function (done) {
+        var text =
+          "@import " + emptySheet + " layer(A); @import " + emptySheet + ";";
+        parse(done, text, function () {
+          expect(handler.startLayerRule.calls.allArgs()).toEqual([[["A"]]]);
+          expect(handler.error).not.toHaveBeenCalled();
+        });
+      });
+
+      it("rejects a layer name with whitespace around the dot", function (done) {
+        parse(done, "@import " + emptySheet + " layer(A . B);", function () {
+          expect(handler.startLayerRule).not.toHaveBeenCalled();
+          expect(handler.error).toHaveBeenCalled();
         });
       });
     });

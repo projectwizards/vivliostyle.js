@@ -29,7 +29,12 @@ const LEGACY_PSEUDO_ELEMENTS = new Set([
   "first-letter",
 ]);
 
-const SUPPORTED_GROUP_RULES = new Set(["media", "supports", "-epubx-when"]);
+const SUPPORTED_GROUP_RULES = new Set([
+  "media",
+  "supports",
+  "layer",
+  "-epubx-when",
+]);
 const DECLARATION_OR_BLOCK_TERMINATORS = new Set([";", "}"]);
 const RULE_HEADER_TERMINATORS = new Set(["{", ";", "}"]);
 const DECLARATION_START_TERMINATORS = new Set([";", "{", "}"]);
@@ -404,7 +409,6 @@ function isDeclarationStart(
   if (terminator?.char === "{") {
     return !isLikelyNestedTypeOrUniversalSelector(
       input,
-      start,
       identEnd,
       colonIndex,
       terminator.index,
@@ -415,7 +419,6 @@ function isDeclarationStart(
 
 function isLikelyNestedTypeOrUniversalSelector(
   input: string,
-  start: number,
   identEnd: number,
   colonIndex: number,
   blockIndex: number,

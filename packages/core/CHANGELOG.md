@@ -3,6 +3,72 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [2.45.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.44.1...v2.45.0) (2026-08-22)
+
+### Features
+
+- Support cascade layer order for name-defining at-rules ([b75551d](https://github.com/vivliostyle/vivliostyle.js/commit/b75551de859d920a42f44ecb64917ecfdb380d62)), closes [#2110](https://github.com/vivliostyle/vivliostyle.js/issues/2110)
+- Support the `revert`, `revert-layer` and `revert-rule` keywords ([4e73752](https://github.com/vivliostyle/vivliostyle.js/commit/4e737526484207011cdc24403b2f23e243e9fb31)), closes [#2111](https://github.com/vivliostyle/vivliostyle.js/issues/2111)
+- Add support for CSS Cascade Layers (`@layer`) ([535b919](https://github.com/vivliostyle/vivliostyle.js/commit/535b919981659c2fd94feadec164d09e9530adf4)), closes [#977](https://github.com/vivliostyle/vivliostyle.js/issues/977)
+- Support :dir() and :any-link pseudo-classes ([#2093](https://github.com/vivliostyle/vivliostyle.js/issues/2093)) ([7551577](https://github.com/vivliostyle/vivliostyle.js/commit/75515773846fc477c504b6cd8df005f0ab69d34e))
+
+### Bug Fixes
+
+- Give the text-spacing filler font vertical metrics ([#2124](https://github.com/vivliostyle/vivliostyle.js/issues/2124)) ([fef988e](https://github.com/vivliostyle/vivliostyle.js/commit/fef988eb61acb7b9117d76200640c5b2c4b2f0ed))
+- Leave a rollback with no fallback to the browser ([#2123](https://github.com/vivliostyle/vivliostyle.js/issues/2123)) ([0926c24](https://github.com/vivliostyle/vivliostyle.js/commit/0926c24731ace4fcfb432f1cd9eafb653872da3a))
+- Map `@font-face` families used by ::marker ([#2122](https://github.com/vivliostyle/vivliostyle.js/issues/2122)) ([4e80f52](https://github.com/vivliostyle/vivliostyle.js/commit/4e80f52370468ab83ed2307a5c551dc96ad14204))
+- Keep `@font-face` rules in cascade order in the view document ([3d2dba9](https://github.com/vivliostyle/vivliostyle.js/commit/3d2dba943666acbc9d81fa9bde224188faf2172b))
+- Fix var() being dropped when a CSS property name is not lowercase ([a59a8c6](https://github.com/vivliostyle/vivliostyle.js/commit/a59a8c6f850046cdb4758b26e06922cb881ccebd))
+- Fix background-position with var() being dropped on `@page` and root backgrounds ([58fc60a](https://github.com/vivliostyle/vivliostyle.js/commit/58fc60a1ac698904f670657a92e4fffbf8247486)), closes [#2116](https://github.com/vivliostyle/vivliostyle.js/issues/2116)
+- Fix body content overflowing the page when writing-mode is specified on the body element ([6536276](https://github.com/vivliostyle/vivliostyle.js/commit/65362767936190df6aa09b5b922655220c5abbfb)), closes [#1122](https://github.com/vivliostyle/vivliostyle.js/issues/1122)
+- Prevent writing-mode on the body element from being inherited by the page context ([610aaa6](https://github.com/vivliostyle/vivliostyle.js/commit/610aaa69a6270da04552f8853581211711ab47d5)), closes [#1122](https://github.com/vivliostyle/vivliostyle.js/issues/1122)
+- Fix parser error with lowercase `<!doctype html>` ([ed69fee](https://github.com/vivliostyle/vivliostyle.js/commit/ed69feeea3f90113adcf0bd50f9e6f5aac4b07c9)), closes [#2101](https://github.com/vivliostyle/vivliostyle.js/issues/2101)
+- Fix writing-mode at `@page` not working correctly ([2008273](https://github.com/vivliostyle/vivliostyle.js/commit/2008273fdd948fb4e1ab9c0c0d2093588b0b8d6e)), closes [#2001](https://github.com/vivliostyle/vivliostyle.js/issues/2001)
+- Keep the view condition of a voided selector out of the next rule ([ac7974c](https://github.com/vivliostyle/vivliostyle.js/commit/ac7974ca36f3f77cfb53056a76d6658e31957cee))
+- Void a rule whose selector uses a construct the parser rejects ([ef477da](https://github.com/vivliostyle/vivliostyle.js/commit/ef477da43adc5e27034cf0fd92e9337a5c879d0d))
+- Treat a pseudo-element as an invalid alternative in a selector list ([04179e6](https://github.com/vivliostyle/vivliostyle.js/commit/04179e6720ab46a3269c98c17f7d2181da37e503))
+- Take a rule into the cascade only once its selector list has parsed ([d8f7c2e](https://github.com/vivliostyle/vivliostyle.js/commit/d8f7c2e3cddd6df123eecbe93ce657c96e216032))
+- Void an unforgiving selector list on an invalid alternative ([74a6fc9](https://github.com/vivliostyle/vivliostyle.js/commit/74a6fc9f5cbfd3b6f8447e33dadc376b4a2a167d))
+- Ignore invalid selectors in a forgiving selector list ([5491851](https://github.com/vivliostyle/vivliostyle.js/commit/549185164646cf87ddbaf5db63bb289e52c75b4e))
+- Load documents with reserved characters in filenames ([6439fa6](https://github.com/vivliostyle/vivliostyle.js/commit/6439fa6e8fd8f38c788b6600bc9768baba874d69)), closes [#2076](https://github.com/vivliostyle/vivliostyle.js/issues/2076)
+- Fix the UA base stylesheet ignoring expressions and at-rules ([78861a0](https://github.com/vivliostyle/vivliostyle.js/commit/78861a0293428537abbd263f86baa55bf1e29b29))
+- Resolve lh in calc() on the root font-size and line-height ([fe094a1](https://github.com/vivliostyle/vivliostyle.js/commit/fe094a1c21978d40e40404822a687fa25d5ff76b))
+- Fix rlh and lh units resolving to zero ([d5886b0](https://github.com/vivliostyle/vivliostyle.js/commit/d5886b0aab52680f6410da397882215f39290278))
+- Fix page navigation during background rendering ([1ea6dc6](https://github.com/vivliostyle/vivliostyle.js/commit/1ea6dc6571d017a96a5001d3c8e369d3b017e127)), closes [#2047](https://github.com/vivliostyle/vivliostyle.js/issues/2047)
+
+## [2.44.1](https://github.com/vivliostyle/vivliostyle.js/compare/v2.44.0...v2.44.1) (2026-07-09)
+
+### Bug Fixes
+
+- Collect spine total offsets before reporting pagination progress ([a50fc26](https://github.com/vivliostyle/vivliostyle.js/commit/a50fc260ffa13cf4006be1a3f706d7c8911434fd))
+- Keep the pagination progress href monotonic ([99109df](https://github.com/vivliostyle/vivliostyle.js/commit/99109dfe6a73eb47b3553a9bfb780448585c1af9))
+- Restore Theme Base TOC styling with `target-counter()` ([4310b96](https://github.com/vivliostyle/vivliostyle.js/commit/4310b96ac731f5e90224cce6ac8951179cf85218)), closes [#2043](https://github.com/vivliostyle/vivliostyle.js/issues/2043)
+
+# [2.44.0](https://github.com/vivliostyle/vivliostyle.js/compare/v2.43.3...v2.44.0) (2026-07-04)
+
+### Features
+
+- Add paginationprogress event to CoreViewer ([#2041](https://github.com/vivliostyle/vivliostyle.js/issues/2041)) ([442f605](https://github.com/vivliostyle/vivliostyle.js/commit/442f605519e990cfb29e0b244d89d5075290adac))
+- Add document href to pagination progress payload ([a9bd79d](https://github.com/vivliostyle/vivliostyle.js/commit/a9bd79d772bf4a1224b50e2c498a58abfce4aa5f))
+
+### Bug Fixes
+
+- Guard against null xmldoc from store.load ([e2086a6](https://github.com/vivliostyle/vivliostyle.js/commit/e2086a6a373b4b8e23a6dded4ec4b7f18c13ecfd))
+- Compute pagination progress fraction against all spine items ([91879d2](https://github.com/vivliostyle/vivliostyle.js/commit/91879d26a19d0c760b37f0f4372c1bde7c099748))
+- Make text-spacing filler widths independent of installed fonts ([#2035](https://github.com/vivliostyle/vivliostyle.js/issues/2035)) ([2bacf4b](https://github.com/vivliostyle/vivliostyle.js/commit/2bacf4bd455dcec41ef06c0f339a38422bf4e1b8))
+- Restore target-counter references for redirected chapter URLs ([2a0f1a4](https://github.com/vivliostyle/vivliostyle.js/commit/2a0f1a41529f7a6971ef0eb05abf73027b3e84b8)), closes [#2036](https://github.com/vivliostyle/vivliostyle.js/issues/2036)
+- Exclude Fullwidth Semicolon from Chromium vo=Tr fallback ([9febc7a](https://github.com/vivliostyle/vivliostyle.js/commit/9febc7ac55d9733d27b60abd4514e8c11e0d9200))
+- Fix Vertical vo=Tr character rotation on Chromium ([209180c](https://github.com/vivliostyle/vivliostyle.js/commit/209180cd82728fb93f10c53dbdaed5c8af3b6c6b)), closes [#2023](https://github.com/vivliostyle/vivliostyle.js/issues/2023)
+- Fix long line-policy footnote fragmentation ([478e8bb](https://github.com/vivliostyle/vivliostyle.js/commit/478e8bb9cd06decba15d2842fe192619c48cc496)), closes [#2029](https://github.com/vivliostyle/vivliostyle.js/issues/2029)
+- Prevent long footnotes from being dropped during target-counter() rerendering ([a931e94](https://github.com/vivliostyle/vivliostyle.js/commit/a931e94830328a16c2c99159fb1e15717e49c1ca)), closes [#2026](https://github.com/vivliostyle/vivliostyle.js/issues/2026)
+- prevent rendering hang with footnote-policy: line ([9679fb0](https://github.com/vivliostyle/vivliostyle.js/commit/9679fb0b159330c4b30018deb537bb19d2dea078)), closes [#2024](https://github.com/vivliostyle/vivliostyle.js/issues/2024)
+
+## [2.43.3](https://github.com/vivliostyle/vivliostyle.js/compare/v2.43.2...v2.43.3) (2026-06-18)
+
+### Bug Fixes
+
+- Fix missing list markers in WebKit ([8cbc78b](https://github.com/vivliostyle/vivliostyle.js/commit/8cbc78b0570c6289516ef1a566715ffc56952891)), closes [#2017](https://github.com/vivliostyle/vivliostyle.js/issues/2017)
+
 ## [2.43.2](https://github.com/vivliostyle/vivliostyle.js/compare/v2.43.1...v2.43.2) (2026-06-12)
 
 ### Bug Fixes

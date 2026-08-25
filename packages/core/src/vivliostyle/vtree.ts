@@ -107,7 +107,7 @@ export function makeListener(
       for (let k = 0; k < refs.length; k++) {
         try {
           actionFn(refs[k]);
-        } catch (err) {}
+        } catch {}
       }
     };
   }
@@ -130,7 +130,7 @@ export class Page extends Base.SimpleEventTarget {
   isAutoPageWidth: boolean = true;
   isAutoPageHeight: boolean = true;
   spineIndex: number = 0;
-  position: LayoutPosition = null;
+  position: LayoutPosition | null = null;
   offset: number = -1;
   side: Constants.PageSide | null = null;
   fetchers: TaskUtil.Fetcher<{}>[] = [];
@@ -140,6 +140,8 @@ export class Page extends Base.SimpleEventTarget {
     left: { [key: string]: Container };
     right: { [key: string]: Container };
   } = { top: {}, bottom: {}, left: {}, right: {} };
+  pageFloatLayoutContext: PageFloats.AttachedPageFloatLayoutContext | null =
+    null;
   pageType: string | null = null;
 
   constructor(
@@ -201,7 +203,7 @@ export class Page extends Base.SimpleEventTarget {
     // in the page)
     Object.keys(this.elementsById).forEach((id) => {
       const elems = this.elementsById[id];
-      for (let i = 0; i < elems.length; ) {
+      for (let i = 0; i < elems.length;) {
         if (this.container.contains(elems[i])) {
           i++;
         } else {
@@ -251,8 +253,8 @@ export class Page extends Base.SimpleEventTarget {
 }
 
 export type Spread = {
-  left: Page;
-  right: Page;
+  left: Page | null;
+  right: Page | null;
 };
 
 export const Whitespace = Vtree.Whitespace;
@@ -280,7 +282,7 @@ export function whitespaceFromPropertyValue(
   }
 }
 
-export function canIgnore(node: Node, whitespace?: Whitespace): boolean {
+export function canIgnore(node: Node | null, whitespace?: Whitespace): boolean {
   if (!node) {
     return true;
   }
@@ -304,11 +306,11 @@ export function canIgnoreText(text: string, whitespace?: Whitespace): boolean {
 
 export class Flow {
   forcedBreakOffsets = [] as number[];
-  formattingContext: FormattingContext | null = null;
 
   constructor(
     public readonly flowName: string,
     public readonly parentFlowName: string | null,
+    public readonly formattingContext: FormattingContext,
   ) {}
 }
 
@@ -373,23 +375,12 @@ export type LayoutContext = Vtree.LayoutContext;
  */
 export type FormattingContext = Vtree.FormattingContext;
 
-export function eachAncestorFormattingContext(
-  nodeContext: NodeContext,
-  callback: (p1: FormattingContext) => any,
-): void {
-  if (!nodeContext) {
-    return;
-  }
-  for (let fc = nodeContext.formattingContext; fc; fc = fc.getParent()) {
-    callback(fc);
-  }
-}
-
 export type NodePositionStep = Vtree.NodePositionStep;
+export type RootNodePositionStep = Vtree.RootNodePositionStep;
 
 export function isSameNodePositionStep(
-  nps1: NodePositionStep,
-  nps2: NodePositionStep,
+  nps1: NodePositionStep | null,
+  nps2: NodePositionStep | null,
 ): boolean {
   if (nps1 === nps2) {
     return true;
@@ -441,7 +432,7 @@ export function isSameNodePosition(
 }
 
 export function newNodePositionFromNode(node: Node): NodePosition {
-  const step: NodePositionStep = {
+  const step: RootNodePositionStep = {
     node,
     shadowType: ShadowType.NONE,
     shadowContext: null,
@@ -462,7 +453,7 @@ export function newNodePositionFromNodeContext(
   nodeContext: Vtree.NodeContext,
   initialFragmentIndex: number | null,
 ): NodePosition {
-  const step: NodePositionStep = {
+  const step: RootNodePositionStep = {
     node: nodeContext.sourceNode,
     shadowType: ShadowType.NONE,
     shadowContext: nodeContext.shadowContext,
@@ -486,16 +477,50 @@ export function makeNodeContextFromNodePositionStep(
   step: NodePositionStep,
   parent: Vtree.NodeContext,
 ): NodeContext {
-  const nodeContext = new NodeContext(step.node, parent as NodeContext, 0);
-  nodeContext.shadowType = step.shadowType;
-  nodeContext.shadowContext = step.shadowContext;
-  nodeContext.nodeShadow = step.nodeShadow;
+  const parentContext = parent as NodeContext;
+  const nodeContext = new NodeContext(
+    step.node,
+    parentContext,
+    0,
+    step.formattingContext ?? parentContext.formattingContext,
+  );
+  nodeContext.blockContainer = blockContainerForChildrenOf(parentContext);
+  applyNodePositionStep(nodeContext, step);
   nodeContext.shadowSibling = step.shadowSibling
     ? makeNodeContextFromNodePositionStep(step.shadowSibling, parent.copy())
     : null;
-  nodeContext.formattingContext = step.formattingContext;
-  nodeContext.fragmentIndex = step.fragmentIndex + 1;
   return nodeContext;
+}
+
+export function makeRootNodeContextFromNodePositionStep(
+  step: RootNodePositionStep,
+  flowRootFormattingContext: FormattingContext,
+): NodeContext {
+  const nodeContext = new NodeContext(
+    step.node,
+    null,
+    0,
+    step.formattingContext ?? flowRootFormattingContext,
+  );
+  applyNodePositionStep(nodeContext, step);
+  nodeContext.shadowSibling = step.shadowSibling;
+  return nodeContext;
+}
+
+function applyNodePositionStep(
+  nodeContext: NodeContext,
+  step: NodePositionStep,
+): void {
+  nodeContext.shadowType = step.shadowType;
+  nodeContext.shadowContext = step.shadowContext;
+  nodeContext.nodeShadow = step.nodeShadow;
+  nodeContext.fragmentIndex = step.fragmentIndex + 1;
+}
+
+export function rootStepOfNodePosition(
+  position: Vtree.NodePosition,
+): RootNodePositionStep {
+  return position.steps[position.steps.length - 1] as RootNodePositionStep;
 }
 
 export const ShadowType = Vtree.ShadowType;
@@ -505,14 +530,14 @@ export type ShadowType = Vtree.ShadowType; // eslint-disable-line no-redeclare
  * Data about shadow tree instance.
  */
 export class ShadowContext implements Vtree.ShadowContext {
-  subShadow: ShadowContext = null;
+  subShadow: ShadowContext | null = null;
 
   constructor(
     public readonly owner: Element,
     public readonly root: Element,
-    public readonly xmldoc: XmlDoc.XMLDocHolder,
-    public readonly parentShadow: ShadowContext,
-    superShadow: ShadowContext,
+    public readonly xmldoc: XmlDoc.XMLDocHolder | null,
+    public readonly parentShadow: ShadowContext | null,
+    superShadow: ShadowContext | null,
     public readonly type: ShadowType,
     public readonly styler: CssStyler.AbstractStyler,
   ) {
@@ -535,8 +560,8 @@ export class ShadowContext implements Vtree.ShadowContext {
 }
 
 export function isSameShadowContext(
-  sc1: Vtree.ShadowContext,
-  sc2: Vtree.ShadowContext,
+  sc1: Vtree.ShadowContext | null,
+  sc2: Vtree.ShadowContext | null,
 ): boolean {
   return sc1 === sc2 || (!!sc1 && !!sc2 && sc1.equals(sc2));
 }
@@ -547,7 +572,7 @@ export function isSameShadowContext(
  */
 export class FirstPseudo implements Vtree.FirstPseudo {
   constructor(
-    public readonly outer: FirstPseudo,
+    public readonly outer: FirstPseudo | null,
     public readonly count: number,
   ) {}
 }
@@ -567,9 +592,9 @@ export class NodeContext implements Vtree.NodeContext {
   shadowType: ShadowType;
 
   // parent's shadow type
-  shadowContext: Vtree.ShadowContext;
-  nodeShadow: Vtree.ShadowContext = null;
-  shadowSibling: NodeContext = null;
+  shadowContext: Vtree.ShadowContext | null;
+  nodeShadow: Vtree.ShadowContext | null = null;
+  shadowSibling: NodeContext | null = null;
 
   // next "sibling" in the shadow tree
   // other stuff
@@ -594,28 +619,60 @@ export class NodeContext implements Vtree.NodeContext {
   containingBlockForAbsolute: boolean = false;
   breakBefore: string | null = null;
   breakAfter: string | null = null;
-  viewNode: Node = null;
-  clearSpacer: Node = null;
-  inheritedProps: { [key: string]: number | string | Css.Val };
+  viewNode: Element | Text | null = null;
+  clearSpacer: Element | null = null;
+  inheritedProps: { [key: string]: number | string | Css.Val | undefined };
   vertical: boolean;
   direction: string;
-  firstPseudo: FirstPseudo;
+  firstPseudo: FirstPseudo | null;
   lang: string | null = null;
   preprocessedTextContent: Diff.Change[] | null = null;
-  formattingContext: FormattingContext;
   repeatOnBreak: string | null = null;
   pluginProps: {
     [key: string]: string | number | undefined | null | (number | null)[];
   } = {};
   fragmentIndex: number = 1;
-  afterIfContinues: Selectors.AfterIfContinues = null;
+  afterIfContinues: Selectors.AfterIfContinues | null = null;
   footnotePolicy: Css.Ident | null = null;
   pageType: string | null;
+  blockContainer: ElementNodeContext | null = null;
+
+  static childOf(
+    sourceNode: Node,
+    parent: NodeContext,
+    boxOffset: number,
+  ): ChildNodeContext {
+    const nodeContext = new NodeContext(
+      sourceNode,
+      parent,
+      boxOffset,
+      parent.formattingContext,
+    );
+    nodeContext.blockContainer = blockContainerForChildrenOf(parent);
+    return nodeContext as ChildNodeContext;
+  }
+
+  static siblingOf(
+    sourceNode: Node,
+    sibling: NodeContext,
+    boxOffset: number,
+  ): NodeContext {
+    const parent = sibling.parent;
+    const nodeContext = new NodeContext(
+      sourceNode,
+      parent,
+      boxOffset,
+      (parent ?? sibling).formattingContext,
+    );
+    nodeContext.blockContainer = sibling.blockContainer;
+    return nodeContext;
+  }
 
   constructor(
     public sourceNode: Node,
-    public parent: NodeContext,
+    public parent: NodeContext | null,
     public boxOffset: number,
+    public formattingContext: FormattingContext,
   ) {
     this.shadowType = ShadowType.NONE;
     this.shadowContext = parent ? parent.shadowContext : null;
@@ -628,7 +685,6 @@ export class NodeContext implements Vtree.NodeContext {
     this.vertical = parent ? parent.vertical : false;
     this.direction = parent ? parent.direction : "ltr";
     this.firstPseudo = parent ? parent.firstPseudo : null;
-    this.formattingContext = parent ? parent.formattingContext : null;
     this.pageType = parent ? parent.pageType : null;
   }
 
@@ -659,7 +715,9 @@ export class NodeContext implements Vtree.NodeContext {
     this.vertical = this.parent ? this.parent.vertical : false;
     this.nodeShadow = null;
     this.preprocessedTextContent = null;
-    this.formattingContext = this.parent ? this.parent.formattingContext : null;
+    if (this.parent) {
+      this.formattingContext = this.parent.formattingContext;
+    }
     this.repeatOnBreak = null;
     this.pluginProps = {};
     this.fragmentIndex = 1;
@@ -668,8 +726,13 @@ export class NodeContext implements Vtree.NodeContext {
     this.pageType = this.parent ? this.parent.pageType : null;
   }
 
-  private cloneItem(): NodeContext {
-    const np = new NodeContext(this.sourceNode, this.parent, this.boxOffset);
+  private cloneItem(): this {
+    const np = new NodeContext(
+      this.sourceNode,
+      this.parent,
+      this.boxOffset,
+      this.formattingContext,
+    ) as this;
     np.offsetInNode = this.offsetInNode;
     np.after = this.after;
     np.nodeShadow = this.nodeShadow;
@@ -701,25 +764,25 @@ export class NodeContext implements Vtree.NodeContext {
     np.vertical = this.vertical;
     np.overflow = this.overflow;
     np.preprocessedTextContent = this.preprocessedTextContent;
-    np.formattingContext = this.formattingContext;
     np.repeatOnBreak = this.repeatOnBreak;
     np.pluginProps = Object.create(this.pluginProps);
     np.fragmentIndex = this.fragmentIndex;
     np.afterIfContinues = this.afterIfContinues;
     np.footnotePolicy = this.footnotePolicy;
     np.pageType = this.pageType;
+    np.blockContainer = this.blockContainer;
     return np;
   }
 
-  modify(): NodeContext {
+  modify(): this {
     if (!this.shared) {
       return this;
     }
     return this.cloneItem();
   }
 
-  copy(): NodeContext {
-    let np: NodeContext = this;
+  copy(): this {
+    let np: NodeContext | null = this;
     do {
       if (np.shared) {
         break;
@@ -730,14 +793,19 @@ export class NodeContext implements Vtree.NodeContext {
     return this;
   }
 
-  clone(): NodeContext {
+  clone(): this {
     const np = this.cloneItem();
-    let npc = np;
-    let npp: NodeContext;
+    const chain: NodeContext[] = [np];
+    let npc: NodeContext = np;
+    let npp: NodeContext | null;
     while ((npp = npc.parent) != null) {
       npp = npp.cloneItem();
       npc.parent = npp;
       npc = npp;
+      chain.push(npp);
+    }
+    for (let i = chain.length - 2; i >= 0; i--) {
+      chain[i].blockContainer = blockContainerForChildrenOf(chain[i + 1]);
     }
     return np;
   }
@@ -761,33 +829,30 @@ export class NodeContext implements Vtree.NodeContext {
   }
 
   toNodePosition(): NodePosition {
-    let nc: NodeContext = this;
-    const steps = [];
-
     // Fix for issue #703
-    if (
-      nc.shadowType === Vtree.ShadowType.ROOTLESS &&
-      (nc.floatReference !== PageFloats.FloatReference.INLINE ||
-        nc.floatSide === "footnote") &&
-      (nc.shadowContext?.styler as PseudoElement.PseudoelementStyler)?.style?.[
-        "_pseudos"
-      ]
-    ) {
-      nc = nc.parent;
-    }
-
-    do {
+    // A float or footnote context inside a pseudo-element shadow is always a
+    // descended one: restored heads keep the constructor's default float
+    // fields and live roots carry no shadow context.
+    const floatInPseudoContent =
+      this.shadowType === Vtree.ShadowType.ROOTLESS &&
+      (this.floatReference !== PageFloats.FloatReference.INLINE ||
+        this.floatSide === "footnote") &&
+      (this.shadowContext?.styler as PseudoElement.PseudoelementStyler)
+        ?.style?.["_pseudos"]
+        ? (this as ChildNodeContext)
+        : null;
+    const steps: NodePositionStep[] = [];
+    let nc = classifyNodeContext(
+      floatInPseudoContent ? floatInPseudoContent.parent : this,
+    );
+    while (hasParent(nc)) {
       // We need fully "peeled" path, so don't record first-XXX pseudoelement
       // containers
-      if (
-        !nc.firstPseudo ||
-        !nc.parent ||
-        nc.parent.firstPseudo === nc.firstPseudo
-      ) {
+      if (!nc.firstPseudo || nc.parent.firstPseudo === nc.firstPseudo) {
         steps.push(nc.toNodePositionStep());
       }
-      nc = nc.parent;
-    } while (nc);
+      nc = classifyNodeContext(nc.parent);
+    }
     const actualOffsetInNode = this.preprocessedTextContent
       ? Diff.resolveOriginalIndex(
           this.preprocessedTextContent,
@@ -795,7 +860,7 @@ export class NodeContext implements Vtree.NodeContext {
         )
       : this.offsetInNode;
     return {
-      steps,
+      steps: [...steps, toRootNodePositionStep(nc)],
       offsetInNode: actualOffsetInNode,
       after: this.after,
       preprocessedTextContent: this.preprocessedTextContent,
@@ -813,11 +878,11 @@ export class NodeContext implements Vtree.NodeContext {
     return false;
   }
 
-  getContainingBlockForAbsolute(): NodeContext {
+  getContainingBlockForAbsolute(): Vtree.ElementNodeContext | null {
     let parent = this.parent;
     while (parent) {
       if (parent.containingBlockForAbsolute) {
-        return parent;
+        return asElementNodeContext(parent);
       }
       parent = parent.parent;
     }
@@ -833,8 +898,105 @@ export class NodeContext implements Vtree.NodeContext {
   }
 }
 
+export type ChildNodeContext = NodeContext & Vtree.ChildNodeContext;
+
+export function asChildNodeContext(
+  nc: Vtree.NodeContext,
+): ChildNodeContext | null {
+  return nc.parent !== null ? (nc as ChildNodeContext) : null;
+}
+
+export type RootNodeContext = NodeContext & Vtree.RootNodeContext;
+
+export function classifyNodeContext(
+  nc: Vtree.NodeContext,
+): ChildNodeContext | RootNodeContext {
+  return nc.parent !== null
+    ? (nc as ChildNodeContext)
+    : (nc as RootNodeContext);
+}
+
+export function hasParent(
+  nc: ChildNodeContext | RootNodeContext,
+): nc is ChildNodeContext {
+  return nc.parent !== null;
+}
+
+export function toRootNodePositionStep(
+  root: RootNodeContext,
+): RootNodePositionStep {
+  return { ...root.toNodePositionStep(), shadowSibling: root.shadowSibling };
+}
+
+export type TextNodeContext = NodeContext & Vtree.TextNodeContext;
+
+export function asTextNodeContext(
+  nc: Vtree.NodeContext,
+): TextNodeContext | null {
+  return nc.parent !== null && nc.viewNode?.nodeType === 3
+    ? (nc as TextNodeContext)
+    : null;
+}
+
+export type RenderedNodeContext = NodeContext & Vtree.RenderedNodeContext;
+export type ElementNodeContext = NodeContext & Vtree.ElementNodeContext;
+export type FloatNodeContext = NodeContext & Vtree.FloatNodeContext;
+export type ClearNodeContext = NodeContext & Vtree.ClearNodeContext;
+export type AfterIfContinuesNodeContext = NodeContext &
+  Vtree.AfterIfContinuesNodeContext;
+
+export function asElementNodeContext(
+  nc: Vtree.NodeContext,
+): ElementNodeContext | null {
+  return nc.viewNode !== null && nc.viewNode.nodeType === 1
+    ? (nc as ElementNodeContext)
+    : null;
+}
+
+export function asFloatNodeContext(
+  nc: Vtree.NodeContext,
+): FloatNodeContext | null {
+  return nc.floatSide !== null && nc.viewNode?.nodeType === 1
+    ? (nc as FloatNodeContext)
+    : null;
+}
+
+export function asClearNodeContext(
+  nc: Vtree.NodeContext,
+): ClearNodeContext | null {
+  return nc.clearSide !== null && nc.viewNode?.nodeType === 1
+    ? (nc as ClearNodeContext)
+    : null;
+}
+
+export function asAfterIfContinuesNodeContext(
+  nc: Vtree.NodeContext,
+): AfterIfContinuesNodeContext | null {
+  return nc.afterIfContinues !== null && nc.viewNode?.nodeType === 1
+    ? (nc as AfterIfContinuesNodeContext)
+    : null;
+}
+
+export function asRenderedNodeContext(
+  nc: Vtree.NodeContext,
+): RenderedNodeContext | null {
+  return asElementNodeContext(nc) ?? asTextNodeContext(nc);
+}
+
+export type ContainedElementNodeContext = NodeContext &
+  Vtree.ContainedElementNodeContext;
+
+export function blockContainerForChildrenOf(
+  parent: NodeContext,
+): ElementNodeContext | null {
+  const element = asElementNodeContext(parent);
+  return element && !(parent.inline && parent.blockContainer)
+    ? element
+    : parent.blockContainer;
+}
+
 export class ChunkPosition implements Vtree.ChunkPosition {
-  floats: NodePosition[] = null;
+  floats: NodePosition[] | null = null;
 
   constructor(public primary: NodePosition) {}
 
@@ -948,8 +1110,8 @@ export class LayoutPosition {
   highestSeenOffset: number = 0;
 
   // FIXME: This properties seem to be not used
-  highestSeenNode: Node;
-  lookupPositionOffset: number;
+  highestSeenNode: Node | null = null;
+  lookupPositionOffset: number | null = null;
 
   clone(): LayoutPosition {
     const newcp = new LayoutPosition();
@@ -965,7 +1127,7 @@ export class LayoutPosition {
     return newcp;
   }
 
-  isSamePosition(other: LayoutPosition): boolean {
+  isSamePosition(other: LayoutPosition | null): boolean {
     if (this === other) {
       return true;
     }
@@ -1026,6 +1188,35 @@ export class LayoutPosition {
   }
 }
 
+export function copyGeometry(
+  from: Vtree.ContainerGeometry,
+  to: Vtree.ContainerGeometry,
+): void {
+  to.left = from.left;
+  to.top = from.top;
+  to.marginLeft = from.marginLeft;
+  to.marginRight = from.marginRight;
+  to.marginTop = from.marginTop;
+  to.marginBottom = from.marginBottom;
+  to.borderLeft = from.borderLeft;
+  to.borderRight = from.borderRight;
+  to.borderTop = from.borderTop;
+  to.borderBottom = from.borderBottom;
+  to.paddingLeft = from.paddingLeft;
+  to.paddingRight = from.paddingRight;
+  to.paddingTop = from.paddingTop;
+  to.paddingBottom = from.paddingBottom;
+  to.width = from.width;
+  to.height = from.height;
+  to.originX = from.originX;
+  to.originY = from.originY;
+  to.snapWidth = from.snapWidth;
+  to.snapHeight = from.snapHeight;
+  to.vertical = from.vertical;
+  to.rtl = from.rtl;
+  to.borderBoxSizing = from.borderBoxSizing;
+}
+
 export class Container implements Vtree.Container {
   left: number = 0;
   top: number = 0;
@@ -1045,8 +1236,8 @@ export class Container implements Vtree.Container {
   height: number = 0;
   originX: number = 0;
   originY: number = 0;
-  exclusions: GeometryUtil.Shape[] = null;
-  innerShape: GeometryUtil.Shape = null;
+  exclusions: GeometryUtil.Shape[] | null = null;
+  innerShape: GeometryUtil.Shape | null = null;
   computedBlockSize: number = 0;
   snapWidth: number = 0;
   snapHeight: number = 0;
@@ -1164,32 +1355,10 @@ export class Container implements Vtree.Container {
 
   copyFrom(other: Container): void {
     this.element = other.element;
-    this.left = other.left;
-    this.top = other.top;
-    this.marginLeft = other.marginLeft;
-    this.marginRight = other.marginRight;
-    this.marginTop = other.marginTop;
-    this.marginBottom = other.marginBottom;
-    this.borderLeft = other.borderLeft;
-    this.borderRight = other.borderRight;
-    this.borderTop = other.borderTop;
-    this.borderBottom = other.borderBottom;
-    this.paddingLeft = other.paddingLeft;
-    this.paddingRight = other.paddingRight;
-    this.paddingTop = other.paddingTop;
-    this.paddingBottom = other.paddingBottom;
-    this.width = other.width;
-    this.height = other.height;
-    this.originX = other.originX;
-    this.originY = other.originY;
+    copyGeometry(other, this);
     this.innerShape = other.innerShape;
     this.exclusions = other.exclusions;
     this.computedBlockSize = other.computedBlockSize;
-    this.snapWidth = other.snapWidth;
-    this.snapHeight = other.snapHeight;
-    this.vertical = other.vertical;
-    this.rtl = other.rtl;
-    this.borderBoxSizing = other.borderBoxSizing;
   }
 
   setVerticalPosition(top: number, height: number): void {
@@ -1269,7 +1438,7 @@ export class Container implements Vtree.Container {
 
   clear() {
     const parent = this.element;
-    let c: Node;
+    let c: Node | null;
     while ((c = parent.lastChild)) {
       parent.removeChild(c);
     }
@@ -1309,9 +1478,9 @@ export class Container implements Vtree.Container {
   }
 
   getOuterShape(
-    outerShapeProp: Css.Val,
-    context: Exprs.Context,
-  ): GeometryUtil.Shape {
+    outerShapeProp: Css.Val | null,
+    context: Exprs.Context | null,
+  ): GeometryUtil.Shape | null {
     const rect = this.getOuterRect();
     return CssProp.toShape(
       outerShapeProp,
@@ -1361,12 +1530,12 @@ export class ContentPropertyHandler extends Css.Visitor {
     this.elem.appendChild(node);
   }
 
-  override visitStr(str: Css.Str): Css.Val {
+  override visitStr(str: Css.Str): Css.Val | null {
     this.visitStrInner(str.str);
     return null;
   }
 
-  override visitURL(url: Css.URL): Css.Val {
+  override visitURL(url: Css.URL): Css.Val | null {
     if (this.rootContentValue instanceof Css.URL) {
       this.elem.setAttribute("src", url.url);
     } else {
@@ -1377,12 +1546,12 @@ export class ContentPropertyHandler extends Css.Visitor {
     return null;
   }
 
-  override visitSpaceList(list: Css.SpaceList): Css.Val {
+  override visitSpaceList(list: Css.SpaceList): Css.Val | null {
     this.visitValues(list.values);
     return null;
   }
 
-  override visitExpr(expr: Css.Expr): Css.Val {
+  override visitExpr(expr: Css.Expr): Css.Val | null {
     const ex = expr.toExpr();
     // When a named string (string()) holds a content list with page-based
     // counters, render that list so the counters become patchable nodes

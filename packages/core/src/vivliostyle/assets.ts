@@ -1448,6 +1448,10 @@ export const UserAgentTocCss = `
   display: none;
 }
 
+/* An entry hidden from the printed table of contents is still listed in the
+   viewer's TOC menu (see PR #1269). Nothing in Vivliostyle's own cascade is
+   left to roll back to here, so the keyword reaches the browser, which reverts
+   to the display of the element itself. */
 [hidden] {
   display: revert;
 }
@@ -1534,6 +1538,11 @@ span.viv-anonymous-block {
   text-spacing-trim: space-all;
   text-autospace: no-autospace;
 }
+/* see #2034 */
+@font-face {
+  font-family: "-viv-ts-sp";
+  src: url("data:font/woff2;base64,d09GMgABAAAAAADsAAoAAAAAAhwAAACkAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAABmAANAoUNgE2AiQDDAsIAAQgBQYHLhuDATAvDuxmH09wwcdQfVXDjoN4/uuenbvv/WombeKVxJoJmsgSDAIMQBNI2364+oJVIbt1VpdteYNucBxRTKkHHAAtsOCiG02Dh+ybQCFXG3XLx6aFAW6lt2nu/R/sYAIAJhgonJTgpE20Fsy1eGx9BUCBHYJCAxpAKsezAIKwvzuuv0MdwOvy2w0RlAHC9crGWiIAgIIGCEoJGCTsDC4sx/ZMAAA=") format("woff2");
+}
 viv-ts-open.viv-ts-auto > viv-ts-inner,
 viv-ts-open.viv-ts-trim > viv-ts-inner {
   margin-inline-start: -0.5em;
@@ -1550,15 +1559,16 @@ viv-ts-open.viv-ts-auto::before,
 viv-ts-close.viv-ts-auto::after,
 viv-ts-close.viv-hang-end::after {
   content: " ";
-  font-family: Courier, monospace;
+  font: 1em/0 "-viv-ts-sp";
+  text-rendering: geometricPrecision;
   word-spacing: normal;
-  letter-spacing: -0.11em;
-  line-height: 0;
+  letter-spacing: normal;
   text-orientation: mixed;
   visibility: hidden;
 }
 viv-ts-close.viv-hang-end:not(.viv-hang-hw)::after {
-  letter-spacing: 0.4em;
+  /* 0.5em space + 0.5em = 1em */
+  letter-spacing: 0.5em;
 }
 viv-ts-close.viv-hang-hw > viv-ts-inner {
   letter-spacing: -0.5em;
@@ -1574,10 +1584,11 @@ viv-ts-open.viv-hang-first > viv-ts-inner {
 }
 viv-ts-thin-sp::after {
   content: " ";
-  font-family: Times, serif;
+  font: 1em/0 "-viv-ts-sp";
+  /* 0.5em space - 0.375em = 0.125em */
+  letter-spacing: -0.375em;
+  text-rendering: geometricPrecision;
   word-spacing: normal;
-  letter-spacing: -0.125em;
-  line-height: 0;
   text-orientation: mixed;
   visibility: hidden;
 }

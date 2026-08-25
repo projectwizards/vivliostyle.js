@@ -43,7 +43,7 @@ export abstract class PageBox<
   // styles specified in the at-rule
   specified: CssCascade.ElementStyle = {};
   children: PageBox[] = [];
-  pageMaster: PageMaster = null;
+  pageMaster: PageMaster | null = null;
   index: number = 0;
   key: string;
 
@@ -58,7 +58,7 @@ export abstract class PageBox<
     public readonly name: string | null,
     public readonly pseudoName: string | null,
     public readonly classes: string[],
-    public readonly parent: PageBox,
+    public readonly parent: PageBox | null,
   ) {
     this._scope = scope;
     this.key = `p${keyCount++}`;
@@ -68,7 +68,11 @@ export abstract class PageBox<
     }
   }
 
-  createInstance(parentInstance: PageBoxInstance): PageBoxInstance {
+  createInstance(
+    parentInstance: PageBoxInstance,
+    context: Exprs.Context,
+    docElementStyle: CssCascade.ElementStyle,
+  ): PageBoxInstance {
     throw new Error("E_UNEXPECTED_CALL");
   }
 
@@ -159,8 +163,9 @@ export class PageMaster<
     pseudoName: string | null,
     classes: string[],
     parent: RootPageBox,
-    public readonly condition: Exprs.Val,
+    public readonly condition: Exprs.Val | null,
     public readonly specificity: number,
+    public readonly layer: CssCascade.CascadeLayer | null = null,
   ) {
     super(scope, name, pseudoName, classes, parent);
     // if PageMasterScope object is passed, use (share) it.
@@ -184,7 +189,11 @@ export class PageMaster<
     );
   }
 
-  override createInstance(parentInstance: PageBoxInstance): PageBoxInstance {
+  override createInstance(
+    parentInstance: PageBoxInstance,
+    context: Exprs.Context,
+    docElementStyle: CssCascade.ElementStyle,
+  ): PageBoxInstance {
     return new PageMasterInstance(parentInstance, this);
   }
 
@@ -199,6 +208,7 @@ export class PageMaster<
       this.parent as RootPageBox,
       this.condition,
       this.specificity,
+      this.layer,
     );
     this.copySpecified(cloned);
     this.cloneChildren(cloned);
@@ -240,7 +250,11 @@ export class PartitionGroup extends PageBox<PartitionGroupInstance> {
     );
   }
 
-  override createInstance(parentInstance: PageBoxInstance): PageBoxInstance {
+  override createInstance(
+    parentInstance: PageBoxInstance,
+    context: Exprs.Context,
+    docElementStyle: CssCascade.ElementStyle,
+  ): PageBoxInstance {
     return new PartitionGroupInstance(parentInstance, this);
   }
 
@@ -278,7 +292,11 @@ export class Partition<
     }
   }
 
-  override createInstance(parentInstance: PageBoxInstance): PageBoxInstance {
+  override createInstance(
+    parentInstance: PageBoxInstance,
+    context: Exprs.Context,
+    docElementStyle: CssCascade.ElementStyle,
+  ): PageBoxInstance {
     return new PartitionInstance(parentInstance, this);
   }
 
@@ -315,8 +333,8 @@ export function toExprIdent(
 export function toExprAuto(
   scope: Exprs.LexicalScope,
   val: Css.Val,
-  ref: Exprs.Val,
-): Exprs.Val {
+  ref: Exprs.Val | null,
+): Exprs.Val | null {
   if (!val || val === Css.ident.auto || Css.isDefaultingValue(val)) {
     return null;
   }
@@ -326,8 +344,8 @@ export function toExprAuto(
 export function toExprNormal(
   scope: Exprs.LexicalScope,
   val: Css.Val,
-  ref: Exprs.Val,
-): Exprs.Val {
+  ref: Exprs.Val | null,
+): Exprs.Val | null {
   if (!val || val === Css.ident.normal || Css.isDefaultingValue(val)) {
     return null;
   }
@@ -337,7 +355,7 @@ export function toExprNormal(
 export function toExprZero(
   scope: Exprs.LexicalScope,
   val: Css.Val,
-  ref: Exprs.Val,
+  ref: Exprs.Val | null,
 ): Exprs.Val {
   if (!val || val === Css.ident.auto || Css.isDefaultingValue(val)) {
     return scope.zero;
@@ -353,8 +371,8 @@ export function toExprZero(
 export function toExprZeroAuto(
   scope: Exprs.LexicalScope,
   val: Css.Val,
-  ref: Exprs.Val,
-): Exprs.Val {
+  ref: Exprs.Val | null,
+): Exprs.Val | null {
   if (!val || Css.isDefaultingValue(val)) {
     return scope.zero;
   } else if (val === Css.ident.auto) {
@@ -368,7 +386,7 @@ export function toExprZeroBorder(
   scope: Exprs.LexicalScope,
   val: Css.Val,
   styleVal: Css.Val,
-  ref: Exprs.Val,
+  ref: Exprs.Val | null,
 ): Exprs.Val {
   if (!val || styleVal === Css.ident.none || Css.isDefaultingValue(val)) {
     return scope.zero;
@@ -402,14 +420,28 @@ export interface InstanceHolder extends Exprs.Context {
   lookupInstance(key: string): PageBoxInstance;
 }
 
+/**
+ * A page box whose subtree establishes the page float area of a page. Which box
+ * becomes the area's container is fixed by the page box tree: the page master
+ * itself for -epubx-page-master, the page area partition for `@page` rules.
+ */
+export interface PageAreaEstablishing {
+  /**
+   * The child whose subtree establishes the area, or null when this box is the
+   * container itself.
+   */
+  readonly pageAreaEstablishingChild:
+    (PageBoxInstance & PageAreaEstablishing) | null;
+}
+
 export class PageBoxInstance<P extends PageBox = PageBox<any>> {
   /**
    * cascaded styles, geometric ones converted to Css.Expr
    */
   protected cascaded: CssCascade.ElementStyle = {};
   style: { [key: string]: Css.Val } = {};
-  private autoWidth: Exprs.Native = null;
-  private autoHeight: Exprs.Native = null;
+  private autoWidth: Exprs.Native;
+  private autoHeight: Exprs.Native;
   children: PageBoxInstance[] = [];
   isAutoWidth: boolean = false;
   isAutoHeight: boolean = false;
@@ -417,7 +449,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
   isRightDependentOnAutoWidth: boolean = false;
   private calculatedWidth: number = 0;
   private calculatedHeight: number = 0;
-  pageMasterInstance: PageMasterInstance = null;
+  pageMasterInstance: PageMasterInstance | null = null;
   namedValues: { [key: string]: Exprs.Val } = {};
   namedFuncs: { [key: string]: Exprs.Val } = {};
   vertical: boolean = false;
@@ -426,12 +458,23 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
   borderBoxSizing: boolean = false;
 
   constructor(
-    public readonly parentInstance: PageBoxInstance,
+    public readonly parentInstance: PageBoxInstance | null,
     public readonly pageBox: P,
   ) {
     if (parentInstance) {
       parentInstance.children.push(this);
     }
+    const scope = this.pageBox.scope;
+    this.autoWidth = new Exprs.Native(
+      scope,
+      () => this.calculatedWidth,
+      "autoWidth",
+    );
+    this.autoHeight = new Exprs.Native(
+      scope,
+      () => this.calculatedHeight,
+      "autoHeight",
+    );
   }
 
   /**
@@ -569,7 +612,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     return expr;
   }
 
-  private initEnabled(): void {
+  protected initEnabled(): void {
     const scope = this.pageBox.scope;
     const style = this.style;
     let enabled = toExprBool(scope, style["enabled"], scope._true);
@@ -879,7 +922,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     style["snap-height"] = new Css.Expr(snapHeight);
   }
 
-  private initColumns(): void {
+  protected initColumns(): void {
     const scope = this.pageBox.scope;
     const style = this.style;
     const width = toExprAuto(
@@ -926,11 +969,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       .depend(val, context);
   }
 
-  private init(context: Exprs.Context): void {
-    // If context does not implement InstanceHolder we would not be able to
-    // resolve "partition.property" names later.
-    const holder = context as InstanceHolder;
-    holder.registerInstance(this.pageBox.key, this);
+  protected resolveStyle(context: Exprs.Context): void {
     const scope = this.pageBox.scope;
     const style = this.style;
     const regionIds = this.parentInstance
@@ -941,7 +980,6 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       context,
       regionIds,
       false,
-      null,
     );
     this.vertical = CssCascade.isVertical(
       cascMap,
@@ -968,20 +1006,20 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       isLeftPage,
       (name, cascVal) => cascVal.value,
     );
-    this.autoWidth = new Exprs.Native(
-      scope,
-      () => this.calculatedWidth,
-      "autoWidth",
-    );
-    this.autoHeight = new Exprs.Native(
-      scope,
-      () => this.calculatedHeight,
-      "autoHeight",
-    );
+  }
+
+  protected init(context: Exprs.Context): void {
+    this.resolveStyle(context);
     this.initHorizontal();
     this.initVertical();
     this.initColumns();
     this.initEnabled();
+  }
+
+  protected register(context: Exprs.Context): void {
+    // If context does not implement InstanceHolder we would not be able to
+    // resolve "partition.property" names later.
+    (context as InstanceHolder).registerInstance(this.pageBox.key, this);
   }
 
   getProp(context: Exprs.Context, name: string): Css.Val {
@@ -1026,7 +1064,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     return Css.toNumber(val, context);
   }
 
-  getSpecial(context: Exprs.Context, name: string): Css.Val[] {
+  getSpecial(context: Exprs.Context, name: string): Css.Val[] | null {
     const arr = CssCascade.getSpecial(this.cascaded, name);
     if (arr) {
       const result = [] as Css.Val[];
@@ -1043,7 +1081,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     return null;
   }
 
-  getActiveRegions(context: Exprs.Context): string[] {
+  getActiveRegions(context: Exprs.Context): string[] | null {
     const arr = this.getSpecial(context, "region-id");
     if (arr) {
       const result = [] as string[];
@@ -1081,13 +1119,14 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       if (name === "font-family") {
         val = docFaces.filterFontFamily(val);
       }
+      const bleedBoxParent = element.parentElement;
       if (
         (name.startsWith("background") || name === "z-index") &&
-        element.parentElement.hasAttribute("data-vivliostyle-bleed-box")
+        bleedBoxParent?.hasAttribute("data-vivliostyle-bleed-box")
       ) {
         // Move background properties and z-index to the parent bleed-box element.
         // (Fix for issue #644, #1166)
-        element = element.parentElement;
+        element = bleedBoxParent;
       }
       Base.setCSSProperty(element, name, val.toString());
     }
@@ -1433,7 +1472,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     }
     const readHeight = (this.vertical || !column) && this.isAutoHeight;
     const readWidth = (!this.vertical || !column) && this.isAutoWidth;
-    let bbox: Vtree.ClientRect = null;
+    let bbox: Vtree.ClientRect | null = null;
     if (readWidth || readHeight) {
       if (readWidth) {
         Base.setCSSProperty(container.element, "width", "auto");
@@ -1544,11 +1583,11 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
           const blockStartFloatEndEdge =
             columnLike.pageFloatLayoutContext?.parent?.getBlockEndEdgeOfBlockStartFloats?.(
               physicalInlinePos,
-            );
+            ) ?? NaN;
           const blockEndFloatStartEdge =
             columnLike.pageFloatLayoutContext?.parent?.getBlockStartEdgeOfBlockEndFloats?.(
               physicalInlinePos,
-            );
+            ) ?? NaN;
           const blockStartLimit = isFinite(blockStartFloatEndEdge)
             ? this.vertical
               ? blockStartFloatEndEdge - basePaddingRect.x1
@@ -1640,10 +1679,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     }
   }
 
-  applyCascadeAndInit(
-    cascade: CssCascade.CascadeInstance,
-    docElementStyle: CssCascade.ElementStyle,
-  ): void {
+  protected buildCascadedStyle(docElementStyle: CssCascade.ElementStyle): void {
     const style = this.cascaded;
     const specified = this.pageBox.specified;
     for (const name in specified) {
@@ -1674,7 +1710,10 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
         }
       }
     }
-    cascade.pushRule(this.pageBox.classes, null, style);
+  }
+
+  protected resolveContent(cascade: CssCascade.CascadeInstance): void {
+    const style = this.cascaded;
     const content = style["content"] as CssCascade.CascadeValue;
     if (content) {
       const savedLastCounterChanges = Array.from(cascade.lastCounterChanges);
@@ -1685,12 +1724,14 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       // page/margin-box content so sibling margin boxes do not inherit each
       // other's local counter operations.
       cascade.counterScoping.push(null);
-      cascade.pushCounters(style);
+      // the callers push this box's rule before resolving its content
+      cascade.pushCounters(style, style);
       style["content"] = content.filterValue(
         new CssCascade.ContentPropVisitor(
           cascade,
           null,
           cascade.counterResolver,
+          style,
         ),
       );
       cascade.popCounters();
@@ -1698,9 +1739,23 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       cascade.lastCounterChanges = savedLastCounterChanges;
       cascade.lastCounterChangeTypes = savedLastCounterChangeTypes;
     }
+  }
+
+  applyCascadeAndInit(
+    cascade: CssCascade.CascadeInstance,
+    docElementStyle: CssCascade.ElementStyle,
+  ): void {
+    this.buildCascadedStyle(docElementStyle);
+    cascade.pushRule(this.pageBox.classes, null, this.cascaded);
+    this.resolveContent(cascade);
     this.init(cascade.context);
+    this.register(cascade.context);
     for (const child of this.pageBox.children) {
-      const childInstance = child.createInstance(this);
+      const childInstance = child.createInstance(
+        this,
+        cascade.context,
+        docElementStyle,
+      );
       childInstance.applyCascadeAndInit(cascade, docElementStyle);
     }
     cascade.popRule();
@@ -1771,6 +1826,13 @@ export const passPostProperties = [
   "background-image",
   "background-repeat",
   "background-position",
+  // The browser CSSOM treats background-position as a shorthand of these two.
+  // Vivliostyle keeps background-position whole (see ValidatorSet.getShorthand),
+  // so all three are propagated. They are listed after the shorthand so that an
+  // author overriding one axis after the shorthand wins, as in the usual
+  // `background-position: ...; background-position-x: ...` pattern.
+  "background-position-x",
+  "background-position-y",
   "background-clip",
   "background-origin",
   "background-size",
@@ -1862,6 +1924,16 @@ export const delayedProperties = ["transform", "transform-origin"];
 
 export const userAgentPageMasterPseudo = "background-host";
 
+/**
+ * What the cascade sorts a page box by. Only page masters carry an origin and
+ * a cascade layer; for anything else the comparison yields NaN and the
+ * document order decides.
+ */
+function cascadePriorityOf(pageBox: PageBox): CssCascade.CascadePriority {
+  const pageMaster = pageBox as PageMaster;
+  return { priority: pageMaster.specificity, layer: pageMaster.layer ?? null };
+}
+
 export class RootPageBoxInstance extends PageBoxInstance<RootPageBox> {
   constructor(pageBox: RootPageBox) {
     super(null, pageBox);
@@ -1873,11 +1945,19 @@ export class RootPageBoxInstance extends PageBoxInstance<RootPageBox> {
   ): void {
     super.applyCascadeAndInit(cascade, docElementStyle);
 
-    // Sort page masters using order and specificity.
+    // Sort page masters using origin, cascade layer, specificity and order.
+    // Page masters are a list tried in order: the first one whose conditions
+    // are met is used for the next page (EPUB Adaptive Layout 3.5). So the
+    // ties are broken by ascending index on purpose, keeping the "declared
+    // first, tried first" order that lets a general fallback page master be
+    // written last.
     const pageMasters = this.children;
     (pageMasters as PageMasterInstance[]).sort(
       (a, b) =>
-        (b.pageBox as any).specificity - (a.pageBox as any).specificity || // probably cause NaN
+        CssCascade.comparePriority(
+          cascadePriorityOf(b.pageBox),
+          cascadePriorityOf(a.pageBox),
+        ) || // NaN unless both are page masters
         a.pageBox.index - b.pageBox.index,
     );
   }
@@ -1885,10 +1965,19 @@ export class RootPageBoxInstance extends PageBoxInstance<RootPageBox> {
 
 export class PageMasterInstance<
   P extends PageMaster = PageMaster<PageMasterInstance<any>>,
-> extends PageBoxInstance<P> {
+>
+  extends PageBoxInstance<P>
+  implements PageAreaEstablishing
+{
   constructor(parentInstance: PageBoxInstance, pageBox: P) {
     super(parentInstance, pageBox);
     this.pageMasterInstance = this;
+  }
+
+  /** `@page` rules put the area on the page area partition instead. */
+  get pageAreaEstablishingChild():
+    (PageBoxInstance & PageAreaEstablishing) | null {
+    return null;
   }
 
   override boxSpecificEnabled(enabled: Exprs.Val): Exprs.Val {
@@ -1930,7 +2019,7 @@ export class PartitionInstance<
     listVal: Css.Val,
     conflicting: boolean,
   ): Exprs.Val {
-    let list: Css.Val[] = null;
+    let list: Css.Val[] | null = null;
     if (listVal instanceof Css.Ident) {
       list = [listVal];
     }
@@ -2016,8 +2105,9 @@ export class PageBoxParserHandler
     owner: CssParser.DispatchParserHandler,
     public readonly target: PageBox,
     public readonly validatorSet: CssValidator.ValidatorSet,
+    delegation: CssParser.Delegation,
   ) {
-    super(scope, owner, false);
+    super(scope, owner, delegation);
   }
 
   override property(name: string, value: Css.Val, important: boolean): void {
@@ -2025,6 +2115,7 @@ export class PageBoxParserHandler
       name,
       value,
       important,
+      this.scope,
       this,
     );
   }
@@ -2056,8 +2147,9 @@ export class PartitionParserHandler extends PageBoxParserHandler {
     owner: CssParser.DispatchParserHandler,
     target: Partition,
     validatorSet: CssValidator.ValidatorSet,
+    delegation: CssParser.Delegation,
   ) {
-    super(scope, owner, target, validatorSet);
+    super(scope, owner, target, validatorSet, delegation);
   }
 }
 
@@ -2067,8 +2159,9 @@ export class PartitionGroupParserHandler extends PageBoxParserHandler {
     owner: CssParser.DispatchParserHandler,
     target: PartitionGroup,
     validatorSet: CssValidator.ValidatorSet,
+    delegation: CssParser.Delegation,
   ) {
-    super(scope, owner, target, validatorSet);
+    super(scope, owner, target, validatorSet, delegation);
     target.specified["width"] = new CssCascade.CascadeValue(
       Css.hundredPercent,
       0,
@@ -2091,13 +2184,16 @@ export class PartitionGroupParserHandler extends PageBoxParserHandler {
       classes,
       this.target,
     );
-    const handler = new PartitionParserHandler(
-      this.scope,
-      this.owner,
-      partition,
-      this.validatorSet,
+    this.owner.delegateTo(
+      (delegation) =>
+        new PartitionParserHandler(
+          this.scope,
+          this.owner,
+          partition,
+          this.validatorSet,
+          delegation,
+        ),
     );
-    this.owner.pushHandler(handler);
   }
 
   override startPartitionGroupRule(
@@ -2112,13 +2208,16 @@ export class PartitionGroupParserHandler extends PageBoxParserHandler {
       classes,
       this.target,
     );
-    const handler = new PartitionGroupParserHandler(
-      this.scope,
-      this.owner,
-      partitionGroup,
-      this.validatorSet,
+    this.owner.delegateTo(
+      (delegation) =>
+        new PartitionGroupParserHandler(
+          this.scope,
+          this.owner,
+          partitionGroup,
+          this.validatorSet,
+          delegation,
+        ),
     );
-    this.owner.pushHandler(handler);
   }
 }
 
@@ -2128,8 +2227,9 @@ export class PageMasterParserHandler extends PageBoxParserHandler {
     owner: CssParser.DispatchParserHandler,
     target: PageMaster,
     validatorSet: CssValidator.ValidatorSet,
+    delegation: CssParser.Delegation,
   ) {
-    super(scope, owner, target, validatorSet);
+    super(scope, owner, target, validatorSet, delegation);
   }
 
   override startPartitionRule(
@@ -2144,13 +2244,16 @@ export class PageMasterParserHandler extends PageBoxParserHandler {
       classes,
       this.target,
     );
-    const handler = new PartitionParserHandler(
-      this.scope,
-      this.owner,
-      partition,
-      this.validatorSet,
+    this.owner.delegateTo(
+      (delegation) =>
+        new PartitionParserHandler(
+          this.scope,
+          this.owner,
+          partition,
+          this.validatorSet,
+          delegation,
+        ),
     );
-    this.owner.pushHandler(handler);
   }
 
   override startPartitionGroupRule(
@@ -2165,12 +2268,15 @@ export class PageMasterParserHandler extends PageBoxParserHandler {
       classes,
       this.target,
     );
-    const handler = new PartitionGroupParserHandler(
-      this.scope,
-      this.owner,
-      partitionGroup,
-      this.validatorSet,
+    this.owner.delegateTo(
+      (delegation) =>
+        new PartitionGroupParserHandler(
+          this.scope,
+          this.owner,
+          partitionGroup,
+          this.validatorSet,
+          delegation,
+        ),
     );
-    this.owner.pushHandler(handler);
   }
 }

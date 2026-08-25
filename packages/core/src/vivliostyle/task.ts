@@ -116,10 +116,6 @@ export function newFrame<T>(name: string): Frame<T> {
   return frame;
 }
 
-export function newEventSource(): EventSource {
-  return new EventSource();
-}
-
 export function newScheduler(opt_timer?: Timer): Scheduler {
   return new Scheduler(opt_timer || new TimerImpl());
 }
@@ -259,11 +255,10 @@ export class Scheduler {
   }
 
   schedule(continuation: Continuation<any>, opt_delay?: number): void {
-    const c = continuation as Continuation<any>;
     const now = this.timer.currentTime();
-    c.order = this.order++;
-    c.scheduledTime = now + (opt_delay || 0);
-    this.queue.add(c);
+    continuation.order = this.order++;
+    continuation.scheduledTime = now + (opt_delay || 0);
+    this.queue.add(continuation);
     this.arm();
   }
 
@@ -339,10 +334,10 @@ export class Scheduler {
 export class Continuation<T> implements Base.Comparable {
   scheduledTime: number = 0;
   order: number = 0;
-  result: T = null;
+  result: T | null = null;
   canceled: boolean = false;
 
-  constructor(public task: Task) {}
+  constructor(public task: Task | null) {}
 
   /** @override */
   compare(otherComp: Base.Comparable): number {
@@ -354,7 +349,7 @@ export class Continuation<T> implements Base.Comparable {
   /**
    * Continuation's task
    */
-  getTask(): Task {
+  getTask(): Task | null {
     return this.task;
   }
 
@@ -364,7 +359,10 @@ export class Continuation<T> implements Base.Comparable {
    */
   schedule(result: T, opt_delay?: number) {
     this.result = result;
-    this.task.scheduler.schedule(this, opt_delay);
+    const task = this.task;
+    if (task) {
+      task.scheduler.schedule(this, opt_delay);
+    }
   }
 
   resumeInternal(): boolean {
@@ -492,7 +490,7 @@ export class Task {
     }
   }
 
-  raise(err: Error, opt_frame?: Frame<any>): void {
+  raise(err: Error, opt_frame?: Frame<any> | null): void {
     this.fillStack(err);
     if (opt_frame) {
       let f = this.top;
@@ -635,14 +633,14 @@ export class ResultImpl<T> implements Result<T> {
  * @template T
  */
 export class Frame<T> {
-  res: T = null;
+  res: T | null = null;
   state: FrameState;
   callback: ((p1: any) => void) | null = null;
   handler: ((p1: Frame<any>, p2: Error) => void) | null = null;
 
   constructor(
     public task: Task,
-    public parent: Frame<T>,
+    public parent: Frame<T> | null,
     public name: string,
   ) {
     this.state = FrameState.INIT;
@@ -822,7 +820,7 @@ export class Frame<T> {
 }
 
 export class LoopBodyFrame extends Frame<boolean> {
-  constructor(task: Task, parent: Frame<boolean>) {
+  constructor(task: Task, parent: Frame<boolean> | null) {
     super(task, parent, "loop");
   }
 
@@ -832,106 +830,5 @@ export class LoopBodyFrame extends Frame<boolean> {
 
   breakLoop(): void {
     this.finish(false);
-  }
-}
-
-export class EventItem {
-  next: EventItem = null;
-
-  constructor(public event: Base.Event) {}
-}
-
-/**
- * An class to listen to evens and present them as a readable asynchronous
- * stream to tasks.
- */
-export class EventSource {
-  continuation: Continuation<boolean> = null;
-  listeners: {
-    target: Base.EventTarget;
-    type: string;
-    listener: Base.EventListener;
-  }[] = [];
-  head: EventItem;
-  tail: EventItem;
-
-  constructor() {
-    this.head = new EventItem(null);
-    this.tail = this.head;
-  }
-
-  /**
-   * Attaches as an event listener to an EventTarget.
-   */
-  attach(
-    target: Base.EventTarget,
-    type: string,
-    opt_preventDefault?: boolean,
-  ): void {
-    const listener = (event) => {
-      if (opt_preventDefault) {
-        event.preventDefault();
-      }
-      if (this.tail.event) {
-        this.tail.next = new EventItem(event);
-        this.tail = this.tail.next;
-      } else {
-        this.tail.event = event;
-        const continuation = this.continuation;
-        if (continuation) {
-          this.continuation = null;
-          continuation.schedule(true);
-        }
-      }
-    };
-    target.addEventListener(type, listener, false);
-    this.listeners.push({ target, type, listener });
-  }
-
-  detach(target: Base.EventTarget, type: string): void {
-    let i = 0;
-    let item: {
-      target: Base.SimpleEventTarget;
-      type: string;
-      listener: Base.EventListener;
-    } = null;
-    while (i < this.listeners.length) {
-      item = this.listeners[i];
-      if (item.type == type && item.target === target) {
-        this.listeners.splice(i, 1);
-        item.target.removeEventListener(item.type, item.listener, false);
-        return;
-      }
-      i++;
-    }
-    throw new Error("E_TASK_EVENT_SOURCE_NOT_ATTACHED");
-  }
-
-  /**
-   * Read next dispatched event, blocking the current task if needed.
-   */
-  nextEvent(): Result<Base.Event> {
-    const frame: Frame<Base.Event> = newFrame("EventSource.nextEvent");
-    const readEvent = () => {
-      if (this.head.event) {
-        const event = this.head.event;
-        if (this.head.next) {
-          this.head = this.head.next;
-        } else {
-          this.head.event = null;
-        }
-        frame.finish(event);
-      } else if (this.continuation) {
-        throw new Error("E_TASK_EVENT_SOURCE_OTHER_TASK_WAITING");
-      } else {
-        const frameInternal: Frame<boolean> = newFrame(
-          "EventSource.nextEventInternal",
-        );
-        this.continuation = frameInternal.suspend(this);
-        frameInternal.result().then(readEvent);
-      }
-    };
-    readEvent();
-    return frame.result();
   }
 }

@@ -72,6 +72,10 @@ function shouldSkipHeadForWebPub(url: string): boolean {
   );
 }
 
+function encodeURLPath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
 export type Position = {
   spineIndex: number;
   pageIndex: number;
@@ -84,18 +88,29 @@ export class EPUBDocStore extends OPS.OPSDocStore {
   opfByURL: { [key: string]: OPFDoc } = {};
   primaryOPFByEPubURL: { [key: string]: OPFDoc } = {};
   deobfuscators: { [key: string]: (p1: Blob) => Task.Result<Blob> } = {};
-  documents: { [key: string]: Task.Result<XmlDoc.XMLDocHolder> } = {};
+  documents: { [key: string]: Task.Result<XmlDoc.XMLDocHolder | null> } = {};
 
-  constructor() {
-    super(null);
+  private constructor(
+    authorStyleSheets: OPS.StyleSheetParam[] | null = null,
+    userStyleSheets: OPS.StyleSheetParam[] | null = null,
+  ) {
+    super(null, authorStyleSheets, userStyleSheets);
     this.fontDeobfuscator = this.makeDeobfuscatorFactory();
     this.plainXMLStore = XmlDoc.newXMLDocStore();
     this.jsonStore = Net.newJSONStore();
   }
 
+  static create(
+    authorStyleSheets: OPS.StyleSheetParam[] | null,
+    userStyleSheets: OPS.StyleSheetParam[] | null,
+  ): Task.Result<EPUBDocStore> {
+    const store = new EPUBDocStore(authorStyleSheets, userStyleSheets);
+    store.triggerSingleDocumentPreprocessing = true;
+    return Task.newResult(store);
+  }
+
   makeDeobfuscatorFactory():
-    | ((p1: string) => ((p1: Blob) => Task.Result<Blob>) | null)
-    | null {
+    ((p1: string) => ((p1: Blob) => Task.Result<Blob>) | null) | null {
     return (url: string): ((p1: Blob) => Task.Result<Blob>) | null => {
       return this.deobfuscators[url];
     };
@@ -125,22 +140,23 @@ export class EPUBDocStore extends OPS.OPSDocStore {
     return this.jsonStore.load(url, opt_required, opt_message);
   }
 
-  loadWebPubManifest(url: string, frame: Task.Frame<OPFDoc>): void {
+  loadWebPubManifest(url: string, frame: Task.Frame<OPFDoc | null>): void {
     this.loadAsJSON(url, true).then((manifestObj) => {
       if (!manifestObj) {
         this.reportLoadError(url);
         frame.finish(null);
         return;
       }
-      const opf = new OPFDoc(this, url);
-      opf.initWithWebPubManifest(manifestObj, undefined, url).then(() => {
-        frame.finish(opf);
-      });
+      OPFDoc.fromWebPubManifest(this, url, manifestObj, undefined, url).then(
+        (opf) => {
+          frame.finish(opf);
+        },
+      );
     });
   }
 
-  loadPubDoc(url: string): Task.Result<OPFDoc> {
-    const frame: Task.Frame<OPFDoc> = Task.newFrame("loadPubDoc");
+  loadPubDoc(url: string): Task.Result<OPFDoc | null> {
+    const frame: Task.Frame<OPFDoc | null> = Task.newFrame("loadPubDoc");
 
     if (/\.opf(?:[#?]|$)/i.test(url)) {
       // EPUB OPF
@@ -165,7 +181,7 @@ export class EPUBDocStore extends OPS.OPSDocStore {
     } else {
       // For ambiguous URLs (no recognized extension), use HEAD to check
       // content type and availability before loading.
-      Net.fetchFromURL(url, null, "HEAD").then((response) => {
+      Net.fetchFromURL(url, undefined, "HEAD").then((response) => {
         if (response.status >= 400) {
           // This url can be the root of an unzipped EPUB.
           this.loadEPUBDoc(url).then((opf) => {
@@ -232,8 +248,8 @@ export class EPUBDocStore extends OPS.OPSDocStore {
     return frame.result();
   }
 
-  loadEPUBDoc(url: string): Task.Result<OPFDoc> {
-    const frame: Task.Frame<OPFDoc> = Task.newFrame("loadEPUBDoc");
+  loadEPUBDoc(url: string): Task.Result<OPFDoc | null> {
+    const frame: Task.Frame<OPFDoc | null> = Task.newFrame("loadEPUBDoc");
     if (!url.endsWith("/")) {
       url = url + "/";
     }
@@ -259,35 +275,33 @@ export class EPUBDocStore extends OPS.OPSDocStore {
     return frame.result();
   }
 
-  loadOPF(pubURL: string, root: string): Task.Result<OPFDoc> {
+  loadOPF(pubURL: string, root: string): Task.Result<OPFDoc | null> {
     const url = pubURL + root;
-    let opf = this.opfByURL[url];
+    const opf = this.opfByURL[url];
     if (opf) {
       return Task.newResult(opf);
     }
-    const frame: Task.Frame<OPFDoc> = Task.newFrame("loadOPF");
+    const frame: Task.Frame<OPFDoc | null> = Task.newFrame("loadOPF");
     this.loadAsPlainXML(url, true, `Failed to fetch EPUB OPF ${url}`).then(
       (opfXML) => {
         if (!opfXML) {
           this.reportLoadError(url);
         } else {
-          opf = new OPFDoc(this, pubURL);
-          this.opfByURL[url] = opf;
-          this.primaryOPFByEPubURL[pubURL] = opf;
+          const registerOPF = (opf: OPFDoc) => {
+            this.opfByURL[url] = opf;
+            this.primaryOPFByEPubURL[pubURL] = opf;
+            frame.finish(opf);
+          };
           if (this.plainXMLStore.resources[pubURL + "META-INF/container.xml"]) {
             this.loadAsPlainXML(pubURL + "META-INF/encryption.xml").then(
               (encXML) => {
-                opf.initWithXMLDoc(opfXML, encXML).then(() => {
-                  frame.finish(opf);
-                });
+                registerOPF(OPFDoc.fromXMLDoc(this, pubURL, opfXML, encXML));
               },
             );
           } else {
             // OPF file is directly specified, not via container.xml.
             // In this case, encryption.xml is not available.
-            opf.initWithXMLDoc(opfXML, null).then(() => {
-              frame.finish(opf);
-            });
+            registerOPF(OPFDoc.fromXMLDoc(this, pubURL, opfXML, null));
           }
         }
       },
@@ -295,8 +309,8 @@ export class EPUBDocStore extends OPS.OPSDocStore {
     return frame.result();
   }
 
-  loadWebPub(url: string): Task.Result<OPFDoc> {
-    const frame: Task.Frame<OPFDoc> = Task.newFrame("loadWebPub");
+  loadWebPub(url: string): Task.Result<OPFDoc | null> {
+    const frame: Task.Frame<OPFDoc | null> = Task.newFrame("loadWebPub");
 
     // Load the primary entry page (X)HTML
     this.load(url).then((xmldoc) => {
@@ -312,7 +326,6 @@ export class EPUBDocStore extends OPS.OPSDocStore {
         frame.finish(null);
       } else {
         const doc = xmldoc.document;
-        const opf = new OPFDoc(this, url);
 
         // Find manifest, W3C WebPublication or Readium Web Publication Manifest
         const manifestLink = doc.querySelector(
@@ -324,9 +337,11 @@ export class EPUBDocStore extends OPS.OPSDocStore {
             const manifestObj = Base.stringToJSON(
               doc.getElementById(href.substr(1)).textContent,
             );
-            opf.initWithWebPubManifest(manifestObj, doc).then(() => {
-              frame.finish(opf);
-            });
+            OPFDoc.fromWebPubManifest(this, url, manifestObj, doc).then(
+              (opf) => {
+                frame.finish(opf);
+              },
+            );
           } else {
             const manifestUrl = Base.resolveURL(
               manifestLink.getAttribute("href"),
@@ -337,16 +352,20 @@ export class EPUBDocStore extends OPS.OPSDocStore {
               true,
               `Failed to fetch Publication Manifest ${manifestUrl}`,
             ).then((manifestObj) => {
-              opf
-                .initWithWebPubManifest(manifestObj, doc, manifestUrl)
-                .then(() => {
-                  frame.finish(opf);
-                });
+              OPFDoc.fromWebPubManifest(
+                this,
+                url,
+                manifestObj,
+                doc,
+                manifestUrl,
+              ).then((opf) => {
+                frame.finish(opf);
+              });
             });
           }
         } else {
           // No manifest
-          opf.initWithWebPubManifest({}, doc).then(() => {
+          OPFDoc.fromWebPubManifest(this, url, {}, doc).then((opf) => {
             if (opf.toc && opf.toc.src === xmldoc.url) {
               // toc is the primary entry (X)HTML
               if (Toc.findTocElements(doc).length === 0) {
@@ -461,7 +480,7 @@ export class EPUBDocStore extends OPS.OPSDocStore {
       return "";
     }
     const vals = {};
-    let r: RegExpMatchArray;
+    let r: RegExpMatchArray | null;
     while (
       (r = content.match(
         /^,?\s*([-A-Za-z_.][-A-Za-z_0-9.]*)\s*=\s*([-+A-Za-z_0-9.]*)\s*/,
@@ -618,7 +637,7 @@ export const metaTerms = {
 
 export function getMetadataComparator(
   term: string,
-  lang: string,
+  lang: string | null,
 ): (p1: MetaItem, p2: MetaItem) => number {
   const empty = {};
   return (item1, item2) => {
@@ -672,7 +691,7 @@ export function readMetadata(
     for (const pn in predefinedPrefixes) {
       prefixMap[pn] = predefinedPrefixes[pn];
     }
-    let r: RegExpMatchArray;
+    let r: RegExpMatchArray | null;
 
     // This code permits any non-ASCII characters in the name to avoid bloating
     // the pattern.
@@ -804,7 +823,7 @@ export function readMetadata(
   return metadata;
 }
 
-export function getMathJaxHub(): object {
+export function getMathJaxHub(): object | null {
   const math = window["MathJax"];
   if (math) {
     return math["Hub"];
@@ -823,31 +842,61 @@ export const supportedMediaTypes = {
 
 export const transformedIdPrefix = "viv-id-";
 
+function getPathFromURL(url: string, pubURL: string): string | null {
+  if (url.startsWith("data:")) {
+    return url === pubURL ? "" : url;
+  }
+  if (pubURL) {
+    let epubBaseURL = Base.resolveURL("", pubURL);
+    if (url === epubBaseURL || url + "/" === epubBaseURL) {
+      return "";
+    }
+    if (epubBaseURL.charAt(epubBaseURL.length - 1) != "/") {
+      epubBaseURL += "/";
+    }
+    return url.substr(0, epubBaseURL.length) == epubBaseURL
+      ? decodeURIComponent(url.substr(epubBaseURL.length))
+      : null;
+  } else {
+    return url;
+  }
+}
+
 export class OPFDoc {
-  opfXML: XmlDoc.XMLDocHolder = null;
-  encXML: XmlDoc.XMLDocHolder = null;
-  items: OPFItem[] = null;
-  spine: OPFItem[] = null;
-  itemMap: { [key: string]: OPFItem } = null;
-  itemMapByPath: { [key: string]: OPFItem } = null;
-  uid: string | null = null;
+  opfXML: XmlDoc.XMLDocHolder;
+  items: OPFItem[];
+  spine: OPFItem[];
+  itemMap: { [key: string]: OPFItem };
+  itemMapByPath: { [key: string]: OPFItem };
   bindings: { [key: string]: string } = {};
   lang: string | null = null;
   epageCount: number = 0;
   prePaginated: boolean = false;
   epageIsRenderedPage: boolean = true;
-  epageCountCallback: (p1: number) => void | null = null;
+  epageCountCallback: ((p1: number) => void) | null = null;
   metadata: Meta = {};
-  toc: OPFItem = null;
-  cover: OPFItem = null;
+  toc: OPFItem | null = null;
+  cover: OPFItem | null = null;
   fallbackMap: { [key: string]: string } = {};
   pageProgression: Constants.PageProgression | null = null;
   documentURLTransformer: Base.DocumentURLTransformer;
 
-  constructor(
+  private constructor(
     public readonly store: EPUBDocStore,
     public readonly pubURL: string,
+    content: {
+      opfXML: XmlDoc.XMLDocHolder;
+      items: OPFItem[];
+      spine: OPFItem[];
+      itemMap: { [key: string]: OPFItem };
+      itemMapByPath: { [key: string]: OPFItem };
+    },
   ) {
+    this.opfXML = content.opfXML;
+    this.items = content.items;
+    this.spine = content.spine;
+    this.itemMap = content.itemMap;
+    this.itemMapByPath = content.itemMapByPath;
     this.documentURLTransformer = this.createDocumentURLTransformer();
   }
 
@@ -855,9 +904,41 @@ export class OPFDoc {
   createDocumentURLTransformer(): Base.DocumentURLTransformer {
     const self = this;
     class OPFDocumentURLTransformer implements Base.DocumentURLTransformer {
+      private canonicalDocumentURLCache = new Map<string, string>();
+
+      private getCanonicalDocumentURL(url: string): string {
+        // Issue #2036: a server may redirect a spine item URL (for example,
+        // stripping `.html`). Canonicalize redirected aliases back to the
+        // spine source URL so transformed ids and same-document references use
+        // one stable document identity.
+        const strippedURL = Base.stripFragment(Base.stripTocBoxURL(url));
+        const cachedURL = this.canonicalDocumentURLCache.get(strippedURL);
+        if (cachedURL) {
+          return cachedURL;
+        }
+        for (const item of self.spine) {
+          const itemURL = Base.stripFragment(Base.stripTocBoxURL(item.src));
+          if (itemURL === strippedURL) {
+            this.canonicalDocumentURLCache.set(strippedURL, itemURL);
+            return itemURL;
+          }
+          const loadedURL = self.store?.get(itemURL)?.url;
+          if (
+            loadedURL &&
+            Base.stripFragment(Base.stripTocBoxURL(loadedURL)) === strippedURL
+          ) {
+            this.canonicalDocumentURLCache.set(strippedURL, itemURL);
+            return itemURL;
+          }
+        }
+        this.canonicalDocumentURLCache.set(strippedURL, strippedURL);
+        return strippedURL;
+      }
+
       /** @override */
       transformFragment(fragment: string, baseURL: string): string {
-        const url = baseURL + (fragment ? `#${fragment}` : "");
+        const canonicalBaseURL = this.getCanonicalDocumentURL(baseURL);
+        const url = canonicalBaseURL + (fragment ? `#${fragment}` : "");
         return transformedIdPrefix + Base.escapeNameStrToHex(url, ":");
       }
 
@@ -865,10 +946,17 @@ export class OPFDoc {
       transformURL(url: string, baseURL: string): string {
         const r = url.match(/^([^#]*)#?(.*)$/);
         if (r) {
-          const path = r[1] || baseURL.replace(/\?viv-toc-box$/, "");
+          const path = this.getCanonicalDocumentURL(
+            r[1] || Base.stripTocBoxURL(baseURL),
+          );
           const fragment = decodeURIComponent(r[2]);
           if (path) {
-            if (self.spine.some((item) => item.src === path)) {
+            if (
+              self.spine.some(
+                (item) =>
+                  Base.stripFragment(Base.stripTocBoxURL(item.src)) === path,
+              )
+            ) {
               return `#${this.transformFragment(fragment, path)}`;
             }
           }
@@ -908,41 +996,28 @@ export class OPFDoc {
   }
 
   getPathFromURL(url: string): string | null {
-    if (url.startsWith("data:")) {
-      return url === this.pubURL ? "" : url;
-    }
-    if (this.pubURL) {
-      let epubBaseURL = Base.resolveURL("", this.pubURL);
-      if (url === epubBaseURL || url + "/" === epubBaseURL) {
-        return "";
-      }
-      if (epubBaseURL.charAt(epubBaseURL.length - 1) != "/") {
-        epubBaseURL += "/";
-      }
-      return url.substr(0, epubBaseURL.length) == epubBaseURL
-        ? decodeURIComponent(url.substr(epubBaseURL.length))
-        : null;
-    } else {
-      return url;
-    }
+    return getPathFromURL(url, this.pubURL);
   }
 
-  initWithXMLDoc(
+  static fromXMLDoc(
+    store: EPUBDocStore,
+    pubURL: string,
     opfXML: XmlDoc.XMLDocHolder,
-    encXML: XmlDoc.XMLDocHolder,
-  ): Task.Result<any> {
-    this.opfXML = opfXML;
-    this.encXML = encXML;
+    encXML: XmlDoc.XMLDocHolder | null,
+  ): OPFDoc {
     const pkg = opfXML.doc().child("package");
+    let uid: string | null = null;
     const uidref = pkg.attribute("unique-identifier")[0];
     if (uidref) {
       const uidElem = opfXML.getElement(`${opfXML.url}#${uidref}`);
       if (uidElem) {
-        this.uid = uidElem.textContent.replace(/[ \n\r\t]/g, "");
+        uid = uidElem.textContent.replace(/[ \n\r\t]/g, "");
       }
     }
     const srcToFallbackId = {};
-    this.items = pkg
+    let toc: OPFItem | null = null;
+    let cover: OPFItem | null = null;
+    const items = pkg
       .child("manifest")
       .child("item")
       .asArray()
@@ -954,54 +1029,65 @@ export class OPFDoc {
         if (fallback && !supportedMediaTypes[item.mediaType]) {
           srcToFallbackId[item.src] = fallback;
         }
-        if (!this.toc && item.itemProperties["nav"]) {
-          this.toc = item;
+        if (!toc && item.itemProperties["nav"]) {
+          toc = item;
         }
-        if (!this.cover && item.itemProperties["cover-image"]) {
-          this.cover = item;
+        if (!cover && item.itemProperties["cover-image"]) {
+          cover = item;
         }
         return item;
       });
-    this.itemMap = Base.indexArray(
-      this.items,
+    const itemMap = Base.indexArray(
+      items,
       getOPFItemId as (p1: OPFItem) => string | null,
     );
-    this.itemMapByPath = Base.indexArray(this.items, (item) =>
-      this.getPathFromURL(item.src),
+    const itemMapByPath = Base.indexArray(items, (item) =>
+      getPathFromURL(item.src, pubURL),
     );
+    const fallbackMap: { [key: string]: string } = {};
     for (const src in srcToFallbackId) {
       let fallbackSrc = src;
       while (true) {
-        const item = this.itemMap[srcToFallbackId[fallbackSrc]];
+        const item = itemMap[srcToFallbackId[fallbackSrc]];
         if (!item) {
           break;
         }
         if (supportedMediaTypes[item.mediaType]) {
-          this.fallbackMap[src] = item.src;
+          fallbackMap[src] = item.src;
           break;
         }
         fallbackSrc = item.src;
       }
     }
-    this.spine = pkg
+    const spine = pkg
       .child("spine")
       .child("itemref")
       .asArray()
       .map((node, index) => {
         const elem = node as Element;
         const id = elem.getAttribute("idref");
-        const item = this.itemMap[id as string];
+        const item = itemMap[id as string];
         if (item) {
           item.itemRefElement = elem;
           item.spineIndex = index;
         }
         return item;
       });
+    const opf = new OPFDoc(store, pubURL, {
+      opfXML,
+      items,
+      spine,
+      itemMap,
+      itemMapByPath,
+    });
+    opf.toc = toc;
+    opf.cover = cover;
+    opf.fallbackMap = fallbackMap;
     const pageProgressionAttr = pkg
       .child("spine")
       .attribute("page-progression-direction")[0];
     if (pageProgressionAttr) {
-      this.pageProgression = Constants.pageProgressionOf(pageProgressionAttr);
+      opf.pageProgression = Constants.pageProgressionOf(pageProgressionAttr);
     }
     const idpfObfURLs = !encXML
       ? []
@@ -1028,33 +1114,33 @@ export class OPFDoc {
     for (let i = 0; i < mediaTypeElems.length; i++) {
       const handlerId = mediaTypeElems[i].getAttribute("handler");
       const mediaType = mediaTypeElems[i].getAttribute("media-type");
-      if (mediaType && handlerId && this.itemMap[handlerId]) {
-        this.bindings[mediaType] = this.itemMap[handlerId].src;
+      if (mediaType && handlerId && itemMap[handlerId]) {
+        opf.bindings[mediaType] = itemMap[handlerId].src;
       }
     }
-    this.metadata = readMetadata(
+    opf.metadata = readMetadata(
       pkg.child("metadata"),
       pkg.attribute("prefix")[0],
     );
-    if (this.metadata[metaTerms.language]) {
-      this.lang = this.metadata[metaTerms.language][0]["v"];
+    if (opf.metadata[metaTerms.language]) {
+      opf.lang = opf.metadata[metaTerms.language][0]["v"];
     }
-    if (this.metadata[metaTerms.layout]) {
-      this.prePaginated =
-        this.metadata[metaTerms.layout][0]["v"] === "pre-paginated";
+    if (opf.metadata[metaTerms.layout]) {
+      opf.prePaginated =
+        opf.metadata[metaTerms.layout][0]["v"] === "pre-paginated";
     }
 
-    if (idpfObfURLs.length > 0 && this.uid) {
+    if (idpfObfURLs.length > 0 && uid) {
       // Have to deobfuscate in JavaScript
-      const deobfuscator = makeDeobfuscator(this.uid);
+      const deobfuscator = makeDeobfuscator(uid);
       for (let i = 0; i < idpfObfURLs.length; i++) {
-        this.store.deobfuscators[this.pubURL + idpfObfURLs[i]] = deobfuscator;
+        store.deobfuscators[pubURL + idpfObfURLs[i]] = deobfuscator;
       }
     }
-    if (this.prePaginated) {
-      this.assignAutoPages();
+    if (opf.prePaginated) {
+      opf.assignAutoPages();
     }
-    return Task.newResult(true);
+    return opf;
   }
 
   assignAutoPages(): void {
@@ -1102,6 +1188,10 @@ export class OPFDoc {
         const item = this.spine[i++];
         item.epage = epage;
         this.store.load(item.src).then((xmldoc) => {
+          if (!xmldoc) {
+            loopFrame.continueLoop();
+            return;
+          }
           // According to the old comment,
           // "Estimate that offset=2700 roughly corresponds to 1024 bytes of compressed size."
           // However, it should depend on the language.
@@ -1126,21 +1216,27 @@ export class OPFDoc {
     return frame.result();
   }
 
-  /**
-   * Creates a fake OPF "document" that contains OPS chapters.
-   */
-  initWithChapters(params: OPFItemParam[], doc?: Document | null) {
-    this.itemMap = {};
-    this.itemMapByPath = {};
-    this.items = [];
-    this.spine = this.items;
+  private static buildChapters(
+    pubURL: string,
+    params: OPFItemParam[],
+  ): {
+    opfXML: XmlDoc.XMLDocHolder;
+    items: OPFItem[];
+    spine: OPFItem[];
+    itemMap: { [key: string]: OPFItem };
+    itemMapByPath: { [key: string]: OPFItem };
+  } {
+    const itemMap: { [key: string]: OPFItem } = {};
+    const itemMapByPath: { [key: string]: OPFItem } = {};
+    const items: OPFItem[] = [];
+    const spine = items;
 
     // create a minimum fake OPF XML for navigation with EPUB CFI
-    const opfXML = (this.opfXML = new XmlDoc.XMLDocHolder(
+    const opfXML = new XmlDoc.XMLDocHolder(
       null,
       "",
       new DOMParser().parseFromString("<spine></spine>", "text/xml"),
-    ));
+    );
     params.forEach((param) => {
       const item = new OPFItem();
       item.initWithParam(param);
@@ -1149,38 +1245,52 @@ export class OPFDoc {
       itemref.setAttribute("idref", item.id);
       opfXML.root.appendChild(itemref);
       item.itemRefElement = itemref;
-      this.itemMap[item.id] = item;
-      let path = this.getPathFromURL(param.url);
+      itemMap[item.id] = item;
+      let path = getPathFromURL(param.url, pubURL);
       if (path == null) {
         path = param.url;
       }
-      this.itemMapByPath[path] = item;
-      this.items.push(item);
+      itemMapByPath[path] = item;
+      items.push(item);
     });
+    return { opfXML, items, spine, itemMap, itemMapByPath };
+  }
+
+  /**
+   * Creates a fake OPF "document" that contains OPS chapters.
+   */
+  static fromChapters(
+    store: EPUBDocStore,
+    pubURL: string,
+    params: OPFItemParam[],
+    doc?: Document | null,
+  ): Task.Result<OPFDoc> {
+    const opf = new OPFDoc(store, pubURL, OPFDoc.buildChapters(pubURL, params));
     if (doc) {
-      return this.store.addDocument(params[0].url, doc);
+      return store.addDocument(params[0].url, doc).thenReturn(opf);
     } else {
-      return Task.newResult(null);
+      return Task.newResult(opf);
     }
   }
 
-  initWithWebPubManifest(
+  static fromWebPubManifest(
+    store: EPUBDocStore,
+    pubURL: string,
     manifestObj: Base.JSON,
     doc?: Document,
     manifestUrl?: string,
-  ): Task.Result<boolean> {
+  ): Task.Result<OPFDoc> {
+    let pageProgression: Constants.PageProgression | null = null;
     if (manifestObj["readingProgression"]) {
-      this.pageProgression = manifestObj["readingProgression"];
+      pageProgression = manifestObj["readingProgression"];
     }
-    if (this.metadata === undefined) {
-      this.metadata = {};
-    }
+    const metadata: Meta = {};
     const title =
       manifestObj["name"] || manifestObj["metadata"]?.["title"] || doc?.title;
     if (title) {
-      this.metadata[metaTerms.title] = (
-        Array.isArray(title) ? title : [title]
-      ).map((item) => ({ v: item.value ?? item }));
+      metadata[metaTerms.title] = (Array.isArray(title) ? title : [title]).map(
+        (item) => ({ v: item.value ?? item }),
+      );
     }
     const author =
       manifestObj["author"] ||
@@ -1191,7 +1301,7 @@ export class OPFDoc {
           [],
       ).map((meta: HTMLMetaElement) => meta.content);
     if (author && author.length !== 0) {
-      this.metadata[metaTerms.creator] = (
+      metadata[metaTerms.creator] = (
         Array.isArray(author) ? author : [author]
       ).map((item) => ({ v: item.name ?? item }));
     }
@@ -1201,17 +1311,17 @@ export class OPFDoc {
       doc?.documentElement.lang ||
       doc?.documentElement.getAttribute("xml:lang");
     if (language) {
-      this.metadata[metaTerms.language] = (
+      metadata[metaTerms.language] = (
         Array.isArray(language) ? language : [language]
       ).map((item) => ({ v: item }));
     }
     // TODO: other metadata...
 
-    const primaryEntryURL = Base.stripFragment(this.pubURL);
-    const primaryEntryPath = this.getPathFromURL(primaryEntryURL);
+    const primaryEntryURL = Base.stripFragment(pubURL);
+    const primaryEntryPath = getPathFromURL(primaryEntryURL, pubURL);
     const primaryEntryReadingOrderURL =
       primaryEntryPath !== null
-        ? encodeURI(primaryEntryPath)
+        ? encodeURLPath(primaryEntryPath)
         : /^(?:about:|blob:)/i.test(primaryEntryURL)
           ? primaryEntryURL
           : null;
@@ -1234,17 +1344,17 @@ export class OPFDoc {
           continue;
         }
         const hrefNoFragment = Base.stripFragment(
-          Base.resolveURL(href, this.pubURL),
+          Base.resolveURL(href, pubURL),
         );
-        const path = this.getPathFromURL(hrefNoFragment);
-        const url = path !== null ? encodeURI(path) : hrefNoFragment;
+        const path = getPathFromURL(hrefNoFragment, pubURL);
+        const url = path !== null ? encodeURLPath(path) : hrefNoFragment;
         if (manifestObj["readingOrder"].indexOf(url) == -1) {
           manifestObj["readingOrder"].push(url);
         }
       }
     }
 
-    const params = [];
+    const params: OPFItemParam[] = [];
     let itemCount = 0;
     let tocFound = -1;
     [manifestObj["readingOrder"], manifestObj["resources"]].forEach(
@@ -1273,7 +1383,7 @@ export class OPFDoc {
             ) {
               const baseUrl = manifestUrl
                 ? manifestUrl.replace(/\/[^/]+$/, "/")
-                : this.pubURL;
+                : pubURL;
               const param = {
                 url: Base.resolveURL(Base.convertSpecialURL(url), baseUrl),
                 index: itemCount++,
@@ -1289,25 +1399,27 @@ export class OPFDoc {
         }
       },
     );
-    const frame: Task.Frame<boolean> = Task.newFrame("initWithWebPubManifest");
-    this.initWithChapters(params).then(() => {
+    const frame: Task.Frame<OPFDoc> = Task.newFrame("fromWebPubManifest");
+    OPFDoc.fromChapters(store, pubURL, params).then((opf) => {
+      opf.pageProgression = pageProgression;
+      opf.metadata = metadata;
       if (tocFound !== -1) {
-        this.toc = this.items[tocFound];
+        opf.toc = opf.items[tocFound];
       }
 
-      if (!this.toc) {
-        this.toc = manifestUrl
-          ? this.items?.[0]
-          : this.itemMapByPath[primaryEntryPath];
+      if (!opf.toc) {
+        opf.toc = manifestUrl
+          ? (opf.items[0] ?? null)
+          : opf.itemMapByPath[primaryEntryPath];
       }
 
       // remove items not in readingOrder (Issue #1257)
       const readingOrderCount = manifestObj["readingOrder"]?.length;
-      if (readingOrderCount && readingOrderCount < this.items.length) {
-        this.items.splice(readingOrderCount);
+      if (readingOrderCount && readingOrderCount < opf.items.length) {
+        opf.items.splice(readingOrderCount);
       }
 
-      frame.finish(true);
+      frame.finish(opf);
     });
     return frame.result();
   }
@@ -1489,8 +1601,8 @@ export type OPFViewItem = {
 };
 
 export class OPFView implements Vgen.CustomRendererFactory {
-  spineItems: OPFViewItem[] = [];
-  spineItemLoadingContinuations: Task.Continuation<any>[][] = [];
+  spineItems: (OPFViewItem | null)[] = [];
+  spineItemLoadingContinuations: (Task.Continuation<any>[] | null)[] = [];
   pref: Exprs.Preferences;
   clientLayout: Vgen.DefaultClientLayout;
   counterStore: Counters.CounterStore;
@@ -1501,8 +1613,11 @@ export class OPFView implements Vgen.CustomRendererFactory {
   private paginationProgress = {
     totalOffsetsBySpine: [] as number[],
     renderedOffsetsBySpine: [] as number[],
+    totalOffsetsReady: false,
     lastReportedPages: 0,
     lastReportedFraction: 0,
+    lastReportedSpineIndex: -1,
+    lastReportedHref: "",
   };
 
   constructor(
@@ -1527,7 +1642,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
     }
   }
 
-  private getPage(position: Position): Vtree.Page {
+  private getPage(position: Position): Vtree.Page | null {
     const viewItem = this.spineItems[position.spineIndex];
     return viewItem ? viewItem.pages[position.pageIndex] : null;
   }
@@ -1700,11 +1815,49 @@ export class OPFView implements Vgen.CustomRendererFactory {
     return totalOffset;
   }
 
+  /**
+   * Load all spine items (fetch and parse only, without layout) and record
+   * their total offsets, so that the pagination progress fraction is
+   * computed against the whole publication.
+   */
+  private collectTotalOffsets(): Task.Result<boolean> {
+    if (this.paginationProgress.totalOffsetsReady) {
+      return Task.newResult(true);
+    }
+    const totals = this.paginationProgress.totalOffsetsBySpine;
+    let i = 0;
+    const frame: Task.Frame<boolean> = Task.newFrame("collectTotalOffsets");
+    frame
+      .loopWithFrame((loopFrame) => {
+        if (i === this.opf.spine.length) {
+          loopFrame.breakLoop();
+          return;
+        }
+        const spineIndex = i++;
+        if (totals[spineIndex] != null) {
+          loopFrame.continueLoop();
+          return;
+        }
+        const item = this.opf.spine[spineIndex];
+        this.opf.store.load(item.src).then((xmldoc) => {
+          if (xmldoc) {
+            totals[spineIndex] = xmldoc.getTotalOffset();
+          }
+          loopFrame.continueLoop();
+        });
+      })
+      .then(() => {
+        this.paginationProgress.totalOffsetsReady = true;
+        frame.finish(true);
+      });
+    return frame.result();
+  }
+
   private getTotalOffsetAll(): number {
     let total = 0;
-    for (const item of this.spineItems) {
-      if (item) {
-        total += this.getTotalOffsetForViewItem(item);
+    for (const totalOffset of this.paginationProgress.totalOffsetsBySpine) {
+      if (totalOffset) {
+        total += totalOffset;
       }
     }
     return total;
@@ -1767,9 +1920,18 @@ export class OPFView implements Vgen.CustomRendererFactory {
       this.paginationProgress.lastReportedPages = pages;
     }
 
+    let href = viewItem.item.src;
+    if (spineIndex >= (this.paginationProgress.lastReportedSpineIndex ?? -1)) {
+      this.paginationProgress.lastReportedSpineIndex = spineIndex;
+      this.paginationProgress.lastReportedHref = href;
+    } else {
+      href = this.paginationProgress.lastReportedHref ?? href;
+    }
+
     const payload = {
       fraction,
       pages: this.paginationProgress.lastReportedPages,
+      href,
     };
     for (const hook of hooks) {
       try {
@@ -1954,12 +2116,17 @@ export class OPFView implements Vgen.CustomRendererFactory {
     viewItem.layoutPositions[nextLayoutPosition.page] = nextLayoutPosition;
     const nextPage = viewItem.pages[nextLayoutPosition.page];
     const offsetChanged = !!oldPage && renderedPage.offset !== oldPage.offset;
+    const hasActivePageFloatState =
+      viewItem.instance.hasActiveRootPageFloatLayoutContext();
+    // Even if the source layout position is unchanged, active root page-float
+    // state can still change following pages through deferred continuations.
     const positionChanged =
       !previousLayoutPosition ||
       !nextLayoutPosition.isSamePosition(previousLayoutPosition) ||
       nextLayoutPosition.highestSeenOffset !==
         previousLayoutPosition.highestSeenOffset ||
-      offsetChanged;
+      offsetChanged ||
+      hasActivePageFloatState;
     const inCounterResolveScope = this.isInCounterResolveScope();
     const relayoutDecision = this.evaluateNextPageRelayout(
       oldPage,
@@ -2056,9 +2223,15 @@ export class OPFView implements Vgen.CustomRendererFactory {
           const hasRenderedTargetPage = !!targetViewItem.pages[refs.pageIndex];
           const shouldIsolateRootPageFloatLayoutContext =
             hasRenderedTargetPage && hasRenderedFollowingPage;
+          const previousPageFloatLayoutContext =
+            shouldIsolateRootPageFloatLayoutContext && refs.pageIndex > 0
+              ? targetViewItem.pages[refs.pageIndex - 1]?.pageFloatLayoutContext
+              : null;
           const originalRootPageFloatLayoutContext =
             shouldIsolateRootPageFloatLayoutContext
-              ? targetViewItem.instance.beginIsolatedRootPageFloatLayoutContext()
+              ? targetViewItem.instance.beginIsolatedRootPageFloatLayoutContext(
+                  previousPageFloatLayoutContext,
+                )
               : null;
 
           this.counterStore.pushPageCounters(refs.pageCounters);
@@ -2240,7 +2413,6 @@ export class OPFView implements Vgen.CustomRendererFactory {
           !nextLayoutPosition &&
           viewItem.item.spineIndex === this.opf.spine.length - 1;
         if (currentPage.isLastPage) {
-          Asserts.assert(this.viewport);
           this.counterStore.finishLastPage(this.viewport);
         }
         currentPage.container.setAttribute(
@@ -2263,7 +2435,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
    */
   private renderSinglePage(
     viewItem: OPFViewItem,
-    pos: Vtree.LayoutPosition,
+    pos: Vtree.LayoutPosition | null,
   ): Task.Result<RenderSinglePageResult> {
     const frame: Task.Frame<RenderSinglePageResult> =
       Task.newFrame("renderSinglePage");
@@ -2303,32 +2475,40 @@ export class OPFView implements Vgen.CustomRendererFactory {
     );
 
     viewItem.instance.layoutNextPage(page, pos).then((posParam) => {
-      pos = posParam as Vtree.LayoutPosition;
+      pos = posParam;
       const pageIndex = pos
         ? pos.page - 1
         : viewItem.layoutPositions.length - 1;
       this.finishPageContainer(viewItem, page, pageIndex);
       this.counterStore.finishPage(page.spineIndex, pageIndex);
-      this.reportPaginationProgress(viewItem, pos);
 
-      // If the position of the page break changed, re-layout the following
-      // page when needed.
-      this.maybeRelayoutFollowingPage(viewItem, pos, oldPage, page)
-        .thenAsync(() =>
-          this.resolveUnresolvedReferencesForPage(
-            viewItem,
-            page,
-            pageIndex,
-            pos,
-          ),
-        )
-        .then((resolvedPage) => {
-          restorePageNumberContext();
-          frame.finish({
-            pageAndPosition: makePageAndPosition(resolvedPage, pageIndex),
-            nextLayoutPosition: pos,
+      const collectResult = Plugin.getHooksForName(
+        Plugin.HOOKS.PAGINATION_PROGRESS,
+      ).length
+        ? this.collectTotalOffsets()
+        : Task.newResult(true);
+      collectResult.then(() => {
+        this.reportPaginationProgress(viewItem, pos);
+
+        // If the position of the page break changed, re-layout the following
+        // page when needed.
+        this.maybeRelayoutFollowingPage(viewItem, pos, oldPage, page)
+          .thenAsync(() =>
+            this.resolveUnresolvedReferencesForPage(
+              viewItem,
+              page,
+              pageIndex,
+              pos,
+            ),
+          )
+          .then((resolvedPage) => {
+            restorePageNumberContext();
+            frame.finish({
+              pageAndPosition: makePageAndPosition(resolvedPage, pageIndex),
+              nextLayoutPosition: pos,
+            });
           });
-        });
+      });
     });
     return frame.result();
   }
@@ -2336,7 +2516,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
   private normalizeSeekPosition(
     position: Position,
     viewItem: OPFViewItem,
-  ): Position | null {
+  ): Position {
     let pageIndex = position.pageIndex;
     let seekOffset = -1;
     if (pageIndex < 0) {
@@ -2397,7 +2577,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
           frame.finish(null);
           return;
         }
-        let resultPage: Vtree.Page = null;
+        let resultPage: Vtree.Page | null = null;
         let pageIndex: number;
         frame
           .loopWithFrame((loopFrame) => {
@@ -2420,6 +2600,13 @@ export class OPFView implements Vgen.CustomRendererFactory {
                   pageIndex = result.position.pageIndex;
                 }
                 loopFrame.breakLoop();
+              });
+            } else if (this.isRenderingPageInAnotherTask()) {
+              // A background task is already materializing pages. Wait for
+              // the requested page to appear instead of rendering the same
+              // shared StyleInstance and CounterStore concurrently (Issue #2047).
+              frame.sleep(100).then(() => {
+                loopFrame.continueLoop();
               });
             } else if (
               pageIndex < viewItem.layoutPositions.length &&
@@ -2457,8 +2644,62 @@ export class OPFView implements Vgen.CustomRendererFactory {
    * Renders a page at the specified position.
    */
   renderPage(position: Position): Task.Result<PageAndPosition | null> {
+    const currentTask = Task.currentTask();
+    this.beginRenderingPage(currentTask);
+    let renderingEnded = false;
+    const endRendering = (): void => {
+      if (!renderingEnded) {
+        renderingEnded = true;
+        this.endRenderingPage(currentTask);
+      }
+    };
+    return Task.handle(
+      "renderPage",
+      (frame) => {
+        this.renderPageTracked(position).then((result) => {
+          endRendering();
+          frame.finish(result);
+        });
+      },
+      (frame, err) => {
+        endRendering();
+        frame.task.raise(err, frame.parent);
+      },
+    );
+  }
+
+  // Track renderPage tasks so navigation can wait only until its requested
+  // page is available, without canceling background pagination (Issue #2047).
+  private renderingPageTasks = new Map<Task.Task | null, number>();
+
+  private beginRenderingPage(task: Task.Task | null): void {
+    this.renderingPageTasks.set(
+      task,
+      (this.renderingPageTasks.get(task) || 0) + 1,
+    );
+  }
+
+  private endRenderingPage(task: Task.Task | null): void {
+    const depth = this.renderingPageTasks.get(task);
+    if (depth === 1) {
+      this.renderingPageTasks.delete(task);
+    } else if (depth) {
+      this.renderingPageTasks.set(task, depth - 1);
+    }
+  }
+
+  private isRenderingPageInAnotherTask(): boolean {
+    const currentTask = Task.currentTask();
+    return Array.from(this.renderingPageTasks.keys()).some(
+      (task) => task !== currentTask,
+    );
+  }
+
+  private renderPageTracked(
+    position: Position,
+  ): Task.Result<PageAndPosition | null> {
     const frame: Task.Frame<PageAndPosition | null> =
-      Task.newFrame("renderPage");
+      Task.newFrame("renderPageTracked");
     this.getPageViewItem(position.spineIndex).then((viewItem) => {
       if (!viewItem) {
         frame.finish(null);
@@ -2589,7 +2830,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
       s = spineIndex;
     }
 
-    let lastResult: PageAndPosition;
+    let lastResult: PageAndPosition | null = null;
     frame
       .loopWithFrame((loopFrame) => {
         const pos = {
@@ -2734,7 +2975,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
     }
     const frame: Task.Frame<Vtree.Spread> = Task.newFrame("getSpread");
     const isLeft = page.side === Constants.PageSide.LEFT;
-    let other: Task.Result<PageAndPosition>;
+    let other: Task.Result<PageAndPosition | null>;
     if (this.isRectoPage(page, position)) {
       other = this.previousPage(position, sync);
     } else {
@@ -2988,7 +3229,10 @@ export class OPFView implements Vgen.CustomRendererFactory {
     return frame.result();
   }
 
-  makePage(viewItem: OPFViewItem, pos: Vtree.LayoutPosition): Vtree.Page {
+  makePage(
+    viewItem: OPFViewItem,
+    pos: Vtree.LayoutPosition | null,
+  ): Vtree.Page {
     const viewport = viewItem.instance.viewport;
     const pageCont = viewport.document.createElement("div");
     pageCont.setAttribute("data-vivliostyle-page-container", "true");
@@ -3025,7 +3269,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
         viewport.height,
       );
       const cssMatrix = CssParser.parseValue(
-        null,
+        viewItem.instance.style.rootScope,
         new CssTokenizer.Tokenizer(matrix, null),
         "",
       );
@@ -3041,7 +3285,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
     srcElem: Element,
     viewParent: Element,
     computedStyle: { [key: string]: Css.Val },
-  ): Task.Result<Element> {
+  ): Task.Result<Element | null> {
     let data = srcElem.getAttribute("data");
     let result: Element | null = null;
     if (data) {
@@ -3069,7 +3313,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
           sb.append(srcParam);
           sb.append("&type=");
           sb.append(typeParam);
-          for (let c: Node = srcElem.firstChild; c; c = c.nextSibling) {
+          for (let c: Node | null = srcElem.firstChild; c; c = c.nextSibling) {
             if (c.nodeType == 1) {
               const ce = c as Element;
               if (ce.localName == "param" && ce.namespaceURI == Base.NS.XHTML) {
@@ -3113,7 +3357,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
     srcElem: Element,
     viewParent: Element,
     computedStyle: { [key: string]: Css.Val },
-  ): Task.Result<Element> {
+  ): Task.Result<Element | null> {
     // See if MathJax installed, use it if it is.
     const hub = getMathJaxHub();
     if (hub) {
@@ -3132,7 +3376,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
       });
       return frame.result();
     }
-    return Task.newResult(null as Element);
+    return Task.newResult<Element | null>(null);
   }
 
   private resolveURLsInMathML(node: Node, xmldoc: XmlDoc.XMLDocHolder) {
@@ -3171,7 +3415,7 @@ export class OPFView implements Vgen.CustomRendererFactory {
       srcElem: Element,
       viewParent: Element,
       computedStyle: { [key: string]: Css.Val },
-    ): Task.Result<Element> => {
+    ): Task.Result<Element | null> => {
       if (
         srcElem.localName == "object" &&
         srcElem.namespaceURI == Base.NS.XHTML
@@ -3185,13 +3429,13 @@ export class OPFView implements Vgen.CustomRendererFactory {
       ) {
         return this.makeMathJaxView(xmldoc, srcElem, viewParent, computedStyle);
       }
-      return Task.newResult(null as Element);
+      return Task.newResult<Element | null>(null);
     };
   }
 
-  getPageViewItem(spineIndex: number): Task.Result<OPFViewItem> {
+  getPageViewItem(spineIndex: number): Task.Result<OPFViewItem | null> {
     if (spineIndex === -1 || spineIndex >= this.opf.spine.length) {
-      return Task.newResult(null as OPFViewItem);
+      return Task.newResult<OPFViewItem | null>(null);
     }
     let viewItem = this.spineItems[spineIndex];
     if (viewItem) {
@@ -3316,7 +3560,12 @@ export class OPFView implements Vgen.CustomRendererFactory {
         }
       }
       this.counterStore.forceSetPageCounter(pageCounterOffset);
-      const instance = new OPS.StyleInstance(
+      // For env(pub-title) and env(doc-title)
+      const pubTitles = this.opf.metadata && this.opf.metadata[metaTerms.title];
+      const pubTitle = (pubTitles && pubTitles[0] && pubTitles[0]["v"]) || "";
+      const docTitle = item.title || "";
+
+      OPS.StyleInstance.create(
         style,
         xmldoc,
         this.opf.lang,
@@ -3329,18 +3578,12 @@ export class OPFView implements Vgen.CustomRendererFactory {
         this.opf.documentURLTransformer,
         this.counterStore,
         this.cmykStore,
+        this.pref,
+        pubTitle,
+        docTitle,
         this.opf.pageProgression,
         isVersoFirstPage,
-      );
-      instance.pref = this.pref;
-
-      // For env(pub-title) and env(doc-title)
-      const pubTitles = this.opf.metadata && this.opf.metadata[metaTerms.title];
-      instance.pubTitle =
-        (pubTitles && pubTitles[0] && pubTitles[0]["v"]) || "";
-      instance.docTitle = item.title || "";
-
-      instance.init().then(() => {
+      ).then((instance) => {
         if (!this.opf.pageProgression && instance.pageProgression) {
           // Use the first instance's page progression as the global page progression.
           // (Fix for issue #1260)
@@ -3398,12 +3641,12 @@ export class OPFView implements Vgen.CustomRendererFactory {
     return this.spineItems.some((item) => item && item.pages.length > 0);
   }
 
-  showTOC(autohide: boolean): Task.Result<Vtree.Page> {
+  showTOC(autohide: boolean): Task.Result<Vtree.Page | null> {
     const opf = this.opf;
     const toc = opf.toc;
     this.tocAutohide = autohide;
     if (!toc) {
-      return Task.newResult(null as Vtree.Page);
+      return Task.newResult<Vtree.Page | null>(null);
     }
     this.tocVisible = true;
     if (this.tocView && this.tocView.page) {
@@ -3473,5 +3716,5 @@ export class OPFView implements Vgen.CustomRendererFactory {
 
 export interface RenderSinglePageResult {
   pageAndPosition: PageAndPosition;
-  nextLayoutPosition: Vtree.LayoutPosition;
+  nextLayoutPosition: Vtree.LayoutPosition | null;
 }

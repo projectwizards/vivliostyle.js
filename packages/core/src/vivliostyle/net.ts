@@ -29,7 +29,6 @@ import { UserAgentXml } from "./assets";
  * @enum {string}
  */
 export enum FetchResponseType {
-  DEFAULT = "",
   ARRAYBUFFER = "arraybuffer",
   BLOB = "blob",
   DOCUMENT = "document",
@@ -66,10 +65,9 @@ export function fetchFromURL(
       response.status = res.status;
       response.url = res.url;
       response.statusText = res.statusText;
-      response.contentType = res.headers
-        .get("Content-Type")
-        ?.replace(/;.*$/, "")
-        .toLowerCase();
+      response.contentType =
+        res.headers.get("Content-Type")?.replace(/;.*$/, "").toLowerCase() ??
+        null;
 
       if (!res.ok) {
         throw new Error(
@@ -157,10 +155,6 @@ export function readBlob(blob: Blob): Task.Result<ArrayBuffer> {
   return frame.result();
 }
 
-export function revokeObjectURL(url: string): void {
-  URL.revokeObjectURL(url);
-}
-
 /**
  * @return url
  */
@@ -172,14 +166,14 @@ export function createObjectURL(blob: Blob): string {
  * @template Resource
  */
 export class ResourceStore<Resource> implements Net.ResourceStore<Resource> {
-  resources: { [key: string]: Resource } = {};
-  fetchers: { [key: string]: TaskUtil.Fetcher<Resource> } = {};
+  resources: { [key: string]: Resource | null } = {};
+  fetchers: { [key: string]: TaskUtil.Fetcher<Resource | null> } = {};
 
   constructor(
     public readonly parser: (
       p1: FetchResponse,
       p2: ResourceStore<Resource>,
-    ) => Task.Result<Resource>,
+    ) => Task.Result<Resource | null>,
     public readonly type: FetchResponseType,
   ) {}
 
@@ -190,7 +184,7 @@ export class ResourceStore<Resource> implements Net.ResourceStore<Resource> {
     url: string,
     opt_required?: boolean,
     opt_message?: string,
-  ): Task.Result<Resource> {
+  ): Task.Result<Resource | null> {
     url = Base.stripFragment(url);
     const resource = this.resources[url];
     if (typeof resource != "undefined") {
@@ -203,13 +197,13 @@ export class ResourceStore<Resource> implements Net.ResourceStore<Resource> {
     url: string,
     opt_required?: boolean,
     opt_message?: string,
-  ): Task.Result<Resource> {
-    const frame: Task.Frame<Resource> = Task.newFrame("fetch");
+  ): Task.Result<Resource | null> {
+    const frame: Task.Frame<Resource | null> = Task.newFrame("fetch");
 
     // Hack for TOCView.showTOC()
-    const isTocBox = url.endsWith("?viv-toc-box");
+    const isTocBox = Base.isTocBoxURL(url);
     if (isTocBox) {
-      url = url.replace("?viv-toc-box", "");
+      url = Base.stripTocBoxURL(url);
     }
     const userAgentXmlUrl = Base.resolveURL(
       "user-agent.xml",
@@ -234,8 +228,8 @@ export class ResourceStore<Resource> implements Net.ResourceStore<Resource> {
       }
       if (isTocBox) {
         // Hack for TOCView.showTOC()
-        url += "?viv-toc-box";
-        response.url += "?viv-toc-box";
+        url = Base.toTocBoxURL(url);
+        response.url = Base.toTocBoxURL(response.url);
       } else if (isUserAgentXml) {
         // Restore "user-agent.xml" URL
         response.url = url = userAgentXmlUrl;
@@ -256,7 +250,7 @@ export class ResourceStore<Resource> implements Net.ResourceStore<Resource> {
     url: string,
     opt_required?: boolean,
     opt_message?: string,
-  ): TaskUtil.Fetcher<Resource> {
+  ): TaskUtil.Fetcher<Resource | null> | null {
     url = Base.stripFragment(url);
     const resource = this.resources[url];
     if (resource) {
@@ -304,7 +298,7 @@ export function newJSONStore(): JSONStore {
 export function loadElement(
   elem: Element,
   src?: string,
-  alt?: string,
+  alt?: string | null,
 ): TaskUtil.Fetcher<string> {
   const fetcher = new TaskUtil.Fetcher(
     () => {

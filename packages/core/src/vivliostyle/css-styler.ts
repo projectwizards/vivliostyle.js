@@ -19,7 +19,6 @@
  * @fileoverview CssStyler - Apply CSS cascade to a document incrementally and
  * cache the result.
  */
-import * as Asserts from "./asserts";
 import * as Base from "./base";
 import * as Break from "./break";
 import * as CmykStore from "./cmyk-store";
@@ -31,6 +30,7 @@ import * as CssProp from "./css-prop";
 import * as CssValidator from "./css-validator";
 import * as Display from "./display";
 import * as Exprs from "./exprs";
+import * as LayoutProcessor from "./layout-processor";
 import * as Vtree from "./vtree";
 import { CssStyler, XmlDoc } from "./types";
 
@@ -51,14 +51,6 @@ export class SlipRange {
  */
 export class SlipMap {
   map = [] as SlipRange[];
-
-  getMaxFixed(): number {
-    if (this.map.length == 0) {
-      return 0;
-    }
-    const range = this.map[this.map.length - 1];
-    return range.endFixed;
-  }
 
   getMaxSlipped(): number {
     if (this.map.length == 0) {
@@ -159,9 +151,9 @@ export class Box {
   flowName: string;
   isBlockValue: boolean | null = null;
   hasBoxValue: boolean | null = null;
-  styleValues = {} as { [key: string]: Css.Val };
-  beforeBox: Box = null;
-  afterBox: Box = null;
+  styleValues = {} as { [key: string]: Css.Val | null };
+  beforeBox: Box | null = null;
+  afterBox: Box | null = null;
   breakBefore: string | null = null;
 
   constructor(
@@ -465,19 +457,42 @@ export class BoxStack {
   }
 }
 
+export class StyleStore implements CssCascade.StyleReader {
+  private readonly map: { [key: string]: CssCascade.ElementStyle } = {};
+
+  constructor(private readonly xmldoc: XmlDoc.XMLDocHolder) {}
+
+  setAt(offset: number, style: CssCascade.ElementStyle): void {
+    this.map[`e${offset}`] = style;
+  }
+
+  styleOf(element: Element): CssCascade.ElementStyle {
+    return this.map[`e${this.xmldoc.getElementOffset(element)}`];
+  }
+}
+
 export class Styler implements AbstractStyler {
-  root: Element;
-  cascadeHolder: CssCascade.Cascade;
-  last: Node;
+  root: Base.ChildElement;
+  last: Base.RootBoundCursor | null;
   rootStyle = {} as CssCascade.ElementStyle;
-  styleMap: { [key: string]: CssCascade.ElementStyle } = {};
+  /**
+   * writing-mode and direction values propagated from the body element to
+   * the root element. Per CSS Writing Modes spec, this propagation is done
+   * on used values rather than computed values, so these values must not be
+   * inherited by the page context. (Issue #1122)
+   */
+  bodyPropagatedStyle = {} as CssCascade.ElementStyle;
+  styles: StyleStore;
   counterSnapshots: CounterSnapshot[] = [];
   flows = {} as { [key: string]: Vtree.Flow };
   flowChunks = [] as Vtree.FlowChunk[];
-  flowListener: FlowListener = null;
+  flowListener: FlowListener | null = null;
   flowToReach: string | null = null;
   idToReach: string | null = null;
   cascade: CssCascade.CascadeInstance;
+  // the last element the cascade opened, kept across pops: vgen reads it when
+  // it re-evaluates generated content
+  elementWindow: CssCascade.ElementCascadeInstance;
   offsetMap: SlipMap;
   primary: boolean = true;
   primaryStack = [] as boolean[];
@@ -499,17 +514,22 @@ export class Styler implements AbstractStyler {
     counterResolver: CssCascade.CounterResolver,
     counterStyleStore: CounterStyle.CounterStyleStore,
     cmykStore: CmykStore.CmykStore,
+    mergeValidatorSet: CssValidator.ValidatorSet | null,
   ) {
     this.root = xmldoc.root;
-    this.cascadeHolder = cascade;
-    this.last = this.root;
+    this.styles = new StyleStore(xmldoc);
+    this.last = Base.RootBoundCursor.atRoot(this.root);
     this.cascade = cascade.createInstance(
       context,
       counterListener,
       counterResolver,
-      xmldoc.lang,
       counterStyleStore,
       cmykStore,
+      this.root,
+      scope,
+      validatorSet,
+      this.styles,
+      mergeValidatorSet,
     );
     this.offsetMap = new SlipMap();
     const rootOffset = xmldoc.getElementOffset(this.root);
@@ -517,7 +537,7 @@ export class Styler implements AbstractStyler {
     this.boxStack = new BoxStack(context);
     this.offsetMap.addStuckRange(rootOffset);
     const style = this.getAttrStyle(this.root);
-    this.cascade.pushElement(this, this.root, style, rootOffset);
+    this.elementWindow = this.cascade.pushElement(this.root, style, rootOffset);
     this.recordCounterSnapshot(
       rootOffset,
       this.cascade.counters,
@@ -525,14 +545,14 @@ export class Styler implements AbstractStyler {
       this.cascade.lastCounterChangeTypes,
     );
     this.postprocessTopStyle(style, false);
+    this.determineRootSizes(style);
     switch (this.root.namespaceURI) {
       case Base.NS.XHTML:
         this.bodyReached = false;
         break;
     }
     this.primaryStack.push(true);
-    this.styleMap = {};
-    this.styleMap[`e${rootOffset}`] = style;
+    this.styles.setAt(rootOffset, style);
     this.lastOffset++;
     this.replayFlowElementsFromOffset(-1);
   }
@@ -578,9 +598,12 @@ export class Styler implements AbstractStyler {
   ): void {
     if (isBody) {
       for (const propName of ["writing-mode", "direction"]) {
-        if (elemStyle[propName] && !(isBody && this.rootStyle[propName])) {
-          // Copy it over, but keep it at the root element as well.
+        if (elemStyle[propName] && !this.rootStyle[propName]) {
+          // Copy it over, but keep it at the body element as well.
           this.rootStyle[propName] = elemStyle[propName];
+          // Record the value propagated from the body element so that it
+          // can be excluded from the page context inheritance. (Issue #1122)
+          this.bodyPropagatedStyle[propName] = elemStyle[propName];
         }
       }
     } else {
@@ -599,7 +622,7 @@ export class Styler implements AbstractStyler {
         ? (elemStyle["background-color"] as CssCascade.CascadeValue).evaluate(
             this.context,
           )
-        : (null as Css.Val);
+        : null;
       const backgroundImage = this.hasProp(
         elemStyle,
         this.validatorSet.backgroundProps,
@@ -608,12 +631,27 @@ export class Styler implements AbstractStyler {
         ? (elemStyle["background-image"] as CssCascade.CascadeValue).evaluate(
             this.context,
           )
-        : (null as Css.Val);
+        : null;
       if (
         (backgroundColor && !Css.isDefaultingValue(backgroundColor)) ||
         (backgroundImage && !Css.isDefaultingValue(backgroundImage))
       ) {
         this.transferPropsToRoot(elemStyle, this.validatorSet.backgroundProps);
+        // background-position-x/-y are not part of the `background` shorthand
+        // grammar, so they are absent from backgroundProps. Move them only when
+        // the source style actually has them: transferPropsToRoot assigns a
+        // default for every property of the map, and a default axis value here
+        // would override the background-position moved just above.
+        for (const pname of [
+          "background-position-x",
+          "background-position-y",
+        ]) {
+          const cascval = elemStyle[pname];
+          if (cascval) {
+            this.rootStyle[pname] = cascval;
+            delete elemStyle[pname];
+          }
+        }
         this.rootBackgroundAssigned = true;
       }
     }
@@ -628,75 +666,91 @@ export class Styler implements AbstractStyler {
         }
       }
     }
-    if (!isBody) {
-      // root element
-      const fontSize = elemStyle["font-size"] as CssCascade.CascadeValue;
-      let isRelativeFontSize = true;
-      if (fontSize && !Css.isDefaultingValue(fontSize.value)) {
-        const val = fontSize.evaluate(this.context);
-        if (val instanceof Css.Numeric) {
-          let px = val.num;
-          switch (val.unit) {
-            case "em":
-            case "rem":
-              px *= this.context.initialFontSize;
-              break;
-            case "%":
-              px *= this.context.initialFontSize / 100;
-              break;
-            case "lh":
-            case "rlh":
-              px *=
-                (this.context.initialFontSize * Exprs.defaultUnitSizes["lh"]) /
-                Exprs.defaultUnitSizes["em"];
-              break;
-            default: {
-              const unitSize = Exprs.defaultUnitSizes[val.unit];
-              if (unitSize) {
-                px *= unitSize;
-              }
-              isRelativeFontSize = false;
+  }
+
+  private determineRootSizes(elemStyle: CssCascade.ElementStyle): void {
+    const fontSize = elemStyle["font-size"] as CssCascade.CascadeValue;
+    let isRelativeFontSize = true;
+    if (fontSize && !Css.isDefaultingValue(fontSize.value)) {
+      const evaluated = fontSize.evaluate(this.context);
+      const val = this.resolveRootSizingCalc(evaluated);
+      const fromRelativeCalc =
+        evaluated instanceof Css.Func && val instanceof Css.Numeric;
+      if (val instanceof Css.Numeric) {
+        let px = val.num;
+        switch (val.unit) {
+          case "em":
+          case "rem":
+            px *= this.context.initialFontSize;
+            break;
+          case "%":
+            px *= this.context.initialFontSize / 100;
+            break;
+          case "lh":
+          case "rlh":
+            px *= this.context.rootLineHeight;
+            break;
+          default: {
+            const unitSize = Exprs.defaultUnitSizes[val.unit];
+            if (unitSize) {
+              px *= unitSize;
             }
+            isRelativeFontSize = fromRelativeCalc;
           }
-          this.context.rootFontSize = px;
-          this.context.isRelativeRootFontSize = isRelativeFontSize;
         }
-      }
-      const rootFontSize =
-        this.context.rootFontSize ?? this.context.initialFontSize;
-      const lineHeight = elemStyle["line-height"] as CssCascade.CascadeValue;
-      if (lineHeight && !Css.isDefaultingValue(lineHeight.value)) {
-        const val = lineHeight.evaluate(this.context);
-        if (val instanceof Css.Num) {
-          this.context.rootLineHeight = val.num * rootFontSize;
-        } else if (val instanceof Css.Numeric) {
-          let px = val.num;
-          switch (val.unit) {
-            case "em":
-            case "rem":
-              px *= rootFontSize;
-              break;
-            case "%":
-              px *= rootFontSize / 100;
-              break;
-            case "lh":
-            case "rlh":
-              px *= this.context.initialFontSize * this.context.pref.lineHeight;
-              break;
-            default: {
-              const unitSize = Exprs.defaultUnitSizes[val.unit];
-              if (unitSize) {
-                px *= unitSize;
-              }
-            }
-          }
-          this.context.rootLineHeight = px;
-        }
-      } else {
-        this.context.rootLineHeight =
-          this.context.fontSize() * this.context.pref.lineHeight;
+        this.context.rootFontSize = px;
+        this.context.isRelativeRootFontSize = isRelativeFontSize;
       }
     }
+    const rootFontSize =
+      this.context.rootFontSize ?? this.context.initialFontSize;
+    const lineHeight = elemStyle["line-height"] as CssCascade.CascadeValue;
+    let rootLineHeight: number | null = null;
+    let fromRelativeCalc = false;
+    if (lineHeight && !Css.isDefaultingValue(lineHeight.value)) {
+      const evaluated = lineHeight.evaluate(this.context);
+      const val = this.resolveRootSizingCalc(evaluated);
+      fromRelativeCalc =
+        evaluated instanceof Css.Func && val instanceof Css.Numeric;
+      if (val instanceof Css.Num) {
+        rootLineHeight = val.num * rootFontSize;
+      } else if (val instanceof Css.Numeric) {
+        let px = val.num;
+        switch (val.unit) {
+          case "em":
+          case "rem":
+            px *= rootFontSize;
+            break;
+          case "%":
+            px *= rootFontSize / 100;
+            break;
+          case "lh":
+          case "rlh":
+            px *= this.context.rootLineHeight;
+            break;
+          default: {
+            const unitSize = Exprs.defaultUnitSizes[val.unit];
+            if (unitSize) {
+              px *= unitSize;
+            }
+          }
+        }
+        rootLineHeight = px;
+      }
+    }
+    this.context.rootLineHeight =
+      rootLineHeight ?? this.context.fontSize() * this.context.pref.lineHeight;
+    this.context.isRootLineHeightFromRelativeCalc = fromRelativeCalc;
+  }
+
+  private resolveRootSizingCalc(val: Css.Val): Css.Val {
+    if (!(val instanceof Css.Func)) {
+      return val;
+    }
+    // filtering visitors always return a value
+    return val.visit(
+      new CssCascade.RootSizingCalcFilterVisitor(this.context),
+    ) as Css.Val;
   }
 
   getTopContainerStyle(): CssCascade.ElementStyle {
@@ -786,7 +840,6 @@ export class Styler implements AbstractStyler {
     const rootOffset = this.xmldoc.getElementOffset(this.root);
     if (offset < rootOffset) {
       const rootStyle = this.getStyle(this.root, false);
-      Asserts.assert(rootStyle);
       if (!this.cascade.firstPageType) {
         const rootPageCV = rootStyle["page"] as CssCascade.CascadeValue;
         const rootPageType =
@@ -839,7 +892,7 @@ export class Styler implements AbstractStyler {
       if (nodeOffset >= this.lastOffset) {
         break;
       }
-      let next: Node = node.firstChild;
+      let next: Node | null = node.firstChild;
       if (next == null) {
         while (true) {
           next = node.nextSibling;
@@ -936,7 +989,11 @@ export class Styler implements AbstractStyler {
     let flow = this.flows[flowName];
     if (!flow) {
       const parentFlowName = this.boxStack.lastFlowName();
-      flow = this.flows[flowName] = new Vtree.Flow(flowName, parentFlowName);
+      flow = this.flows[flowName] = new Vtree.Flow(
+        flowName,
+        parentFlowName,
+        new LayoutProcessor.BlockFormattingContext(null),
+      );
     }
     const flowChunk = new Vtree.FlowChunk(
       flowName,
@@ -1001,11 +1058,11 @@ export class Styler implements AbstractStyler {
     }
     const context = this.context;
     while (this.last) {
-      let next: Node = this.last.firstChild;
+      let next = this.last.firstChild;
       if (next == null) {
         while (this.last) {
-          if (this.last.nodeType == 1) {
-            this.cascade.popElement(this.last as Element);
+          if (this.last.node.nodeType == 1) {
+            this.cascade.popElement(this.last.node as Element);
             this.primary = this.primaryStack.pop();
             const box = this.boxStack.pop(this.lastOffset);
             let breakAfter: string | null = null;
@@ -1035,9 +1092,8 @@ export class Styler implements AbstractStyler {
           if (next) {
             break;
           }
-          this.last = this.last.parentNode;
-          if (!this.last || this.last === this.root) {
-            this.last = null;
+          this.last = this.last.parent;
+          if (!this.last) {
             if (startOffset < this.lastOffset) {
               if (targetSlippedOffset < 0) {
                 slippedOffset = this.offsetMap.slippedByFixed(startOffset);
@@ -1052,20 +1108,25 @@ export class Styler implements AbstractStyler {
           }
         }
       }
-      this.last = next;
-      if (this.last.nodeType != 1) {
-        this.lastOffset += this.last.textContent.length;
-        this.boxStack.encounteredTextNode(this.last);
+      const cursor = next;
+      this.last = cursor;
+      if (cursor.node.nodeType != 1) {
+        this.lastOffset += cursor.node.textContent.length;
+        this.boxStack.encounteredTextNode(cursor.node);
         if (this.primary) {
           this.offsetMap.addStuckRange(this.lastOffset);
         } else {
           this.offsetMap.addSlippedRange(this.lastOffset);
         }
       } else {
-        const elem = this.last as Element;
+        const elem = cursor.node as Base.ChildElement;
         const style = this.getAttrStyle(elem);
         this.primaryStack.push(this.primary);
-        this.cascade.pushElement(this, elem, style, this.lastOffset);
+        this.elementWindow = this.cascade.pushElement(
+          elem,
+          style,
+          this.lastOffset,
+        );
         if (this.cascade.lastCounterChanges.length > 0) {
           this.recordCounterSnapshot(
             this.lastOffset,
@@ -1154,12 +1215,12 @@ export class Styler implements AbstractStyler {
           }
         }
         if (VIVLIOSTYLE_DEBUG) {
-          const offset = this.xmldoc.getElementOffset(this.last as Element);
+          const offset = this.xmldoc.getElementOffset(elem);
           if (offset != this.lastOffset) {
             throw new Error("Inconsistent offset");
           }
         }
-        this.styleMap[`e${this.lastOffset}`] = style;
+        this.styles.setAt(this.lastOffset, style);
         this.lastOffset++;
         if (this.primary) {
           this.offsetMap.addStuckRange(this.lastOffset);
@@ -1189,14 +1250,13 @@ export class Styler implements AbstractStyler {
   /** @override */
   getStyle(element: Element, deep: boolean): CssCascade.ElementStyle {
     let offset = this.xmldoc.getElementOffset(element);
-    const key = `e${offset}`;
     if (deep) {
       offset = this.xmldoc.getNodeOffset(element, 0, true);
     }
     if (this.lastOffset <= offset) {
       this.styleUntil(offset, 0);
     }
-    return this.styleMap[key];
+    return this.styles.styleOf(element);
   }
 
   /** @override */

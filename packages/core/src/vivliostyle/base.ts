@@ -48,10 +48,6 @@ export let emptyObj = {};
 
 export type JSON = any;
 
-export function jsonToString(json: JSON): string {
-  return JSON.stringify(json);
-}
-
 export function stringToJSON(str: string): JSON {
   return JSON.parse(str);
 }
@@ -70,6 +66,20 @@ export function stripFragmentAndQuery(url: string): string {
     return r[1];
   }
   return url;
+}
+
+export const TOC_BOX_QUERY_SUFFIX = "?viv-toc-box";
+
+export function isTocBoxURL(url: string): boolean {
+  return url.endsWith(TOC_BOX_QUERY_SUFFIX);
+}
+
+export function stripTocBoxURL(url: string): string {
+  return isTocBoxURL(url) ? url.slice(0, -TOC_BOX_QUERY_SUFFIX.length) : url;
+}
+
+export function toTocBoxURL(url: string): string {
+  return isTocBoxURL(url) ? url : stripFragment(url) + TOC_BOX_QUERY_SUFFIX;
 }
 
 /**
@@ -129,7 +139,7 @@ export function resolveURL(relURL: string, baseURL: string): string {
   if (baseURL.match(/^\w{2,}:\/\/[^\/]+$/)) {
     baseURL = `${baseURL}/`;
   }
-  let r: string[];
+  let r: string[] | null;
   if (relURL.match(/^\/\//)) {
     r = baseURL.match(/^(\w{2,}:)\/\//);
     if (r) {
@@ -210,7 +220,7 @@ export function convertAboutBlankURL(url: string): string {
  * @return converted URL
  */
 export function convertSpecialURL(url: string): string {
-  let r: RegExpMatchArray;
+  let r: RegExpMatchArray | null;
 
   if ((url = convertAboutBlankURL(url)) !== url) {
     // already converted
@@ -301,41 +311,6 @@ export enum NS {
   DC = "http://purl.org/dc/elements/1.1/",
 }
 
-/**
- * @param name parameter name
- * @param opt_url URL; window.location.href is used if not provided
- * @return parameter value
- */
-export function getURLParam(name: string, opt_url?: string): string | null {
-  const rg = new RegExp(`#(.*&)?${escapeRegExp(name)}=([^#&]*)`);
-  const url = opt_url || window.location.href;
-  const r = url.match(rg);
-  if (r) {
-    return r[2];
-  }
-  return null;
-}
-
-/**
- * @param name parameter name
- * @param value parameter value
- * @return new url
- */
-export function setURLParam(url: string, name: string, value: string): string {
-  const rg = new RegExp(`#(.*&)?${escapeRegExp(name)}=([^#&]*)`);
-  const r = url.match(rg);
-  if (r) {
-    const length = r[2].length;
-    const index = r.index + r[0].length - length;
-    return url.substr(0, index) + value + url.substr(index + length);
-  }
-  if (!url.match(/#/)) {
-    return `${url}#${name}=${value}`;
-  } else {
-    return `${url}&${name}=${value}`;
-  }
-}
-
 export function asString(v: any): string | null {
   if (v == null) {
     return v;
@@ -354,7 +329,7 @@ export interface Comparable {
  * A priority queue.
  */
 export class PriorityQueue {
-  queue: Comparable[] = [null];
+  queue: (Comparable | null)[] = [null];
 
   length(): number {
     return this.queue.length - 1;
@@ -425,7 +400,7 @@ export class PriorityQueue {
 
 export const knownPrefixes = ["", "-webkit-", "-moz-"];
 
-export const propNameMap: { [key: string]: string[] } = {};
+export const propNameMap: { [key: string]: string[] | null } = {};
 
 export function checkIfPropertySupported(
   prefix: string,
@@ -521,11 +496,83 @@ export function getCSSProperty(
     return (elem as HTMLElement).style.getPropertyValue(
       propertyNames ? propertyNames[0] : prop,
     );
-  } catch (err) {}
+  } catch {}
   return opt_value || "";
 }
 
-export function getLangAttribute(element: Element): string {
+/**
+ * A node reached from another one, which therefore has a parent. lib.dom
+ * declares `parentNode` only on `Node`, where it is nullable. The name avoids
+ * lib.dom's `ChildNode`, a mixin that says nothing about the parent.
+ */
+export interface ChildDomNode extends Node {
+  readonly parentNode: ParentNode;
+}
+
+export interface ChildElement extends Element {
+  readonly parentNode: ParentNode;
+}
+
+export function documentElementOf(doc: Document): ChildElement {
+  // the document element is the element child of the document
+  return doc.documentElement as ChildElement;
+}
+
+export function nextElementSiblingOf(element: Element): ChildElement | null {
+  // a sibling exists only under a parent the two share
+  return element.nextElementSibling as ChildElement | null;
+}
+
+export function previousElementSiblingOf(
+  element: Element,
+): ChildElement | null {
+  // a sibling exists only under a parent the two share
+  return element.previousElementSibling as ChildElement | null;
+}
+
+/**
+ * A position reached from the root the cursor was opened at. Moving never goes
+ * above the root's own parent, which is what makes every position the cursor
+ * yields a node with a parent.
+ */
+export class RootBoundCursor {
+  private constructor(
+    private readonly root: ChildElement,
+    readonly node: ChildDomNode,
+  ) {}
+
+  static atRoot(root: ChildElement): RootBoundCursor {
+    return new RootBoundCursor(root, root);
+  }
+
+  private moveTo(node: Node | null): RootBoundCursor | null {
+    return node === null
+      ? null
+      : new RootBoundCursor(this.root, node as ChildDomNode);
+  }
+
+  get firstChild(): RootBoundCursor | null {
+    return this.moveTo(this.node.firstChild);
+  }
+
+  get nextSibling(): RootBoundCursor | null {
+    return this.moveTo(this.node.nextSibling);
+  }
+
+  get parent(): RootBoundCursor | null {
+    if (this.node === this.root) {
+      return null;
+    }
+    const parent = this.node.parentNode;
+    // the root alone does not bound the walk: a sibling move can leave its
+    // subtree
+    return parent === this.root || parent === this.root.parentNode
+      ? null
+      : this.moveTo(parent);
+  }
+}
+
+export function getLangAttribute(element: Element): string | null {
   let lang = element.getAttributeNS(NS.XML, "lang");
   if (!lang && element.namespaceURI == NS.XHTML) {
     lang = element.getAttribute("lang");
@@ -715,14 +762,6 @@ export function mapObj<P, R>(
   return res;
 }
 
-export function mapSize(obj: object): number {
-  let n = 0;
-  for (const key in obj) {
-    n++;
-  }
-  return n;
-}
-
 export type Event = {
   type: string;
   target?;
@@ -789,7 +828,6 @@ export class SimpleEventTarget {
     }
   }
 }
-export type EventTarget = SimpleEventTarget;
 
 export const mediaTags = {
   audio: true,

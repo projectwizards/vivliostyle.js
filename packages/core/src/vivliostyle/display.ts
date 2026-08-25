@@ -66,7 +66,9 @@ export function blockify(display: Css.Ident): Css.Ident {
 /**
  * Judge if the generated box is absolutely positioned.
  */
-export function isAbsolutelyPositioned(position: Css.Val): boolean {
+export function isAbsolutelyPositioned(
+  position: Css.Val | null | undefined,
+): boolean {
   return position === Css.ident.absolute || position === Css.ident.fixed;
 }
 
@@ -74,7 +76,7 @@ export function isAbsolutelyPositioned(position: Css.Val): boolean {
  * Check if the position value is 'running()'.
  * https://drafts.csswg.org/css-gcpm/#running-elements
  */
-export function isRunning(position: Css.Val): boolean {
+export function isRunning(position: Css.Val | null | undefined): boolean {
   return position instanceof Css.Func && position.name === "running";
 }
 
@@ -119,7 +121,7 @@ export function isBlock(
 }
 
 function isDisplayType(
-  display: Css.Val | string | undefined,
+  display: Css.Val | string | null | undefined,
 ): display is Css.Ident | Css.SpaceList | string {
   return (
     display instanceof Css.Ident ||
@@ -128,7 +130,9 @@ function isDisplayType(
   );
 }
 
-export function isInlineLevel(display: Css.Val | string | undefined): boolean {
+export function isInlineLevel(
+  display: Css.Val | string | null | undefined,
+): boolean {
   if (!isDisplayType(display)) {
     return false;
   }
@@ -150,7 +154,9 @@ export function isInlineLevel(display: Css.Val | string | undefined): boolean {
 /**
  * Check if the display value includes "list-item", like "inline list-item".
  */
-export function isListItem(display: Css.Val | string | undefined): boolean {
+export function isListItem(
+  display: Css.Val | string | null | undefined,
+): boolean {
   if (!isDisplayType(display)) {
     return false;
   }
@@ -176,7 +182,7 @@ export function isBlockLevel(display: Css.Val | string | undefined): boolean {
 }
 
 export function isRubyInternalDisplay(
-  display: Css.Val | string | undefined,
+  display: Css.Val | string | null | undefined,
 ): boolean {
   if (!isDisplayType(display)) {
     return false;
@@ -196,10 +202,10 @@ export function isRubyInternalDisplay(
  * Judges if the generated box establishes a new block formatting context.
  */
 export function establishesBFC(
-  display: Css.Val,
-  position: Css.Ident,
-  float: Css.Val,
-  overflow: Css.Ident,
+  display: Css.Val | null | undefined,
+  position: Css.Ident | null | undefined,
+  float: Css.Val | null | undefined,
+  overflow: Css.Ident | null | undefined,
   writingMode?: Css.Ident,
   parentWritingMode?: Css.Ident,
   isFlowRoot?: boolean,

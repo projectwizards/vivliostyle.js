@@ -17,7 +17,6 @@
  * @fileoverview LayoutProcessor - Definitions of LayoutProcessor.
  */
 import * as BreakPosition from "./break-position";
-import * as Display from "./display";
 import * as LayoutHelper from "./layout-helper";
 import * as Plugin from "./plugin";
 import * as Task from "./task";
@@ -35,7 +34,7 @@ export interface LayoutProcessor {
     nodeContext: Vtree.NodeContext,
     column: Layout.Column,
     leadingEdge: boolean,
-  ): Task.Result<Vtree.NodeContext>;
+  ): Task.Result<Vtree.NodeContext | null>;
 
   /**
    * Potential edge breaking position.
@@ -74,7 +73,7 @@ export interface LayoutProcessor {
 
   clearOverflownViewNodes(
     column: Layout.Column,
-    parentNodeContext: Vtree.NodeContext,
+    parentNodeContext: Vtree.NodeContext | null,
     nodeContext: Vtree.NodeContext,
     removeSelf: boolean,
   );
@@ -109,9 +108,10 @@ export class BlockLayoutProcessor implements LayoutProcessor {
     nodeContext: Vtree.NodeContext,
     column: Layout.Column,
     leadingEdge: boolean,
-  ): Task.Result<Vtree.NodeContext> {
-    if (column.isFloatNodeContext(nodeContext)) {
-      return column.layoutFloatOrFootnote(nodeContext);
+  ): Task.Result<Vtree.NodeContext | null> {
+    const floatNodeContext = column.asFloatNodeContext(nodeContext);
+    if (floatNodeContext) {
+      return column.layoutFloatOrFootnote(floatNodeContext);
     } else if (column.isBreakable(nodeContext)) {
       return column.layoutBreakableBlock(nodeContext);
     } else {
@@ -150,7 +150,7 @@ export class BlockLayoutProcessor implements LayoutProcessor {
   /** @override */
   clearOverflownViewNodes(
     column: Layout.Column,
-    parentNodeContext: Vtree.NodeContext,
+    parentNodeContext: Vtree.NodeContext | null,
     nodeContext: Vtree.NodeContext,
     removeSelf: boolean,
   ) {
@@ -168,14 +168,11 @@ export class BlockLayoutProcessor implements LayoutProcessor {
       return;
     }
     let node = nodeContext.viewNode;
-    if (node.parentElement?.localName === "viv-ts-inner") {
-      // special element for text-spacing
-      node = node.parentElement.parentElement;
-    }
+    node = LayoutHelper.textSpacingWrapperOf(node) ?? node;
     const parentNode = node.parentNode;
     LayoutHelper.removeFollowingSiblings(parentNode, node);
     if (removeSelf) {
-      parentNode.removeChild(node);
+      node.remove();
     }
   }
 
@@ -207,7 +204,7 @@ export class BlockFormattingContext
 {
   formattingContextType: FormattingContextType = "Block";
 
-  constructor(private readonly parent: Vtree.FormattingContext) {}
+  constructor(private readonly parent: Vtree.FormattingContext | null) {}
 
   /** @override */
   getName(): string {
@@ -220,7 +217,7 @@ export class BlockFormattingContext
   }
 
   /** @override */
-  getParent(): Vtree.FormattingContext {
+  getParent(): Vtree.FormattingContext | null {
     return this.parent;
   }
 
@@ -236,30 +233,15 @@ export const blockLayoutProcessor = new BlockLayoutProcessor();
 export const isInstanceOfBlockFormattingContext =
   LayoutProcessor.isInstanceOfBlockFormattingContext;
 
-Plugin.registerHook(
-  Plugin.HOOKS.RESOLVE_FORMATTING_CONTEXT,
-  (nodeContext, firstTime, display, position, floatSide, isRoot) => {
-    const parent = nodeContext.parent;
-    if (!parent && nodeContext.formattingContext) {
-      return null;
-    } else if (
-      parent &&
-      nodeContext.formattingContext !== parent.formattingContext
-    ) {
-      return null;
-    } else if (
-      nodeContext.establishesBFC ||
-      (!nodeContext.formattingContext &&
-        Display.isBlock(display, position, floatSide, isRoot))
-    ) {
-      return new BlockFormattingContext(
-        parent ? parent.formattingContext : null,
-      );
-    } else {
-      return null;
-    }
-  },
-);
+Plugin.registerHook(Plugin.HOOKS.RESOLVE_FORMATTING_CONTEXT, (nodeContext) => {
+  const parent = nodeContext.parent;
+  if (!parent || nodeContext.formattingContext !== parent.formattingContext) {
+    return null;
+  }
+  return nodeContext.establishesBFC
+    ? new BlockFormattingContext(parent.formattingContext)
+    : null;
+});
 
 Plugin.registerHook(
   Plugin.HOOKS.RESOLVE_LAYOUT_PROCESSOR,

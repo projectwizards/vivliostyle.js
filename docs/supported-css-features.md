@@ -6,7 +6,9 @@ In addition, essentially all CSS properties and values supported by the browser 
 
 ## Values
 
-- [CSS-wide keywords](https://www.w3.org/TR/css-values/#common-keywords): `initial`, `inherit`, `unset`, `revert`
+- [CSS-wide keywords](https://www.w3.org/TR/css-values/#common-keywords): `initial`, `inherit`, `unset`, `revert`, `revert-layer`, `revert-rule`
+  - As the [explicit defaulting keywords](https://www.w3.org/TR/css-cascade-5/#defaulting-keywords) that roll the cascade back, `revert` rolls back to the previous cascade origin, `revert-layer` to the layers before the current one, and `revert-rule` to the cascade without the current rule
+  - They also work in `@page` rules and page-margin boxes, with `all`, with custom properties, and written as a `var()` fallback. See [PR #2119](https://github.com/vivliostyle/vivliostyle.js/pull/2119), [PR #2123](https://github.com/vivliostyle/vivliostyle.js/pull/2123)
 - [Length units](https://www.w3.org/TR/css-values/#lengths): `em`, `ex`, `ch`, `rem`, `lh`, `rlh`, `vw`, `vh`, `vmin, vmax`, `vi`, `vb`, `cm`, `mm`, `q`, `in`, `pc`, `pt`, `px`.
 - Sizing keywords: [min-content](https://www.w3.org/TR/css-sizing-3/#valdef-width-min-content), [max-content](https://www.w3.org/TR/css-sizing-3/#valdef-width-max-content), [fit-content](https://www.w3.org/TR/css-sizing-4/#valdef-width-fit-content)
 - Color values
@@ -20,8 +22,9 @@ In addition, essentially all CSS properties and values supported by the browser 
   - [CMYK Colors: `device-cmyk()`](https://www.w3.org/TR/css-color-5/#the-device-cmyk-notation)
     - Converted to `color(srgb ...)` internally for browser rendering. Enables CMYK output via post-processing with Vivliostyle CLI. See [PR #1627](https://github.com/vivliostyle/vivliostyle.js/pull/1627)
 - [Attribute references: `attr()`](https://www.w3.org/TR/css-values/#attr-notation)
-  - Only supported in values of `content` property.
-  - Only 'string' and 'url' types are supported.
+  - Supported in property values, including the `content` property.
+  - Supports `string`, `raw-string`, `url`, `number`, and unit types, as well as `type(<...>)` syntax for supported CSS value types. See [PR #1975](https://github.com/vivliostyle/vivliostyle.js/pull/1975)
+  - Type and unit values are validated against the property where `attr()` is used.
 - [Cross references: `target-counter()`, `target-counters()` and `target-text()`](https://www.w3.org/TR/css-content-3/#cross-references)
   - Only supported in values of `content` property.
 - [`string()` function (Named Strings)](https://www.w3.org/TR/css-content-3/#string-function)
@@ -96,6 +99,14 @@ In addition, essentially all CSS properties and values supported by the browser 
 - [`:nth-child(An+B of S)` pseudo-class](https://www.w3.org/TR/selectors-4/#nth-child-pseudo)
 - [`:nth-last-child(An+B of S)` pseudo-class](https://www.w3.org/TR/selectors-4/#nth-last-child-pseudo)
 
+### [CSS Nesting 1](https://www.w3.org/TR/css-nesting-1/)
+
+See [PR #1889](https://github.com/vivliostyle/vivliostyle.js/pull/1889).
+
+- Nested style rules, including implicit descendant nesting and the `&` nesting selector
+- Nested [`@media`](https://www.w3.org/TR/css-conditional-3/#at-media), [`@supports`](https://www.w3.org/TR/css-conditional-3/#at-supports), [`@layer`](https://www.w3.org/TR/css-cascade-5/#layering), and `@-epubx-when` rules. See also [PR #2109](https://github.com/vivliostyle/vivliostyle.js/pull/2109)
+- Only at-rules already supported by Vivliostyle are supported when nested
+
 ### [CSS Overflow 4](https://www.w3.org/TR/css-overflow-4/)
 
 - [`:nth-fragment()` pseudo-element](https://www.w3.org/TR/css-overflow-4/#fragment-pseudo-element)
@@ -109,6 +120,7 @@ In addition, essentially all CSS properties and values supported by the browser 
 - [`::footnote-call` pseudo-element](https://www.w3.org/TR/css-gcpm-3/#the-footnote-call)
 - [`::footnote-marker` pseudo-element](https://www.w3.org/TR/css-gcpm-3/#the-footnote-marker)
   - Supports [`list-style-position: outside`](https://www.w3.org/TR/css-gcpm-3/#footnote-marker-property) for placing the marker outside the footnote body. See [PR #1706](https://github.com/vivliostyle/vivliostyle.js/pull/1706)
+  - Both pseudo-elements are also supported for semantic footnotes identified by `role="doc-noteref"` / `role="doc-footnote"` or `epub:type="noteref"` / `epub:type="footnote"`. See [PR #1887](https://github.com/vivliostyle/vivliostyle.js/pull/1887)
 
 #### Not supported selectors
 
@@ -124,6 +136,12 @@ In addition, essentially all CSS properties and values supported by the browser 
 - [@charset](https://www.w3.org/TR/CSS2/syndata.html#charset)
 - [@import](https://www.w3.org/TR/CSS2/cascade.html#at-import)
   - [Also in CSS Cascading and Inheritance 3](https://www.w3.org/TR/css-cascade-3/#at-import)
+
+### [CSS Cascading and Inheritance 5](https://www.w3.org/TR/css-cascade-5/)
+
+- [@layer](https://www.w3.org/TR/css-cascade-5/#layering)
+  - Both the block form (`@layer name { … }`, `@layer { … }`) and the statement form (`@layer a, b;`) are supported, as well as `@import … layer` / `@import … layer(name)`.
+  - The [`revert-layer` keyword](https://www.w3.org/TR/css-cascade-5/#valdef-all-revert-layer) is supported. See also [Values](#values)
 
 ### [CSS Namespaces 3](https://www.w3.org/TR/css3-namespace/)
 
@@ -333,8 +351,10 @@ See also: [At-rules in CSS Paged Media 3](#css-paged-media-3)
 - [position: running() (Running Elements)](https://www.w3.org/TR/css-gcpm-3/#running-elements)
 - [footnote-display](https://www.w3.org/TR/css-gcpm-3/#propdef-footnote-display)
   - Supports [`block`, `inline`, `compact`](https://www.w3.org/TR/css-gcpm-3/#propdef-footnote-display) values.
+  - Also applies to semantic footnotes. See [PR #1887](https://github.com/vivliostyle/vivliostyle.js/pull/1887)
 - [footnote-policy](https://www.w3.org/TR/css-gcpm-3/#propdef-footnote-policy)
   - Supports [`auto`, `line`](https://www.w3.org/TR/css-gcpm-3/#propdef-footnote-policy) values.
+  - Also applies to semantic footnotes. See [PR #1887](https://github.com/vivliostyle/vivliostyle.js/pull/1887)
 
 See also:
 

@@ -22,6 +22,7 @@ import * as Base from "./base";
 import * as CmykStore from "./cmyk-store";
 import * as Constants from "./constants";
 import * as Epub from "./epub";
+import * as OPS from "./ops";
 import * as Profile from "./profile";
 import * as Toc from "./toc";
 import { ErrorInfo } from "./logging";
@@ -38,6 +39,8 @@ export interface Payload {
   epageCount: number;
   metadata: unknown;
   docTitle: string;
+  fraction: number;
+  pages: number;
 }
 
 const PageProgression = Constants.PageProgression;
@@ -170,13 +173,14 @@ export class CoreViewer {
   private adaptViewer_: AdaptiveViewer.AdaptiveViewer;
   private options: CoreViewerOptions;
   private eventTarget: Base.SimpleEventTarget;
-  readyState: Constants.ReadyState;
+  // installed via Object.defineProperty in the constructor
+  declare readyState: Constants.ReadyState;
 
   constructor(
     private readonly settings: CoreViewerSettings,
     opt_options?: CoreViewerOptions,
   ) {
-    Constants.setDebug(settings.debug);
+    Constants.setDebug(!!settings.debug);
     this.adaptViewer_ = new AdaptiveViewer.AdaptiveViewer(
       settings["window"] || window,
       settings["viewportElement"],
@@ -226,6 +230,9 @@ export class CoreViewer {
    * @param listener Listener function.
    */
   addListener(type: string, listener: (payload: Payload) => void) {
+    if (type === "paginationprogress") {
+      this.adaptViewer_.ensurePaginationProgressListener();
+    }
     this.eventTarget.addEventListener(
       type,
       listener as Base.EventListener,
@@ -244,6 +251,12 @@ export class CoreViewer {
       listener as Base.EventListener,
       false,
     );
+    if (
+      type === "paginationprogress" &&
+      !this.eventTarget.listeners[type]?.length
+    ) {
+      this.adaptViewer_.removePaginationProgressListener();
+    }
   }
 
   /**
@@ -305,18 +318,27 @@ export class CoreViewer {
    */
   private loadDocumentOrPublication(
     singleDocumentOptions:
-      | SingleDocumentOptions
-      | SingleDocumentOptions[]
-      | null,
+      SingleDocumentOptions | SingleDocumentOptions[] | null,
     pubUrl: string | null,
     opt_documentOptions?: DocumentOptions,
     opt_viewerOptions?: CoreViewerOptions,
   ) {
     const documentOptions = opt_documentOptions || {};
 
-    function convertStyleSheetArray(arr) {
+    function convertStyleSheetArray(
+      arr?: { url?: string; text?: string }[],
+    ): OPS.StyleSheetParam[] | undefined {
       if (arr) {
-        return arr.map((s) => ({ url: s.url || null, text: s.text || null }));
+        return arr.flatMap((s): OPS.StyleSheetParam[] => {
+          const url = s.url || null;
+          const text = s.text || null;
+          // An entry with neither url nor text names no style sheet to read.
+          return text !== null
+            ? [{ url, text }]
+            : url !== null
+              ? [{ url }]
+              : [];
+        });
       } else {
         return undefined;
       }
@@ -461,7 +483,7 @@ export class CoreViewer {
    * been shown, or the empty array if there is no TOC.
    */
   getTOC(): Toc.TOCItem[] {
-    return this.adaptViewer_.opfView?.tocView?.getTOC();
+    return this.adaptViewer_.opfView?.tocView?.getTOC() ?? [];
   }
 
   /**
@@ -512,7 +534,7 @@ export class CoreViewer {
 }
 
 function convertSingleDocumentOptions(
-  singleDocumentOptions: SingleDocumentOptions | SingleDocumentOptions[],
+  singleDocumentOptions: SingleDocumentOptions | SingleDocumentOptions[] | null,
 ): AdaptiveViewer.SingleDocumentParam[] | null {
   function toNumberOrNull(num: any): number | null {
     return typeof num === "number" ? num : null;

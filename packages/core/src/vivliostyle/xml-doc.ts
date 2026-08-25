@@ -29,24 +29,24 @@ export type XMLDocStore = XmlDoc.XMLDocStore;
 export class XMLDocHolder implements XmlDoc.XMLDocHolder {
   lang: string | null = null;
   totalOffset: number = -1;
-  root: Element;
+  root: Base.ChildElement;
   body: Element;
   head: Element;
   last: Element;
   lastOffset: number = 1;
-  idMap: { [key: string]: Element };
+  idMap: { [key: string]: Element } | null = null;
 
   constructor(
-    public readonly store: XMLDocStore,
+    public readonly store: XMLDocStore | null,
     public readonly url: string,
     public readonly document: Document,
   ) {
-    this.root = document.documentElement; // html element
-    let body: Element = null;
-    let head: Element = null;
+    this.root = Base.documentElementOf(document); // html element
+    let body: Element | null = null;
+    let head: Element | null = null;
     if (this.root.namespaceURI == Base.NS.XHTML) {
       for (
-        let child: Node = this.root.firstChild;
+        let child: Node | null = this.root.firstChild;
         child;
         child = child.nextSibling
       ) {
@@ -168,7 +168,7 @@ export class XMLDocHolder implements XmlDoc.XMLDocHolder {
     // First, find the last element in the document, such that
     // this.getElementOffset(element) <= offset; if offest matches
     // exactly, just return it.
-    let element = this.root;
+    let element: Element = this.root;
     while (true) {
       elementOffset = this.getElementOffset(element);
       if (elementOffset >= offset) {
@@ -249,11 +249,17 @@ export class XMLDocHolder implements XmlDoc.XMLDocHolder {
    */
   getElement(url: string): Element | null {
     const m = url.match(/([^#]*)#(.+)$/);
-    if (!m || (m[1] && m[1] != this.url)) {
+    if (!m) {
+      return null;
+    }
+    // Issue #2036: a transformed TOC link can restore to the spine source URL
+    // while this document was loaded under a redirected alias. Accept either
+    // form as long as the store resolves both URLs to this same XMLDocHolder.
+    if (m[1] && m[1] != this.url && this.store?.get(m[1]) !== this) {
       return null;
     }
     const id = m[2];
-    let r: Element = this.document.getElementById(id);
+    let r: Element | null = this.document.getElementById(id);
     if (!r && this.document.getElementsByName) {
       r = this.document.getElementsByName(id)[0];
     }
@@ -290,24 +296,25 @@ export function parseAndReturnNullIfError(
   opt_parser?: DOMParser,
 ): Document | null {
   const parser = opt_parser || new DOMParser();
-  let doc: Document;
+  let doc: Document | undefined;
   try {
     doc = parser.parseFromString(str, type as DOMParserSupportedType);
-  } catch (e) {}
+  } catch {}
   if (!doc) {
     return null;
-  } else {
-    const docElement = doc.documentElement;
-    const errorTagName = "parsererror";
-    if (docElement.localName === errorTagName) {
-      return null;
-    } else {
-      for (let c = docElement.firstElementChild; c; c = c.nextElementSibling) {
-        if (c.localName === errorTagName) {
-          return null;
-        }
-      }
-    }
+  }
+  // XML parsing errors are reported as a "parsererror" element in the result
+  // document. It is not always a direct child of the documentElement: e.g.,
+  // when XML-parsing a lowercase "<!doctype html>" the parsererror element is
+  // nested inside <body>. Search the whole document so such parse errors are
+  // detected. HTML parsing never generates a "parsererror" element, so skip
+  // this check for text/html to avoid rejecting valid HTML that happens to
+  // contain a literal "<parsererror>" element. (Issue #2101)
+  if (
+    type !== DOMParserSupportedType.TEXT_HTML &&
+    doc.querySelector("parsererror")
+  ) {
+    return null;
   }
   return doc;
 }
@@ -353,8 +360,8 @@ export function resolveContentType(response: Net.FetchResponse): string | null {
 export function parseXMLResource(
   response: Net.FetchResponse,
   store: XMLDocStore,
-): Task.Result<XmlDoc.XMLDocHolder> {
-  let doc = response.responseXML;
+): Task.Result<XmlDoc.XMLDocHolder | null> {
+  let doc: Document | null = response.responseXML;
   if (!doc) {
     const parser = new DOMParser();
     const text = response.responseText;
@@ -404,7 +411,7 @@ export function parseXMLResource(
 }
 
 export function newXMLDocStore(): XMLDocStore {
-  return new Net.ResourceStore(
+  return new Net.ResourceStore<XmlDoc.XMLDocHolder>(
     parseXMLResource,
     Net.FetchResponseType.DOCUMENT,
   );
@@ -458,7 +465,7 @@ export class NodeList implements XmlDoc.NodeList {
    * Filter with predicate
    */
   predicate(pr: Predicate): NodeList {
-    const arr = [];
+    const arr: Node[] = [];
     for (const n of this.nodes) {
       if (pr.check(n)) {
         arr.push(n);
@@ -468,7 +475,7 @@ export class NodeList implements XmlDoc.NodeList {
   }
 
   forEachNode(fn: (p1: Node, p2: (p1: Node) => void) => void): NodeList {
-    const arr = [];
+    const arr: Node[] = [];
     const add = (n) => {
       arr.push(n);
     };
@@ -482,7 +489,7 @@ export class NodeList implements XmlDoc.NodeList {
    * @template T
    */
   forEach<T>(fn: (p1: Node) => T): T[] {
-    const arr = [];
+    const arr: T[] = [];
     for (let i = 0; i < this.nodes.length; i++) {
       arr.push(fn(this.nodes[i]));
     }
@@ -492,8 +499,8 @@ export class NodeList implements XmlDoc.NodeList {
   /**
    * @template T
    */
-  forEachNonNull<T>(fn: (p1: Node) => T): T[] {
-    const arr = [];
+  forEachNonNull<T>(fn: (p1: Node) => T | null): T[] {
+    const arr: T[] = [];
     for (let i = 0; i < this.nodes.length; i++) {
       const t = fn(this.nodes[i]);
       if (t != null) {
@@ -505,7 +512,7 @@ export class NodeList implements XmlDoc.NodeList {
 
   child(tag: string): NodeList {
     return this.forEachNode((node, add) => {
-      for (let c: Node = node.firstChild; c; c = c.nextSibling) {
+      for (let c: Node | null = node.firstChild; c; c = c.nextSibling) {
         if (c.nodeType == 1 && (c as Element).localName == tag) {
           add(c);
         }
@@ -515,7 +522,7 @@ export class NodeList implements XmlDoc.NodeList {
 
   childElements(): NodeList {
     return this.forEachNode((node, add) => {
-      for (let c: Node = node.firstChild; c; c = c.nextSibling) {
+      for (let c: Node | null = node.firstChild; c; c = c.nextSibling) {
         if (c.nodeType == 1) {
           add(c);
         }

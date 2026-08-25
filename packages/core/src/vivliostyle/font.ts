@@ -27,10 +27,6 @@ import * as Net from "./net";
 import * as Task from "./task";
 import * as TaskUtil from "./task-util";
 
-export const bogusFontData = `OTTO${new Date().valueOf()}`;
-
-export let bogusFontCounter: number = 1;
-
 function getFontTraitNames(properties: { [key: string]: Css.Val }): string[] {
   return Object.keys(properties)
     .filter((prop) => !["src", "font-family", "font-display"].includes(prop))
@@ -68,6 +64,12 @@ export class Face {
   blobs: Blob[] = [];
   family: string | null;
 
+  /**
+   * The `<style>` element carrying this face's `@font-face` rule in the view
+   * document. Only the view faces made by {@link Mapper.initFont} have one.
+   */
+  styleElement: HTMLStyleElement | null = null;
+
   constructor(public readonly properties: { [key: string]: Css.Val }) {
     this.fontTraitKey = makeFontTraitKey(this.properties);
     this.src = this.properties["src"]
@@ -78,16 +80,9 @@ export class Face {
   }
 
   /**
-   * Check if font traits are the same for two font faces
-   */
-  traitsEqual(other: Face): boolean {
-    return this.fontTraitKey == other.fontTraitKey;
-  }
-
-  /**
    * Create "at" font-face rule.
    */
-  makeAtRule(src: string, fontBytes: Blob): string {
+  makeAtRule(src: string, fontBytes: Blob | null): string {
     const sb = new Base.StringBuffer();
     sb.append("@font-face {\n  font-family: ");
     sb.append(this.family as string);
@@ -127,8 +122,7 @@ export class DocumentFaces {
 
   constructor(
     public readonly deobfuscator:
-      | ((p1: string) => ((p1: Blob) => Task.Result<Blob>) | null)
-      | null,
+      ((p1: string) => ((p1: Blob) => Task.Result<Blob>) | null) | null,
   ) {}
 
   registerFamily(srcFace: Face, viewFace: Face): void {
@@ -176,7 +170,7 @@ export class Mapper {
   /**
    * Maps Face.src to an entry for an already-loaded font.
    */
-  srcURLMap: { [key: string]: TaskUtil.Fetcher<Face> } = {};
+  srcURLMap: { [key: string]: TaskUtil.Fetcher<Face | null> } = {};
   familyPrefix: string;
   familyCounter: number = 0;
 
@@ -204,7 +198,7 @@ export class Mapper {
    */
   private initFont(
     srcFace: Face,
-    fontBytes: Blob,
+    fontBytes: Blob | null,
     documentFaces: DocumentFaces,
   ): Task.Result<Face> {
     const frame: Task.Frame<Face> = Task.newFrame("initFont");
@@ -219,6 +213,7 @@ export class Mapper {
     const style = this.head.ownerDocument.createElement("style");
     style.textContent = viewFontFace.makeAtRule(src, fontBytes);
     this.head.appendChild(style);
+    viewFontFace.styleElement = style;
     Logging.logger.debug("Load font:", src);
     frame.finish(viewFontFace);
     return frame.result();
@@ -227,7 +222,7 @@ export class Mapper {
   loadFont(
     srcFace: Face,
     documentFaces: DocumentFaces,
-  ): TaskUtil.Fetcher<Face> {
+  ): TaskUtil.Fetcher<Face | null> {
     const src = srcFace.src as string;
     const faceKey = srcFace.family + ";" + src + ";" + srcFace.fontTraitKey;
     let fetcher = this.srcURLMap[faceKey];
@@ -238,7 +233,7 @@ export class Mapper {
       });
     } else {
       fetcher = new TaskUtil.Fetcher(() => {
-        const frame: Task.Frame<Face> = Task.newFrame("loadFont");
+        const frame: Task.Frame<Face | null> = Task.newFrame("loadFont");
         // Get URL from `@font-face` src value.
         const url = src.replace(/^url\("([^"]+)"\).*$/, "$1");
         const deobfuscator = documentFaces.deobfuscator
@@ -271,7 +266,7 @@ export class Mapper {
     srcFaces: Face[],
     documentFaces: DocumentFaces,
   ): Task.Result<boolean> {
-    const fetchers = [] as TaskUtil.Fetcher<Face>[];
+    const fetchers = [] as TaskUtil.Fetcher<Face | null>[];
     for (const srcFace of srcFaces) {
       if (!srcFace.src || !srcFace.family) {
         Logging.logger.warn("E_FONT_FACE_INVALID");
@@ -279,9 +274,28 @@ export class Mapper {
       }
       fetchers.push(this.loadFont(srcFace, documentFaces));
     }
-    return TaskUtil.waitForFetchers(fetchers).thenAsync(() =>
-      this.waitFontLoading(),
-    );
+    return TaskUtil.waitForFetchers(fetchers).thenAsync(() => {
+      this.reorderFontFaceRules(fetchers);
+      return this.waitFontLoading();
+    });
+  }
+
+  /**
+   * Puts the `@font-face` rules of the view document back in the order of the
+   * rules they came from, which the cascade has already sorted. A font that
+   * needs deobfuscation is added when its fetch completes, so the order the
+   * rules were added in is not the order they were declared in, and the
+   * browser lets the last of the matching rules win.
+   */
+  private reorderFontFaceRules(
+    fetchers: TaskUtil.Fetcher<Face | null>[],
+  ): void {
+    for (const fetcher of fetchers) {
+      const styleElement = fetcher.resource?.styleElement;
+      if (styleElement?.parentNode === this.head) {
+        this.head.appendChild(styleElement); // moves it to the end
+      }
+    }
   }
 
   waitFontLoading(): Task.Result<boolean> {

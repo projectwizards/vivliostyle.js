@@ -132,7 +132,7 @@ export type CustomRenderer = (
   p1: Element,
   p2: Element,
   p3: { [key: string]: Css.Val },
-) => Task.Result<Element>;
+) => Task.Result<Element | null>;
 
 export interface CustomRendererFactory {
   makeCustomRenderer(xmldoc: XmlDoc.XMLDocHolder): CustomRenderer;
@@ -146,7 +146,8 @@ export function initIFrame(iframe: HTMLIFrameElement): void {
   iframe.addEventListener(
     "load",
     () => {
-      iframe.contentWindow.navigator["epubReadingSystem"] = {
+      // the load event fires only when the iframe has a browsing context
+      iframe.contentWindow!.navigator["epubReadingSystem"] = {
         name: "adapt",
         version: "0.1",
         layoutStyle: "paginated",
@@ -199,14 +200,14 @@ export class ViewFactory
 
   // computed
   // TODO: only set it on NodeContext
-  viewNode: Node | null = null;
+  viewNode: Element | Text | null = null;
 
   constructor(
     public readonly flowName: string,
     public readonly context: Exprs.Context,
     public readonly viewport: Viewport,
     public readonly styler: CssStyler.Styler,
-    public readonly regionIds: string[],
+    public readonly regionIds: string[] | null,
     public readonly xmldoc: XmlDoc.XMLDocHolder,
     public readonly docFaces: Font.DocumentFaces,
     public readonly footnoteStyle: CssCascade.ElementStyle,
@@ -216,10 +217,10 @@ export class ViewFactory
     public readonly fallbackMap: { [key: string]: string },
     public readonly documentURLTransformer: Base.DocumentURLTransformer,
     public readonly pageProps?: { [key: string]: CssCascade.ElementStyle },
-    public readonly cascadedPageStyle?: CssCascade.ElementStyle,
+    public readonly cascadedPageStyle?: CssCascade.ElementStyle | null,
     private readonly semanticFootnoteFirstRefOffsets: Map<
       string,
-      number | null
+      number
     > = new Map(),
     private readonly semanticFootnoteFirstRefOffsetsInitialized: {
       value: boolean;
@@ -412,20 +413,21 @@ export class ViewFactory
   }
 
   createPseudoelementShadow(
+    nodeContext: Vtree.NodeContext,
     element: Element,
     isRoot: boolean,
     cascStyle: CssCascade.ElementStyle,
     computedStyle: { [key: string]: Css.Val },
     styler: CssStyler.AbstractStyler,
     context: Exprs.Context,
-    parentShadow: Vtree.ShadowContext,
-    subShadow: Vtree.ShadowContext,
-  ): Vtree.ShadowContext {
+    parentShadow: Vtree.ShadowContext | null,
+    subShadow: Vtree.ShadowContext | null,
+  ): Vtree.ShadowContext | null {
     const pseudoMap = this.getPseudoMap(
       cascStyle,
       this.regionIds,
       this.isFootnote,
-      this.nodeContext,
+      nodeContext,
       context,
     );
     if (!pseudoMap) {
@@ -551,11 +553,11 @@ export class ViewFactory
 
   getPseudoMap(
     cascStyle: CssCascade.ElementStyle,
-    regionIds: string[],
+    regionIds: string[] | null,
     isFootnote: boolean,
     nodeContext: Vtree.NodeContext,
     context: Exprs.Context,
-  ): CssCascade.ElementStyleMap {
+  ): CssCascade.ElementStyleMap | null {
     const pseudoMap = CssCascade.getStyleMap(cascStyle, "_pseudos");
     if (!pseudoMap) {
       return null;
@@ -596,10 +598,10 @@ export class ViewFactory
     href: string,
     type: Vtree.ShadowType,
     element: Element,
-    parentShadow: Vtree.ShadowContext,
-    subShadow: Vtree.ShadowContext,
-  ): Task.Result<Vtree.ShadowContext> {
-    const frame: Task.Frame<Vtree.ShadowContext> =
+    parentShadow: Vtree.ShadowContext | null,
+    subShadow: Vtree.ShadowContext | null,
+  ): Task.Result<Vtree.ShadowContext | null> {
+    const frame: Task.Frame<Vtree.ShadowContext | null> =
       Task.newFrame("createRefShadow");
     this.xmldoc.store.load(href).then((refDocParam) => {
       const refDoc = refDocParam;
@@ -624,19 +626,20 @@ export class ViewFactory
   }
 
   createShadows(
+    nodeContext: Vtree.NodeContext,
     element: Element,
-    isRoot,
+    isRoot: boolean,
     cascStyle: CssCascade.ElementStyle,
     computedStyle: { [key: string]: Css.Val },
     styler: CssStyler.AbstractStyler,
     context: Exprs.Context,
-    shadowContext: Vtree.ShadowContext,
-  ): Task.Result<Vtree.ShadowContext> {
-    const frame: Task.Frame<Vtree.ShadowContext> =
+    shadowContext: Vtree.ShadowContext | null,
+  ): Task.Result<Vtree.ShadowContext | null> {
+    const frame: Task.Frame<Vtree.ShadowContext | null> =
       Task.newFrame("createShadows");
-    const shadow: Vtree.ShadowContext = null;
+    const shadow: Vtree.ShadowContext | null = null;
     const templateURLVal = computedStyle["template"];
-    let cont: Task.Result<Vtree.ShadowContext>;
+    let cont: Task.Result<Vtree.ShadowContext | null>;
     if (
       templateURLVal instanceof Css.URL ||
       templateURLVal === Css.ident.footnote
@@ -669,22 +672,20 @@ export class ViewFactory
       cont = Task.newResult(shadow);
     }
     cont.then((shadow) => {
-      let cont1: Task.Result<Vtree.ShadowContext> = null;
+      let cont1: Task.Result<Vtree.ShadowContext | null> | null = null;
       if (element.namespaceURI == Base.NS.SHADOW) {
         if (element.localName == "include") {
           let href = element.getAttribute("href");
-          let xmldoc: XmlDoc.XMLDocHolder = null;
+          let xmldoc: XmlDoc.XMLDocHolder = this.xmldoc;
           if (href) {
-            xmldoc = shadowContext ? shadowContext.xmldoc : this.xmldoc;
+            xmldoc = shadowContext?.xmldoc ?? this.xmldoc;
           } else if (shadowContext) {
             if (shadowContext.owner.namespaceURI == Base.NS.XHTML) {
               href = shadowContext.owner.getAttribute("href");
             } else {
               href = shadowContext.owner.getAttributeNS(Base.NS.XLINK, "href");
             }
-            xmldoc = shadowContext.parentShadow
-              ? shadowContext.parentShadow.xmldoc
-              : this.xmldoc;
+            xmldoc = shadowContext.parentShadow?.xmldoc ?? this.xmldoc;
           }
           if (href) {
             href = Base.resolveReferenceURL(href, xmldoc.url);
@@ -701,7 +702,7 @@ export class ViewFactory
       if (cont1 == null) {
         cont1 = Task.newResult(shadow);
       }
-      let cont2: Task.Result<Vtree.ShadowContext> = null;
+      let cont2: Task.Result<Vtree.ShadowContext | null> | null = null;
       cont1.then((shadow) => {
         if (computedStyle["display"] === Css.ident.table_cell) {
           const url = Base.resolveURL(
@@ -720,6 +721,7 @@ export class ViewFactory
         }
         cont2.then((shadow) => {
           shadow = this.createPseudoelementShadow(
+            nodeContext,
             element,
             isRoot,
             cascStyle,
@@ -757,24 +759,61 @@ export class ViewFactory
       context,
       this.regionIds,
       this.isFootnote,
-      this.nodeContext,
     );
     const isRoot = !this.nodeContext?.parent;
     if (isRoot) {
-      // Ensure that writing-mode and direction are set on the root element.
-      if (!cascMap["writing-mode"] && this.styler.rootStyle["writing-mode"]) {
-        cascMap["writing-mode"] = this.styler.rootStyle[
-          "writing-mode"
-        ] as CssCascade.CascadeValue;
+      // Ensure that writing-mode and direction are set on the root element,
+      // except when the values are propagated from the body element. That
+      // propagation is done on used values rather than computed values
+      // (CSS Writing Modes spec), so it must not affect the root element's
+      // computed style; otherwise the values would be inherited by the page
+      // context (e.g., page margin boxes). (Issue #1122)
+      const rootWritingMode = this.styler.rootStyle[
+        "writing-mode"
+      ] as CssCascade.CascadeValue;
+      if (
+        !cascMap["writing-mode"] &&
+        rootWritingMode &&
+        this.styler.bodyPropagatedStyle["writing-mode"] !== rootWritingMode
+      ) {
+        cascMap["writing-mode"] = rootWritingMode;
       }
-      if (!cascMap["direction"] && this.styler.rootStyle["direction"]) {
-        cascMap["direction"] = this.styler.rootStyle[
-          "direction"
-        ] as CssCascade.CascadeValue;
+      const rootDirection = this.styler.rootStyle[
+        "direction"
+      ] as CssCascade.CascadeValue;
+      if (
+        !cascMap["direction"] &&
+        rootDirection &&
+        this.styler.bodyPropagatedStyle["direction"] !== rootDirection
+      ) {
+        cascMap["direction"] = rootDirection;
       }
     }
     const verticalParent = vertical;
     vertical = CssCascade.isVertical(cascMap, context, vertical);
+    // When writing-mode is propagated from the body element to the root
+    // element as a used value (CSS Writing Modes spec), the root element's
+    // used writing mode is the propagated one although its computed style is
+    // unchanged. Return the used value verticality for the root so that the
+    // body element is not treated as a writing-mode change (which would
+    // cause the vertical-in-horizontal treatment (Issue #1264), e.g.,
+    // `inline-size: auto` becoming `max-content`). (Issue #1122 follow-up)
+    let usedVertical = vertical;
+    if (isRoot && !vertical) {
+      const rootWritingModeCasc = this.styler.rootStyle[
+        "writing-mode"
+      ] as CssCascade.CascadeValue;
+      if (
+        rootWritingModeCasc &&
+        this.styler.bodyPropagatedStyle["writing-mode"] === rootWritingModeCasc
+      ) {
+        usedVertical = CssCascade.isVertical(
+          { "writing-mode": rootWritingModeCasc },
+          context,
+          vertical,
+        );
+      }
+    }
     const verticalChanged = !isRoot && vertical !== verticalParent;
     rtl = CssCascade.isRtl(cascMap, context, rtl);
 
@@ -785,20 +824,20 @@ export class ViewFactory
       // The percent value of inline-size on vertical-in-horizontal or
       // horizontal-in-vertical block needs to be resolved against the
       // page area height or width. (Fix for issue #1264)
-      let percentRef: number;
+      let percentRef: number | undefined;
       if (verticalChanged) {
         if (vertical) {
           if (/^(min-|max-)?(height|inline-size)$/.test(name)) {
-            percentRef = context.pageAreaHeight;
+            percentRef = context.pageAreaHeight ?? undefined;
           }
         } else {
           if (/^(min-|max-)?(width|inline-size)$/.test(name)) {
-            percentRef = context.pageAreaWidth;
+            percentRef = context.pageAreaWidth ?? undefined;
           }
         }
       }
       let value = cascVal.evaluate(context, name, percentRef, vertical);
-      if (name == "font-family") {
+      if (name == "font-family" || name == "--viv-marker-font-family") {
         value = this.docFaces.filterFontFamily(value);
       }
       return value;
@@ -832,7 +871,7 @@ export class ViewFactory
       // Running elements
       computedStyle["position"] = Css.ident.fixed;
       computedStyle["visibility"] = Css.ident.hidden;
-      return vertical;
+      return usedVertical;
     }
 
     // Compute values of display, position and float
@@ -855,15 +894,18 @@ export class ViewFactory
         computedStyle[name] = displayValues[name];
       }
     });
-    return vertical;
+    return usedVertical;
   }
 
-  private inheritFromSourceParent(elementStyle: CssCascade.ElementStyle): {
+  private inheritFromSourceParent(
+    nodeContext: Vtree.NodeContext,
+    elementStyle: CssCascade.ElementStyle,
+  ): {
     lang: string | null;
     elementStyle: CssCascade.ElementStyle;
   } {
-    let node = this.nodeContext.sourceNode;
-    const styles = [];
+    let node: Node | null = nodeContext.sourceNode;
+    const styles: CssCascade.ElementStyle[] = [];
     let lang: string | null = null;
     const isFootnoteContentInclude =
       node instanceof Element &&
@@ -871,14 +913,13 @@ export class ViewFactory
       node.localName === "include" &&
       node.classList.contains("-vivliostyle-footnote-content");
     const shouldSkipAncestorMarkerProps =
-      this.isFootnote &&
-      (!this.nodeContext?.parent || isFootnoteContentInclude);
+      this.isFootnote && (!nodeContext.parent || isFootnoteContentInclude);
 
     // TODO: this is hacky. We need to recover the path through the shadow
     // trees, but we do not have the full shadow tree structure at this point.
     // This code handles coming out of the shadow trees, but does not go back in
     // (through shadow:content element).
-    let shadowContext = this.nodeContext.shadowContext;
+    let shadowContext = nodeContext.shadowContext;
 
     // For semantic footnotes, the wrapper generated from
     // <s:include class="-vivliostyle-footnote-content"> should inherit from
@@ -915,26 +956,27 @@ export class ViewFactory
 
     let steps = -1;
     while (node && node.nodeType == 1) {
-      const shadowRoot = shadowContext && shadowContext.root == node;
+      const shadow = shadowContext;
+      const shadowRoot = shadow !== null && shadow.root == node;
       const semanticFootnoteRootInRootedShadow =
-        !!shadowRoot &&
-        shadowContext.type == Vtree.ShadowType.ROOTED &&
+        shadowRoot &&
+        shadow.type == Vtree.ShadowType.ROOTED &&
         SemanticFootnote.isSemanticFootnoteElement(node as Element);
       if (
         !shadowRoot ||
-        shadowContext.type == Vtree.ShadowType.ROOTLESS ||
+        shadow.type == Vtree.ShadowType.ROOTLESS ||
         semanticFootnoteRootInRootedShadow
       ) {
-        const styler = shadowContext
-          ? (shadowContext.styler as CssStyler.AbstractStyler)
+        const styler = shadow
+          ? (shadow.styler as CssStyler.AbstractStyler)
           : this.styler;
         const nodeStyle = styler.getStyle(node as Element, false);
         styles.push(nodeStyle);
         lang = lang || Base.getLangAttribute(node as Element);
       }
       if (shadowRoot && !semanticFootnoteRootInRootedShadow) {
-        node = shadowContext.owner;
-        shadowContext = shadowContext.parentShadow;
+        node = shadow.owner;
+        shadowContext = shadow.parentShadow;
       } else {
         node = node.parentNode;
         steps++;
@@ -953,7 +995,6 @@ export class ViewFactory
         this.context,
         this.regionIds,
         this.isFootnote,
-        this.nodeContext,
       );
       for (const name in flattenedCurrentStyle) {
         if (!CssCascade.isInherited(name)) {
@@ -964,8 +1005,8 @@ export class ViewFactory
           value &&
           value !== Css.ident.inherit &&
           value !== Css.ident.unset &&
-          value !== Css.ident.revert &&
-          value !== Css.empty
+          value !== Css.empty &&
+          !Css.isRollbackValue(value)
         ) {
           blockedInheritedByCurrent.add(name);
         }
@@ -992,15 +1033,15 @@ export class ViewFactory
     );
     for (let i = styles.length - 1; i >= 0; --i) {
       const style = styles[i];
-      const propList = [];
+      const propList: string[] = [];
       for (const propName in style) {
         if (CssCascade.isInherited(propName)) {
           propList.push(propName);
         }
       }
       propList.sort(Css.processingOrderFn);
-      let fontSize: Css.Val;
-      let lineHeight: Css.Val;
+      let fontSize: Css.Val | undefined;
+      let lineHeight: Css.Val | undefined;
 
       for (const name of propList) {
         if (
@@ -1036,9 +1077,9 @@ export class ViewFactory
           } else if (
             name === "line-height" &&
             i === styles.length - 1 &&
-            this.context.rootLineHeight &&
-            prop.value instanceof Css.Numeric &&
-            (prop.value.unit === "lh" || prop.value.unit === "rlh")
+            ((prop.value instanceof Css.Numeric &&
+              (prop.value.unit === "lh" || prop.value.unit === "rlh")) ||
+              this.context.isRootLineHeightFromRelativeCalc)
           ) {
             // line-height with lh or rlh unit on root element
             prop1 = new CssCascade.CascadeValue(
@@ -1089,24 +1130,27 @@ export class ViewFactory
     return this.fallbackMap[url] || url;
   }
 
-  inheritLangAttribute() {
-    this.nodeContext.lang =
-      Base.getLangAttribute(this.nodeContext.sourceNode as Element) ||
-      (this.nodeContext.parent && this.nodeContext.parent.lang) ||
-      this.nodeContext.lang;
+  inheritLangAttribute(nodeContext: Vtree.NodeContext) {
+    nodeContext.lang =
+      Base.getLangAttribute(nodeContext.sourceNode as Element) ||
+      (nodeContext.parent && nodeContext.parent.lang) ||
+      nodeContext.lang;
   }
 
-  transferPolyfilledInheritedProps(computedStyle: { [key: string]: Css.Val }) {
+  transferPolyfilledInheritedProps(
+    nodeContext: Vtree.NodeContext,
+    computedStyle: { [key: string]: Css.Val },
+  ) {
     const polyfilledInheritedProps =
       CssCascade.getPolyfilledInheritedProps().filter(
         (name) => computedStyle[name],
       );
     if (polyfilledInheritedProps.length) {
-      let props = this.nodeContext.inheritedProps;
-      if (this.nodeContext.parent) {
-        props = this.nodeContext.inheritedProps = {};
-        for (const n in this.nodeContext.parent.inheritedProps) {
-          props[n] = this.nodeContext.parent.inheritedProps[n];
+      let props = nodeContext.inheritedProps;
+      if (nodeContext.parent) {
+        props = nodeContext.inheritedProps = {};
+        for (const n in nodeContext.parent.inheritedProps) {
+          props[n] = nodeContext.parent.inheritedProps[n];
         }
       }
       polyfilledInheritedProps.forEach((name) => {
@@ -1149,9 +1193,9 @@ export class ViewFactory
   resolveFormattingContext(
     nodeContext: Vtree.NodeContext,
     firstTime: boolean,
-    display: Css.Val,
-    position: Css.Ident,
-    float: Css.Val,
+    display: Css.Val | null | undefined,
+    position: Css.Ident | null | undefined,
+    float: Css.Val | null | undefined,
     isRoot: boolean,
   ) {
     const hooks: Plugin.ResolveFormattingContextHook[] = Plugin.getHooksForName(
@@ -1177,24 +1221,24 @@ export class ViewFactory
    * @return holding true if children should be processed
    */
   private createElementView(
+    nodeContext: Vtree.NodeContext,
     firstTime: boolean,
-    atUnforcedBreak: boolean,
   ): Task.Result<boolean> {
     let needToProcessChildren = true;
     const frame: Task.Frame<boolean> = Task.newFrame("createElementView");
 
     // Figure out element's styles
     let element = this.sourceNode as Element;
-    const styler = this.nodeContext.shadowContext
-      ? this.nodeContext.shadowContext.styler
+    const styler = nodeContext.shadowContext
+      ? nodeContext.shadowContext.styler
       : this.styler;
     let elementStyle = styler.getStyle(element, false);
     this.syncSemanticFootnoteCounterToTarget(element);
-    if (!this.nodeContext.shadowContext) {
+    if (!nodeContext.shadowContext) {
       const offset = this.xmldoc.getElementOffset(element);
       Matchers.NthFragmentMatcher.registerFragmentIndex(
         offset,
-        this.nodeContext.fragmentIndex,
+        nodeContext.fragmentIndex,
         0,
       );
     }
@@ -1215,14 +1259,18 @@ export class ViewFactory
               this.styler.cascade,
               target,
               this.styler.cascade.counterResolver,
+              this.styler.elementWindow.currentStyle,
               "footnote-marker",
             ),
           ).value,
       };
-    if (!this.nodeContext.parent) {
-      const inheritedValues = this.inheritFromSourceParent(elementStyle);
+    if (!nodeContext.parent) {
+      const inheritedValues = this.inheritFromSourceParent(
+        nodeContext,
+        elementStyle,
+      );
       elementStyle = inheritedValues.elementStyle;
-      this.nodeContext.lang = inheritedValues.lang;
+      nodeContext.lang = inheritedValues.lang;
     }
     const positionCV: CssCascade.CascadeValue = elementStyle["position"];
     const floatCV: CssCascade.CascadeValue = elementStyle["float"];
@@ -1237,25 +1285,28 @@ export class ViewFactory
         ? PageFloats.floatReferenceOf(floatReferenceCV.value.toString())
         : null;
     const isSemanticFootnoteInRootedShadow =
-      !!this.nodeContext.shadowContext &&
-      this.nodeContext.shadowContext.type === Vtree.ShadowType.ROOTED &&
+      !!nodeContext.shadowContext &&
+      nodeContext.shadowContext.type === Vtree.ShadowType.ROOTED &&
       SemanticFootnote.isSemanticFootnoteElement(element);
     if (
-      this.nodeContext.parent &&
+      nodeContext.parent &&
       (Display.isRunning(positionCV?.value) ||
         (floatReference && PageFloats.isPageFloat(floatReference)) ||
         isSemanticFootnoteInRootedShadow)
     ) {
       // Detached or transcluded content should inherit from the source tree,
       // not from the synthetic view parent.
-      const inheritedValues = this.inheritFromSourceParent(elementStyle);
+      const inheritedValues = this.inheritFromSourceParent(
+        nodeContext,
+        elementStyle,
+      );
       elementStyle = inheritedValues.elementStyle;
-      this.nodeContext.lang = inheritedValues.lang;
+      nodeContext.lang = inheritedValues.lang;
     }
     elementStyle = SemanticFootnote.mergeSemanticFootnoteIncludeStyle(
       element,
       elementStyle,
-      this.nodeContext.shadowContext as Vtree.ShadowContext,
+      nodeContext.shadowContext,
       this.xmldoc.url,
       (reference) => this.xmldoc.getElement(reference),
       CssCascade.FOOTNOTE_COUNTER_ATTR,
@@ -1264,13 +1315,13 @@ export class ViewFactory
     elementStyle = SemanticFootnote.mergeSemanticFootnoteRootStyle(
       element,
       elementStyle,
-      this.nodeContext.shadowContext as Vtree.ShadowContext,
+      nodeContext.shadowContext,
       this.context,
       semanticFootnoteStyleAccess,
     );
-    this.nodeContext.vertical = this.computeStyle(
-      this.nodeContext.vertical,
-      this.nodeContext.direction === "rtl",
+    nodeContext.vertical = this.computeStyle(
+      nodeContext.vertical,
+      nodeContext.direction === "rtl",
       elementStyle,
       computedStyle,
     );
@@ -1282,11 +1333,11 @@ export class ViewFactory
       // Fix page float margin collapsing issue (Issue #1282)
       computedStyle["display"] = Css.ident.flow_root;
     }
-    styler.processContent(element, computedStyle, this.nodeContext);
-    this.transferPolyfilledInheritedProps(computedStyle);
-    this.inheritLangAttribute();
+    styler.processContent(element, computedStyle, nodeContext);
+    this.transferPolyfilledInheritedProps(nodeContext, computedStyle);
+    this.inheritLangAttribute(nodeContext);
     if (computedStyle["direction"]) {
-      this.nodeContext.direction = computedStyle["direction"].toString();
+      nodeContext.direction = computedStyle["direction"].toString();
     }
 
     // Sort out the properties
@@ -1308,7 +1359,7 @@ export class ViewFactory
       return frame.result();
     }
 
-    let display = computedStyle["display"];
+    let display: Css.Val | null | undefined = computedStyle["display"];
 
     if (
       SemanticFootnote.isSemanticFootnoteElement(element) &&
@@ -1322,9 +1373,9 @@ export class ViewFactory
       if (display === Css.ident.initial || display === Css.ident.unset) {
         display = Css.ident.inline;
       } else if (display === Css.ident.inherit) {
-        display =
-          this.nodeContext.parent?.display &&
-          Css.getName(this.nodeContext.parent?.display);
+        display = nodeContext.parent?.display
+          ? Css.getName(nodeContext.parent.display)
+          : null;
       } else {
         display = null;
       }
@@ -1334,9 +1385,8 @@ export class ViewFactory
       frame.finish(false);
       return frame.result();
     }
-    const isRoot = this.nodeContext.parent == null;
-    const blockSize =
-      computedStyle[this.nodeContext.vertical ? "width" : "height"];
+    const isRoot = nodeContext.parent == null;
+    const blockSize = computedStyle[nodeContext.vertical ? "width" : "height"];
     // Issue #1999: fixed-size grid boxes used as synthetic page references
     // must stay whole. Once fragmented, continuation fragments lose the block
     // size and later reference pages collapse.
@@ -1344,26 +1394,27 @@ export class ViewFactory
       (display === Css.ident.grid || display === Css.ident.inline_grid) &&
       !!blockSize &&
       !(blockSize === Css.ident.auto || Css.isDefaultingValue(blockSize));
-    this.nodeContext.flexContainer =
+    nodeContext.flexContainer =
       display === Css.ident.flex || isFixedSizeGridContainer;
     this.createShadows(
+      nodeContext,
       element,
       isRoot,
       elementStyle,
       computedStyle,
       styler,
       this.context,
-      this.nodeContext.shadowContext as Vtree.ShadowContext,
+      nodeContext.shadowContext,
     ).then((shadowParam) => {
-      this.nodeContext.nodeShadow = shadowParam;
+      nodeContext.nodeShadow = shadowParam;
       const position = computedStyle["position"] as Css.Ident;
-      let floatSide = computedStyle["float"];
-      let clearSide = computedStyle["clear"] as Css.Ident;
-      const writingMode = this.nodeContext.vertical
+      let floatSide: Css.Val | null = computedStyle["float"];
+      let clearSide: Css.Ident | null = computedStyle["clear"] as Css.Ident;
+      const writingMode = nodeContext.vertical
         ? Css.ident.vertical_rl
         : Css.ident.horizontal_tb;
-      const parentWritingMode = this.nodeContext.parent
-        ? this.nodeContext.parent.vertical
+      const parentWritingMode = nodeContext.parent
+        ? nodeContext.parent.vertical
           ? Css.ident.vertical_rl
           : Css.ident.horizontal_tb
         : writingMode;
@@ -1377,7 +1428,7 @@ export class ViewFactory
         (columnWidth &&
           columnWidth !== Css.ident.auto &&
           !Css.isDefaultingValue(columnWidth));
-      this.nodeContext.establishesBFC = Display.establishesBFC(
+      nodeContext.establishesBFC = Display.establishesBFC(
         display,
         position,
         floatSide,
@@ -1386,10 +1437,10 @@ export class ViewFactory
         parentWritingMode,
         isMultiColumn || isFlowRoot,
       );
-      this.nodeContext.containingBlockForAbsolute =
+      nodeContext.containingBlockForAbsolute =
         Display.establishesCBForAbsolute(position);
       if (
-        this.nodeContext.isInsideBFC() &&
+        nodeContext.isInsideBFC() &&
         floatSide !== Css.ident.footnote &&
         !(floatReference && PageFloats.isPageFloat(floatReference))
       ) {
@@ -1403,13 +1454,13 @@ export class ViewFactory
       let usesOutsideFootnoteMarker = false;
       const isFootnoteBodyInFootnoteArea =
         this.isFootnote &&
-        (!this.nodeContext?.parent ||
-          this.nodeContext.pluginProps["nestedFootnoteDetached"] ||
+        (!nodeContext.parent ||
+          nodeContext.pluginProps["nestedFootnoteDetached"] ||
           isSemanticFootnoteInRootedShadow);
       const semanticFootnoteStyle =
         SemanticFootnote.getSemanticFootnoteStyleState(
           element,
-          this.nodeContext.shadowContext as Vtree.ShadowContext,
+          nodeContext.shadowContext,
           semanticFootnoteStyleAccess,
         );
       SemanticFootnote.refreshSemanticFootnoteMarkerContent(
@@ -1419,7 +1470,7 @@ export class ViewFactory
       );
       footnoteDisplay = semanticFootnoteStyle.footnoteDisplay;
 
-      let floating =
+      const floatSideName =
         floatSide instanceof Css.SpaceList ||
         floatSide === Css.ident.left ||
         floatSide === Css.ident.right ||
@@ -1433,7 +1484,10 @@ export class ViewFactory
         floatSide === Css.ident.snap_inline ||
         floatSide === Css.ident.inside ||
         floatSide === Css.ident.outside ||
-        floatSide === Css.ident.footnote;
+        floatSide === Css.ident.footnote
+          ? floatSide.toString()
+          : null;
+      let floating = floatSideName !== null;
       if (floatSide) {
         // Don't want to set it in view DOM CSS.
         delete computedStyle["float"];
@@ -1491,8 +1545,8 @@ export class ViewFactory
       }
       if (clearSide) {
         if (clearSide === Css.ident.inherit) {
-          if (this.nodeContext.parent && this.nodeContext.parent.clearSide) {
-            clearSide = Css.getName(this.nodeContext.parent.clearSide);
+          if (nodeContext.parent && nodeContext.parent.clearSide) {
+            clearSide = Css.getName(nodeContext.parent.clearSide);
           }
         }
         if (
@@ -1519,7 +1573,7 @@ export class ViewFactory
             (computedStyle["display"] &&
               computedStyle["display"] != Css.ident.inline)
           ) {
-            this.nodeContext.clearSide = clearSide.toString();
+            nodeContext.clearSide = clearSide.toString();
           }
         }
       }
@@ -1536,7 +1590,7 @@ export class ViewFactory
           !Css.isDefaultingValue(breakInside) &&
           breakInside !== Css.ident.auto)
       ) {
-        this.nodeContext.breakPenalty++;
+        nodeContext.breakPenalty++;
       }
       if (
         display &&
@@ -1544,41 +1598,42 @@ export class ViewFactory
         Display.isInlineLevel(display)
       ) {
         // Don't break inside ruby, inline-block, etc.
-        this.nodeContext.breakPenalty++;
+        nodeContext.breakPenalty++;
       }
-      this.nodeContext.inline =
+      nodeContext.inline =
         (!floating && !display) ||
         Display.isInlineLevel(display) ||
         Display.isRubyInternalDisplay(display);
-      this.nodeContext.display = display ? display.toString() : "inline";
-      this.nodeContext.floatSide = floating ? floatSide.toString() : null;
-      this.nodeContext.floatReference =
+      nodeContext.display = display ? display.toString() : "inline";
+      nodeContext.floatSide = floating ? floatSideName : null;
+      nodeContext.floatReference =
         floatReference || PageFloats.FloatReference.INLINE;
       const floatMinWrapBlock = computedStyle["float-min-wrap-block"];
-      this.nodeContext.floatMinWrapBlock =
+      nodeContext.floatMinWrapBlock =
         floatMinWrapBlock && !Css.isDefaultingValue(floatMinWrapBlock)
           ? (floatMinWrapBlock as Css.Numeric)
           : null;
 
       // Leaves handling of multicol specified on non-root/body elements to the browser
-      const insideNonRootMultiColumn = this.isInsideNonRootMultiColumn();
+      const insideNonRootMultiColumn =
+        this.isInsideNonRootMultiColumn(nodeContext);
 
       const columnSpan = computedStyle["column-span"];
-      this.nodeContext.columnSpan =
+      nodeContext.columnSpan =
         !insideNonRootMultiColumn &&
         columnSpan &&
         !Css.isDefaultingValue(columnSpan)
           ? columnSpan
           : null;
-      if (!this.nodeContext.inline) {
+      if (!nodeContext.inline) {
         const breakAfter = computedStyle["break-after"];
         if (
           breakAfter &&
           !Css.isDefaultingValue(breakAfter) &&
           !(insideNonRootMultiColumn && breakAfter === Css.ident.column)
         ) {
-          this.nodeContext.breakAfter = breakAfter.toString();
-          if (Break.forcedBreakValues[this.nodeContext.breakAfter]) {
+          nodeContext.breakAfter = breakAfter.toString();
+          if (Break.forcedBreakValues[nodeContext.breakAfter]) {
             // delete computedStyle["break-after"];
 
             // Instead of deleting, set to "column" so that the browser can handle it.
@@ -1591,8 +1646,8 @@ export class ViewFactory
           !Css.isDefaultingValue(breakBefore) &&
           !(insideNonRootMultiColumn && breakBefore === Css.ident.column)
         ) {
-          this.nodeContext.breakBefore = breakBefore.toString();
-          if (Break.forcedBreakValues[this.nodeContext.breakBefore]) {
+          nodeContext.breakBefore = breakBefore.toString();
+          if (Break.forcedBreakValues[nodeContext.breakBefore]) {
             if (this.isAtStartOfPage()) {
               delete computedStyle["break-before"];
             } else {
@@ -1600,8 +1655,8 @@ export class ViewFactory
               computedStyle["break-before"] = Css.ident.column;
             }
           }
-          if (this.nodeContext.fragmentIndex !== 1) {
-            this.nodeContext.breakBefore = null;
+          if (nodeContext.fragmentIndex !== 1) {
+            nodeContext.breakBefore = null;
           }
         }
         // Named page type
@@ -1613,8 +1668,8 @@ export class ViewFactory
         let pageType = specifiedPageType;
         if (
           !pageType &&
-          !this.nodeContext.parent &&
-          (this.nodeContext.shadowContext ||
+          !nodeContext.parent &&
+          (nodeContext.shadowContext ||
             display === Css.ident.table_header_group ||
             display === Css.ident.table_footer_group)
         ) {
@@ -1622,15 +1677,15 @@ export class ViewFactory
           pageType = this.styler.cascade.currentPageType;
         }
         if (!pageType || pageType.toLowerCase() === "auto") {
-          pageType = this.nodeContext.pageType;
+          pageType = nodeContext.pageType;
         } else {
-          this.nodeContext.pageType = pageType;
+          nodeContext.pageType = pageType;
         }
         const hasExplicitPageType =
           specifiedPageType != null &&
           specifiedPageType.toLowerCase() !== "auto";
         const effectivePageType = hasExplicitPageType
-          ? this.nodeContext.fragmentIndex === 1
+          ? nodeContext.fragmentIndex === 1
             ? this.getEffectiveStartPageType(element, pageType)
             : (this.styler.cascade.currentPageType ?? pageType)
           : pageType;
@@ -1644,10 +1699,10 @@ export class ViewFactory
           )
         ) {
           if (
-            this.nodeContext.fragmentIndex === 1 &&
-            !Break.isSpreadBreakValue(this.nodeContext.breakBefore)
+            nodeContext.fragmentIndex === 1 &&
+            !Break.isSpreadBreakValue(nodeContext.breakBefore)
           ) {
-            this.nodeContext.breakBefore = "page";
+            nodeContext.breakBefore = "page";
           }
           // Fix for issue #1309
           if (effectivePageType !== this.styler.cascade.previousPageType) {
@@ -1657,7 +1712,7 @@ export class ViewFactory
           this.styler.cascade.currentPageType = effectivePageType;
         }
       }
-      this.nodeContext.captionSide =
+      nodeContext.captionSide =
         (computedStyle["caption-side"] &&
           computedStyle["caption-side"].toString()) ||
         "top";
@@ -1674,13 +1729,13 @@ export class ViewFactory
             inlineBorderSpacing = blockBorderSpacing = borderSpacing;
           }
           if (inlineBorderSpacing.isNumeric()) {
-            this.nodeContext.inlineBorderSpacing = Css.toNumber(
+            nodeContext.inlineBorderSpacing = Css.toNumber(
               inlineBorderSpacing,
               this.context,
             );
           }
           if (blockBorderSpacing.isNumeric()) {
-            this.nodeContext.blockBorderSpacing = Css.toNumber(
+            nodeContext.blockBorderSpacing = Css.toNumber(
               blockBorderSpacing,
               this.context,
             );
@@ -1693,23 +1748,24 @@ export class ViewFactory
       if (footnotePolicy && !Css.isDefaultingValue(footnotePolicy)) {
         computedStyle["--viv-footnote-policy"] = footnotePolicy;
       }
-      this.nodeContext.footnotePolicy =
+      nodeContext.footnotePolicy =
         footnotePolicy && !Css.isDefaultingValue(footnotePolicy)
           ? footnotePolicy
           : null;
       const firstPseudo = computedStyle["x-first-pseudo"] as Css.Int;
       if (firstPseudo) {
-        const outerPseudo = this.nodeContext.parent
-          ? this.nodeContext.parent.firstPseudo
+        const outerPseudo = nodeContext.parent
+          ? nodeContext.parent.firstPseudo
           : null;
-        this.nodeContext.firstPseudo = new Vtree.FirstPseudo(
+        nodeContext.firstPseudo = new Vtree.FirstPseudo(
           outerPseudo,
           /** Css.Int */
           firstPseudo.num,
         );
       }
-      if (!this.nodeContext.inline) {
+      if (!nodeContext.inline) {
         this.processAfterIfcontinues(
+          nodeContext,
           element,
           elementStyle,
           styler,
@@ -1722,12 +1778,12 @@ export class ViewFactory
           whitespace.toString(),
         );
         if (whitespaceValue !== null) {
-          this.nodeContext.whitespace = whitespaceValue;
+          nodeContext.whitespace = whitespaceValue;
         }
       }
       const hyphenateCharacter = computedStyle["hyphenate-character"];
       if (hyphenateCharacter && hyphenateCharacter instanceof Css.Str) {
-        this.nodeContext.hyphenateCharacter = hyphenateCharacter.str;
+        nodeContext.hyphenateCharacter = hyphenateCharacter.str;
       }
       const wordBreak = computedStyle["word-break"];
       const lineBreak = computedStyle["line-break"];
@@ -1738,37 +1794,33 @@ export class ViewFactory
         overflowWrap === Css.ident.break_word ||
         overflowWrap === Css.ident.anywhere
       ) {
-        this.nodeContext.breakWord = true;
+        nodeContext.breakWord = true;
       }
 
       // Resolve formatting context
       this.resolveFormattingContext(
-        this.nodeContext,
+        nodeContext,
         firstTime,
         display,
         position,
         floatSide,
         isRoot,
       );
-      if (
-        this.nodeContext.parent &&
-        this.nodeContext.parent.formattingContext
-      ) {
-        firstTime = this.nodeContext.parent.formattingContext.isFirstTime(
-          this.nodeContext,
+      if (nodeContext.parent) {
+        firstTime = nodeContext.parent.formattingContext.isFirstTime(
+          nodeContext,
           firstTime,
         );
       }
-      if (!this.nodeContext.inline) {
-        this.nodeContext.repeatOnBreak =
-          this.processRepeatOnBreak(computedStyle);
-        this.findAndProcessRepeatingElements(element, styler);
+      if (!nodeContext.inline) {
+        nodeContext.repeatOnBreak = this.processRepeatOnBreak(computedStyle);
+        this.findAndProcessRepeatingElements(nodeContext, element, styler);
       }
 
       // Create the view element
       let custom = false;
-      let inner: Element = null;
-      const fetchers = [];
+      let inner: Element | null = null;
+      const fetchers: TaskUtil.Fetcher<string>[] = [];
       let ns = element.namespaceURI;
       let tag = element.localName;
       let originalTag = tag;
@@ -1780,7 +1832,7 @@ export class ViewFactory
         } else if (tag == "audi_") {
           tag = "audio";
         } else if (tag == "object") {
-          custom = !!this.customRenderer;
+          custom = true;
         }
         if (
           element.hasAttribute(PseudoElement.PSEUDO_ATTR) &&
@@ -1794,9 +1846,9 @@ export class ViewFactory
         ns = Base.NS.XHTML;
       } else if (ns == Base.NS.SHADOW) {
         ns = Base.NS.XHTML;
-        tag = this.nodeContext.inline ? "span" : "div";
+        tag = nodeContext.inline ? "span" : "div";
       } else {
-        custom = !!this.customRenderer;
+        custom = true;
       }
       if (isListItem) {
         // Keep display: list-item so the browser's native ::marker is used.
@@ -1827,7 +1879,7 @@ export class ViewFactory
       }
       if (computedStyle["behavior"]) {
         const behavior = computedStyle["behavior"].toString();
-        if (behavior != "none" && this.customRenderer) {
+        if (behavior != "none") {
           custom = true;
         }
       }
@@ -1837,10 +1889,10 @@ export class ViewFactory
       ) {
         custom = true;
       }
-      let elemResult: Task.Result<Element>;
+      let elemResult: Task.Result<Element | null>;
       if (custom) {
-        const parentNode = this.nodeContext.parent
-          ? this.nodeContext.parent.viewNode
+        const parentNode = nodeContext.parent
+          ? nodeContext.parent.viewNode
           : null;
         elemResult = this.customRenderer(
           element,
@@ -1870,7 +1922,7 @@ export class ViewFactory
           isMultiColumn &&
           computedStyle["column-fill"] === Css.ident.auto
         ) {
-          const blockSize = this.nodeContext.vertical
+          const blockSize = nodeContext.vertical
             ? computedStyle["width"]
             : computedStyle["height"];
           if (
@@ -1896,7 +1948,7 @@ export class ViewFactory
           result.addEventListener("click", this.page.hrefHandler, false);
         }
         if (inner) {
-          this.applyPseudoelementStyle(this.nodeContext, "inner", inner);
+          this.applyPseudoelementStyle(nodeContext, "inner", inner);
           result.appendChild(inner);
         }
         if (
@@ -1905,7 +1957,7 @@ export class ViewFactory
         ) {
           initIFrame(result as HTMLIFrameElement);
         }
-        const imageResolution = this.nodeContext.inheritedProps[
+        const imageResolution = nodeContext.inheritedProps[
           "image-resolution"
         ] as number | undefined;
         const images: {
@@ -1929,21 +1981,21 @@ export class ViewFactory
         // Workaround for issue #1439
         // `<tr><a id="…"></a><td>…` causes table layout issue, so change to
         // `<tr><td><a id="…"></a>…`
+        const parentLastElementChild = (
+          nodeContext.parent?.viewNode as Element | null
+        )?.lastElementChild;
         if (
           display === Css.ident.table_cell &&
-          (this.nodeContext.parent?.viewNode as Element)?.lastElementChild
-            ?.localName === "a"
+          parentLastElementChild?.localName === "a"
         ) {
-          result.appendChild(
-            (this.nodeContext.parent.viewNode as Element).lastElementChild,
-          );
+          result.appendChild(parentLastElementChild);
         }
 
         for (let i = 0; i < attributeCount; i++) {
           const attribute = attributes[i];
           const attributeNS = attribute.namespaceURI;
           let attributeName = attribute.localName;
-          let attributeValue = attribute.nodeValue;
+          let attributeValue = attribute.value;
           if (!attributeNS) {
             if (!Scripts.allowScripts && attributeName.match(/^on/)) {
               continue; // don't propagate JavaScript code
@@ -1985,7 +2037,7 @@ export class ViewFactory
                     attributeValue = "not all";
                   }
                 }
-              } catch (e) {
+              } catch {
                 // If parsing fails, leave the attribute as-is.
               }
             }
@@ -2166,7 +2218,7 @@ export class ViewFactory
               return true;
             }
             for (
-              let p = this.nodeContext.parent?.viewNode as HTMLElement;
+              let p = nodeContext.parent?.viewNode as HTMLElement | null;
               p && p !== this.viewRoot;
               p = p.parentElement
             ) {
@@ -2179,7 +2231,7 @@ export class ViewFactory
           const hasPercentBlockSize = (): boolean => {
             // Check if the image has percentage block size, which is usually same as auto,
             // which means the size is not determined until the image is loaded.
-            const blockSize = this.nodeContext.vertical ? cssWidth : cssHeight;
+            const blockSize = nodeContext.vertical ? cssWidth : cssHeight;
             return blockSize instanceof Css.Numeric && blockSize.unit === "%";
           };
           if (
@@ -2273,10 +2325,10 @@ export class ViewFactory
           this.page.fetchers.push(Net.loadElement(result));
         }
 
-        this.preprocessElementStyle(computedStyle);
+        this.preprocessElementStyle(nodeContext, computedStyle);
         this.applyComputedStyles(result, computedStyle);
 
-        if (this.nodeContext.inline) {
+        if (nodeContext.inline) {
           if (!firstTime) {
             Break.setBoxBreakFlag(result, "inline-start");
             if (Break.isCloneBoxDecorationBreak(result)) {
@@ -2285,7 +2337,7 @@ export class ViewFactory
           }
         } else {
           if (!firstTime) {
-            const blockSizeP = this.nodeContext.vertical ? "width" : "height";
+            const blockSizeP = nodeContext.vertical ? "width" : "height";
             if (Base.getCSSProperty(result, blockSizeP)) {
               // When a box with a specified block size is fragmented,
               // the fragmented box should not have the block size.
@@ -2296,7 +2348,7 @@ export class ViewFactory
               Base.setCSSProperty(
                 result,
                 blockSizeP,
-                this.nodeContext.display === "table-row" ? "0.01px" : "",
+                nodeContext.display === "table-row" ? "0.01px" : "",
               );
             }
             Break.setBoxBreakFlag(result, "block-start");
@@ -2311,15 +2363,14 @@ export class ViewFactory
 
             // Detect forced or unforced break at this point
             // to handle margin-break properly.
-            // Note: Do not use `atUnforcedBreak` which may be inaccurate.
-            const breakType = this.getBreakTypeAt(this.nodeContext);
+            const breakType = this.getBreakTypeAt(nodeContext);
             const anyBreak = breakType !== null;
             const unforcedBreak = breakType === "auto";
             if (
               (marginBreak === Css.ident.discard && anyBreak) ||
               (marginBreak !== Css.ident.keep &&
                 unforcedBreak &&
-                !this.nodeContext.floatSide)
+                !nodeContext.floatSide)
             ) {
               Break.setMarginDiscardFlag(result, "block-start");
             }
@@ -2337,12 +2388,12 @@ export class ViewFactory
         this.viewNode = result;
         if (fetchers.length) {
           TaskUtil.waitForFetchers(fetchers).then(() => {
-            if (imageResolution > 0) {
+            if (imageResolution !== undefined && imageResolution > 0) {
               this.modifyElemDimensionWithImageResolution(
                 images,
                 imageResolution,
                 computedStyle,
-                this.nodeContext.vertical,
+                nodeContext.vertical,
               );
             }
             frame.finish(needToProcessChildren);
@@ -2390,8 +2441,8 @@ export class ViewFactory
    * but leaves it to the browser to handle other multi-column.
    * This check is for such non-root/body multi-column.
    */
-  private isInsideNonRootMultiColumn(): boolean {
-    const element = this.nodeContext.parent?.viewNode as Element;
+  private isInsideNonRootMultiColumn(nodeContext: Vtree.NodeContext): boolean {
+    const element = nodeContext.parent?.viewNode as Element;
     return !!(element && LayoutHelper.findAncestorNonRootMultiColumn(element));
   }
 
@@ -2407,12 +2458,17 @@ export class ViewFactory
     if (this.isInsideTable(nodeContext)) {
       return null;
     }
-    for (let nc = nodeContext; nc && !nc.after; nc = nc.parent) {
+    for (
+      let nc: Vtree.NodeContext | null = nodeContext;
+      nc && !nc.after;
+      nc = nc.parent
+    ) {
       if (Break.isForcedBreakValue(nc.breakBefore)) {
         return nc.breakBefore; // forced break
       }
-      if (nc.fragmentIndex === 1 && !nc.parent) {
-        if (nc.sourceNode === nc.sourceNode.ownerDocument.documentElement) {
+      const parent = nc.parent;
+      if (nc.fragmentIndex === 1 && !parent) {
+        if (nc.sourceNode === nc.sourceNode.ownerDocument?.documentElement) {
           // beginning of document
           return "page";
         } else {
@@ -2420,11 +2476,14 @@ export class ViewFactory
           return null;
         }
       }
-      if (nc.parent?.floatSide) {
+      if (!parent) {
+        continue;
+      }
+      if (parent.floatSide) {
         // inside float, not break (Issue #1282)
         return null;
       }
-      const parentViewNode = nc.parent?.viewNode as Element;
+      const parentViewNode = parent.viewNode as Element;
       if (parentViewNode) {
         const style = this.viewport.window.getComputedStyle(parentViewNode);
         const paddingBlockStart = parseFloat(style.paddingBlockStart);
@@ -2436,7 +2495,7 @@ export class ViewFactory
         let node = parentViewNode?.firstChild;
         while (
           node &&
-          (Vtree.canIgnore(node, nc.parent.whitespace) ||
+          (Vtree.canIgnore(node, parent.whitespace) ||
             (!nc.floatSide && LayoutHelper.isOutOfFlow(node)))
         ) {
           node = node.nextSibling;
@@ -2448,11 +2507,13 @@ export class ViewFactory
       }
     }
 
-    const startBreakType = (
-      this.context as Exprs.Context & {
-        currentLayoutPosition: Vtree.LayoutPosition;
-      }
-    )?.currentLayoutPosition?.flowPositions[this.flowName]?.startBreakType;
+    const startBreakType =
+      (
+        this.context as Exprs.Context & {
+          currentLayoutPosition: Vtree.LayoutPosition | null;
+        }
+      )?.currentLayoutPosition?.flowPositions[this.flowName]?.startBreakType ??
+      null;
 
     if (Break.isForcedBreakValue(startBreakType)) {
       return startBreakType; // forced break
@@ -2462,7 +2523,11 @@ export class ViewFactory
   }
 
   private isInsideTable(nodeContext: Vtree.NodeContext): boolean {
-    for (let nc = nodeContext; nc && !nc.after; nc = nc.parent) {
+    for (
+      let nc: Vtree.NodeContext | null = nodeContext;
+      nc && !nc.after;
+      nc = nc.parent
+    ) {
       if (nc.display && nc.display.startsWith("table")) {
         return true;
       }
@@ -2471,6 +2536,7 @@ export class ViewFactory
   }
 
   private processAfterIfcontinues(
+    nodeContext: Vtree.NodeContext,
     element: Element,
     cascStyle: CssCascade.ElementStyle,
     styler: CssStyler.AbstractStyler,
@@ -2480,7 +2546,7 @@ export class ViewFactory
       cascStyle,
       this.regionIds,
       this.isFootnote,
-      this.nodeContext,
+      nodeContext,
       context,
     );
     if (!pseudoMap) {
@@ -2497,7 +2563,7 @@ export class ViewFactory
         context,
         this.exprContentListener,
       );
-      this.nodeContext.afterIfContinues = new Layout.AfterIfContinues(
+      nodeContext.afterIfContinues = new Layout.AfterIfContinues(
         element,
         shadowStyler,
       );
@@ -2602,7 +2668,6 @@ export class ViewFactory
             const minWidth = computedStyle["min-width"] || Css.numericZero;
             const minHeight = computedStyle["min-height"] || Css.numericZero;
             Asserts.assert(minWidth.isNumeric());
-            Asserts.assert(minWidth.isNumeric());
             const numericMinWidth = minWidth as Css.Numeric;
             const numericMinHeight = minHeight as Css.Numeric;
             if (numericMinWidth.num === 0 && numericMinHeight.num === 0) {
@@ -2651,21 +2716,25 @@ export class ViewFactory
     });
   }
 
-  private preprocessElementStyle(computedStyle: { [key: string]: Css.Val }) {
+  private preprocessElementStyle(
+    nodeContext: Vtree.NodeContext,
+    computedStyle: { [key: string]: Css.Val },
+  ) {
     const hooks: Plugin.PreProcessElementStyleHook[] = Plugin.getHooksForName(
       Plugin.HOOKS.PREPROCESS_ELEMENT_STYLE,
     );
     hooks.forEach((hook) => {
-      hook(this.nodeContext, computedStyle);
+      hook(nodeContext, computedStyle);
     });
   }
 
   private findAndProcessRepeatingElements(
+    nodeContext: Vtree.NodeContext,
     element: Element,
     styler: CssStyler.AbstractStyler,
   ) {
     for (
-      let child: Node = element.firstChild;
+      let child: Node | null = element.firstChild;
       child;
       child = child.nextSibling
     ) {
@@ -2675,8 +2744,8 @@ export class ViewFactory
       const computedStyle: { [key: string]: Css.Val } = {};
       const elementStyle = styler.getStyle(child as Element, false);
       this.computeStyle(
-        this.nodeContext.vertical,
-        this.nodeContext.direction === "rtl",
+        nodeContext.vertical,
+        nodeContext.direction === "rtl",
         elementStyle,
         computedStyle,
       );
@@ -2685,23 +2754,22 @@ export class ViewFactory
         continue;
       }
       if (
-        this.nodeContext.formattingContext instanceof
+        nodeContext.formattingContext instanceof
           RepetitiveElement.RepetitiveElementsOwnerFormattingContext &&
-        !this.nodeContext.belongsTo(this.nodeContext.formattingContext)
+        !nodeContext.belongsTo(nodeContext.formattingContext)
       ) {
         return;
       }
-      const parent = this.nodeContext.parent;
-      const parentFormattingContext = parent && parent.formattingContext;
-      this.nodeContext.formattingContext =
+      const parent = nodeContext.parent;
+      const parentFormattingContext = parent ? parent.formattingContext : null;
+      nodeContext.formattingContext =
         new RepetitiveElement.RepetitiveElementsOwnerFormattingContext(
           parentFormattingContext,
-          this.nodeContext.sourceNode as Element,
+          nodeContext.sourceNode as Element,
         );
       (
-        this.nodeContext
-          .formattingContext as RepetitiveElement.RepetitiveElementsOwnerFormattingContext
-      ).initializeRepetitiveElements(this.nodeContext.vertical);
+        nodeContext.formattingContext as RepetitiveElement.RepetitiveElementsOwnerFormattingContext
+      ).initializeRepetitiveElements(nodeContext.vertical);
       return;
     }
   }
@@ -2728,26 +2796,32 @@ export class ViewFactory
     return null;
   }
 
-  private createTextNodeView(): Task.Result<boolean> {
+  private createTextNodeView(
+    nodeContext: Vtree.NodeContext,
+  ): Task.Result<boolean> {
     const frame: Task.Frame<boolean> = Task.newFrame("createTextNodeView");
-    this.preprocessTextContent().then(() => {
+    this.preprocessTextContent(nodeContext).then((preprocessedTextContent) => {
       const offsetInNode = this.offsetInNode || 0;
-      const textContent = Diff.restoreNewText(
-        this.nodeContext.preprocessedTextContent,
-      ).substr(offsetInNode);
+      const textContent = Diff.restoreNewText(preprocessedTextContent).substr(
+        offsetInNode,
+      );
       this.viewNode = document.createTextNode(textContent);
       frame.finish(true);
     });
     return frame.result();
   }
 
-  private preprocessTextContent(): Task.Result<boolean> {
-    if (this.nodeContext.preprocessedTextContent != null) {
-      return Task.newResult(true);
+  private preprocessTextContent(
+    nodeContext: Vtree.NodeContext,
+  ): Task.Result<Diff.Change[]> {
+    if (nodeContext.preprocessedTextContent != null) {
+      return Task.newResult(nodeContext.preprocessedTextContent);
     }
     let originl: string;
-    let textContent = (originl = this.sourceNode.textContent);
-    const frame: Task.Frame<boolean> = Task.newFrame("preprocessTextContent");
+    let textContent = (originl = nodeContext.sourceNode.textContent ?? "");
+    const frame: Task.Frame<Diff.Change[]> = Task.newFrame(
+      "preprocessTextContent",
+    );
     const hooks: Plugin.PreProcessTextContentHook[] = Plugin.getHooksForName(
       Plugin.HOOKS.PREPROCESS_TEXT_CONTENT,
     );
@@ -2757,7 +2831,7 @@ export class ViewFactory
         if (index >= hooks.length) {
           return Task.newResult(false);
         }
-        return hooks[index++](this.nodeContext, textContent).thenAsync(
+        return hooks[index++](nodeContext, textContent).thenAsync(
           (processedText) => {
             textContent = processedText;
             return Task.newResult(true);
@@ -2765,11 +2839,9 @@ export class ViewFactory
         );
       })
       .then(() => {
-        this.nodeContext.preprocessedTextContent = Diff.diffChars(
-          originl,
-          textContent,
-        );
-        frame.finish(true);
+        const preprocessedTextContent = Diff.diffChars(originl, textContent);
+        nodeContext.preprocessedTextContent = preprocessedTextContent;
+        frame.finish(preprocessedTextContent);
       });
     return frame.result();
   }
@@ -2778,44 +2850,50 @@ export class ViewFactory
    * @return holding true if children should be processed
    */
   createNodeView(
+    nodeContext: Vtree.NodeContext,
     firstTime: boolean,
-    atUnforcedBreak: boolean,
   ): Task.Result<boolean> {
     const frame: Task.Frame<boolean> = Task.newFrame("createNodeView");
     let result: Task.Result<boolean>;
     let needToProcessChildren = true;
-    if (this.sourceNode.nodeType == 1) {
-      result = this.createElementView(firstTime, atUnforcedBreak);
+    if (nodeContext.sourceNode.nodeType == 1) {
+      result = this.createElementView(nodeContext, firstTime);
     } else {
-      if (this.sourceNode.nodeType == 8) {
+      if (nodeContext.sourceNode.nodeType == 8) {
         this.viewNode = null; // comment node
         result = Task.newResult(true);
       } else {
-        result = this.createTextNodeView();
+        result = this.createTextNodeView(nodeContext);
       }
     }
     result.then((processChildren) => {
       needToProcessChildren = processChildren;
-      this.nodeContext.viewNode = this.viewNode;
+      nodeContext.viewNode = this.viewNode;
       if (this.viewNode) {
-        const isPseudo = (node: Node, name: string): boolean =>
+        const isPseudo = (node: Node | null, name: string): boolean =>
           node?.nodeType === 1 &&
           PseudoElement.getPseudoName(node as Element) === name;
-        const p = this.nodeContext.parent;
+        const p = nodeContext.parent;
+        // A first-letter pseudo-element view is only generated below its
+        // originating element's context, so a context bearing one has a parent.
+        const pFirstLetter =
+          p &&
+          isPseudo(this.viewNode, "after") &&
+          isPseudo(p.viewNode, "first-letter")
+            ? (p as Vtree.ChildNodeContext)
+            : null;
         let parent = p
-          ? isPseudo(this.viewNode, "after") &&
-            isPseudo(p.viewNode, "first-letter") &&
-            p.viewNode?.hasChildNodes()
-            ? (p.parent.viewNode as Element) // Fix for issue #1175
+          ? pFirstLetter?.viewNode?.hasChildNodes()
+            ? (pFirstLetter.parent.viewNode as Element) // Fix for issue #1175
             : (p.viewNode as Element)
           : this.viewRoot;
-        if (this.nodeContext.pluginProps["nestedFootnoteDetached"]) {
+        if (nodeContext.pluginProps["nestedFootnoteDetached"]) {
           // Nested footnote, attach to the root (Issue #1352)
           parent = this.viewRoot;
         }
         if (parent) {
           if (
-            this.nodeContext.inline &&
+            nodeContext.inline &&
             // ignore whitespace text node
             !(this.viewNode.nodeType === 3 && Vtree.canIgnore(this.viewNode)) &&
             !parent.hasChildNodes() &&
@@ -2841,21 +2919,13 @@ export class ViewFactory
     atUnforcedBreak?: boolean,
   ): Task.Result<boolean> {
     this.nodeContext = nodeContext;
-    if (nodeContext) {
-      this.sourceNode = nodeContext.sourceNode;
-      this.offsetInNode = nodeContext.offsetInNode;
-    } else {
-      this.sourceNode = null;
-      this.offsetInNode = -1;
-    }
+    this.sourceNode = nodeContext.sourceNode;
+    this.offsetInNode = nodeContext.offsetInNode;
     this.viewNode = null;
-    if (this.nodeContext) {
-      return this.createNodeView(firstTime, !!atUnforcedBreak);
-    }
-    return Task.newResult(true);
+    return this.createNodeView(nodeContext, firstTime);
   }
 
-  processShadowContent(pos: Vtree.NodeContext): Vtree.NodeContext {
+  processShadowContent(pos: Vtree.ChildNodeContext): Vtree.NodeContext {
     if (
       pos.shadowContext == null ||
       (pos.sourceNode as Element).localName != "content" ||
@@ -2865,10 +2935,9 @@ export class ViewFactory
     }
     const boxOffset = pos.boxOffset;
     const shadow = pos.shadowContext;
-    const parent = pos.parent;
 
     // content that will be inserted
-    let contentNode: Node;
+    let contentNode: Node | null;
     let contentShadowType: Vtree.ShadowType;
     const contentShadow = shadow.subShadow || shadow.parentShadow;
     if (shadow.subShadow) {
@@ -2884,65 +2953,72 @@ export class ViewFactory
       contentShadowType = Vtree.ShadowType.ROOTLESS;
     }
     const nextSibling = pos.sourceNode.nextSibling;
+    let nextPos: Vtree.NodeContext | null;
     if (nextSibling) {
       pos.sourceNode = nextSibling;
       pos.resetView();
+      nextPos = pos;
     } else if (pos.shadowSibling) {
-      pos = pos.shadowSibling;
-    } else if (contentNode) {
-      pos = null;
+      nextPos = pos.shadowSibling;
     } else {
-      pos = pos.parent.modify();
-      pos.after = true;
+      nextPos = null;
     }
     if (contentNode) {
-      const r = new Vtree.NodeContext(contentNode, parent, boxOffset);
+      const r = Vtree.NodeContext.childOf(contentNode, pos.parent, boxOffset);
       r.shadowContext = contentShadow;
       r.shadowType = contentShadowType;
-      r.shadowSibling = pos;
+      r.shadowSibling = nextPos;
       return this.processShadowContent(r);
     }
-    pos.boxOffset = boxOffset;
-    return pos;
+    if (nextPos === null) {
+      nextPos = pos.parent.modify();
+      nextPos.after = true;
+    }
+    nextPos.boxOffset = boxOffset;
+    return nextPos;
   }
 
-  private nextPositionInTree(pos: Vtree.NodeContext): Vtree.NodeContext {
+  private nextPositionInTree(
+    pos: Vtree.NodeContext,
+    preprocessedTextContent: Diff.Change[] | null,
+  ): Vtree.NodeContext | null {
     let boxOffset = pos.boxOffset + 1; // offset for the next position
     if (pos.after) {
       // root, that was the last possible position
-      if (!pos.parent) {
+      let cur = Vtree.asChildNodeContext(pos);
+      if (!cur) {
         return null;
       }
 
       // we are done with this sourceNode, see if there is a next sibling,
       // unless this is the root of the shadow tree
-      if (pos.shadowType != Vtree.ShadowType.ROOTED) {
-        const next = pos.sourceNode.nextSibling;
+      if (cur.shadowType != Vtree.ShadowType.ROOTED) {
+        const next = cur.sourceNode.nextSibling;
         if (next) {
-          pos = pos.modify();
+          cur = cur.modify();
 
           // keep shadowType
-          pos.boxOffset = boxOffset;
-          pos.sourceNode = next;
-          pos.resetView();
-          return this.processShadowContent(pos);
+          cur.boxOffset = boxOffset;
+          cur.sourceNode = next;
+          cur.resetView();
+          return this.processShadowContent(cur);
         }
       }
 
       // if no viable siblings, check if there are shadow siblings
-      if (pos.shadowSibling) {
+      if (cur.shadowSibling) {
         // our next position is the element after shadow:content in the parent
         // shadow tree
-        pos = pos.shadowSibling.modify();
-        pos.boxOffset = boxOffset;
-        return pos;
+        const sibling = cur.shadowSibling.modify();
+        sibling.boxOffset = boxOffset;
+        return sibling;
       }
 
       // if not rootless shadow, move to the "after" position for the parent
-      pos = pos.parent.modify();
-      pos.boxOffset = boxOffset;
-      pos.after = true;
-      return pos;
+      const afterParent = cur.parent.modify();
+      afterParent.boxOffset = boxOffset;
+      afterParent.after = true;
+      return afterParent;
     } else {
       // any shadow trees?
       if (pos.nodeShadow) {
@@ -2951,7 +3027,7 @@ export class ViewFactory
           shadowNode = shadowNode.firstChild;
         }
         if (shadowNode) {
-          const sr = new Vtree.NodeContext(shadowNode, pos, boxOffset);
+          const sr = Vtree.NodeContext.childOf(shadowNode, pos, boxOffset);
           sr.shadowContext = pos.nodeShadow;
           sr.shadowType = pos.nodeShadow.type;
           return this.processShadowContent(sr);
@@ -2962,13 +3038,13 @@ export class ViewFactory
       const child = pos.sourceNode.firstChild;
       if (child) {
         return this.processShadowContent(
-          new Vtree.NodeContext(child, pos, boxOffset),
+          Vtree.NodeContext.childOf(child, pos, boxOffset),
         );
       }
 
       // no children - was there text content?
-      if (pos.sourceNode.nodeType != 1) {
-        const content = Diff.restoreNewText(pos.preprocessedTextContent);
+      if (preprocessedTextContent) {
+        const content = Diff.restoreNewText(preprocessedTextContent);
         boxOffset += content.length - 1 - pos.offsetInNode;
       }
       pos = pos.modify();
@@ -2994,7 +3070,7 @@ export class ViewFactory
     let prev: Node | null = viewNode.previousSibling;
     while (prev) {
       if (prev.nodeType === Node.TEXT_NODE) {
-        if (prev.textContent.trim().length === 0) {
+        if ((prev.textContent ?? "").trim().length === 0) {
           prev = prev.previousSibling;
           continue;
         }
@@ -3052,9 +3128,9 @@ export class ViewFactory
     );
 
     // Create NodeContext for footnote-call with the same parent as footnote
-    const footnoteCallContext = new Vtree.NodeContext(
+    const footnoteCallContext = Vtree.NodeContext.siblingOf(
       footnoteCallSourceNode,
-      footnoteNodeContext.parent as Vtree.NodeContext,
+      footnoteNodeContext,
       footnoteNodeContext.boxOffset,
     );
 
@@ -3123,13 +3199,36 @@ export class ViewFactory
   nextInTree(
     position: Vtree.NodeContext,
     atUnforcedBreak?: boolean,
-  ): Task.Result<Vtree.NodeContext> {
-    let nodeContext = this.nextPositionInTree(position);
-    if (!nodeContext || nodeContext.after) {
-      return Task.newResult(nodeContext);
+  ): Task.Result<Vtree.NodeContext | null> {
+    const preprocessResult: Task.Result<Diff.Change[] | null> =
+      !position.after && position.sourceNode.nodeType != 1
+        ? this.preprocessTextContent(position)
+        : Task.newResult<Diff.Change[] | null>(null);
+    return preprocessResult.thenAsync((preprocessedTextContent) =>
+      this.nextInTreeWithPreprocessedText(
+        position,
+        preprocessedTextContent,
+        atUnforcedBreak,
+      ),
+    );
+  }
+
+  private nextInTreeWithPreprocessedText(
+    position: Vtree.NodeContext,
+    preprocessedTextContent: Diff.Change[] | null,
+    atUnforcedBreak?: boolean,
+  ): Task.Result<Vtree.NodeContext | null> {
+    const nextPosition = this.nextPositionInTree(
+      position,
+      preprocessedTextContent,
+    );
+    if (!nextPosition || nextPosition.after) {
+      return Task.newResult<Vtree.NodeContext | null>(nextPosition);
     }
-    this.syncTextNodePageTypeBoundary(nodeContext);
-    const frame: Task.Frame<Vtree.NodeContext> = Task.newFrame("nextInTree");
+    this.syncTextNodePageTypeBoundary(nextPosition);
+    let nodeContext = nextPosition;
+    const frame: Task.Frame<Vtree.NodeContext | null> =
+      Task.newFrame("nextInTree");
     this.setCurrent(nodeContext, true, atUnforcedBreak).then(
       (processChildren) => {
         if (!nodeContext.viewNode || !processChildren) {
@@ -3233,8 +3332,8 @@ export class ViewFactory
 
     const propList = Object.keys(computedStyle);
     propList.sort(Css.processingOrderFn);
-    let fontSize: Css.Val;
-    let lineHeight: Css.Val;
+    let fontSize: Css.Val | undefined;
+    let lineHeight: Css.Val | undefined;
 
     for (const propName of propList) {
       if (propertiesNotPassedToDOM[propName]) {
@@ -3318,7 +3417,8 @@ export class ViewFactory
       ) {
         // Fix for Issue #568
         Base.setCSSProperty(
-          this.page.pageAreaElement.parentElement.parentElement,
+          // the page area element is always nested in bleed box and container
+          this.page.pageAreaElement.parentElement!.parentElement!,
           propName,
           value.toString(),
         );
@@ -3431,8 +3531,8 @@ export class ViewFactory
    */
   private getLineHeightUnitSize(
     propName: string,
-    fontSize: Css.Val,
-    lineHeight: Css.Val,
+    fontSize: Css.Val | undefined,
+    lineHeight: Css.Val | undefined,
   ): number | null {
     const parentStyle = this.getParentViewStyle();
     const parentMetrics = this.getParentComputedMetrics(parentStyle);
@@ -3473,7 +3573,8 @@ export class ViewFactory
     if (lineHeightNum == null) {
       // Try to get font-size relative line-height value from ancestor elements
       for (
-        let viewNode = this.nodeContext?.parent?.viewNode;
+        let viewNode: Node | null | undefined =
+          this.nodeContext?.parent?.viewNode;
         viewNode && viewNode.nodeType === 1;
         viewNode = viewNode.parentNode
       ) {
@@ -3521,7 +3622,10 @@ export class ViewFactory
    * Get "em" unit size in px
    * @return font-size in px, or null if cannot be determined
    */
-  private getEmUnitSize(propName: string, fontSize: Css.Val): number | null {
+  private getEmUnitSize(
+    propName: string,
+    fontSize: Css.Val | undefined,
+  ): number | null {
     const parentStyle = this.getParentViewStyle();
     const parentFontSize = this.getParentComputedMetrics(parentStyle).fontSize;
 
@@ -3590,7 +3694,7 @@ export class ViewFactory
 
   /** @override */
   peelOff(
-    nodeContext: Vtree.NodeContext,
+    nodeContext: Vtree.ChildNodeContext,
     nodeOffset: number,
   ): Task.Result<Vtree.NodeContext> {
     const frame: Task.Frame<Vtree.NodeContext> = Task.newFrame("peelOff");
@@ -3598,8 +3702,6 @@ export class ViewFactory
     let offsetInNode = nodeContext.offsetInNode;
     const after = nodeContext.after;
     if (nodeOffset > 0) {
-      const text = nodeContext.viewNode.textContent;
-      nodeContext.viewNode.textContent = text.substr(0, nodeOffset);
       offsetInNode += nodeOffset;
     } else if (!after && nodeContext.viewNode && offsetInNode == 0) {
       const parent = nodeContext.viewNode.parentNode;
@@ -3608,34 +3710,48 @@ export class ViewFactory
       }
     }
     const boxOffset = nodeContext.boxOffset + nodeOffset;
-    const arr = [];
-    while (nodeContext && nodeContext.firstPseudo === firstPseudo) {
-      arr.push(nodeContext);
-      nodeContext = nodeContext.parent;
+
+    // arr collects the chain strictly below its container, innermost first
+    const arr: Vtree.NodeContext[] = [];
+    let container: Vtree.NodeContext = nodeContext;
+    for (
+      let parent: Vtree.NodeContext | null = nodeContext.parent;
+      parent && parent.firstPseudo === firstPseudo;
+      parent = container.parent
+    ) {
+      arr.push(container);
+      container = parent;
     }
-    let pn = arr.pop(); // container for that pseudoelement
-    let shadowSibling = pn.shadowSibling;
+    let shadowSibling = container.shadowSibling;
+    let i = arr.length - 1;
+    let rebuilt: Vtree.NodeContext | null = null;
     frame
       .loop(() => {
-        while (arr.length > 0) {
-          pn = arr.pop();
-          nodeContext = new Vtree.NodeContext(
+        while (i >= 0) {
+          const pn = arr[i];
+          const parentContext = rebuilt ?? container.parent;
+          const child = new Vtree.NodeContext(
             pn.sourceNode,
-            nodeContext,
+            parentContext,
             boxOffset,
+            (parentContext ?? container).formattingContext,
           );
-          if (arr.length == 0) {
-            nodeContext.offsetInNode = offsetInNode;
-            nodeContext.after = after;
+          child.blockContainer =
+            parentContext && Vtree.blockContainerForChildrenOf(parentContext);
+          if (i == 0) {
+            child.offsetInNode = offsetInNode;
+            child.after = after;
           }
-          nodeContext.shadowType = pn.shadowType;
-          nodeContext.shadowContext = pn.shadowContext;
-          nodeContext.nodeShadow = pn.nodeShadow;
-          nodeContext.shadowSibling = pn.shadowSibling
+          child.shadowType = pn.shadowType;
+          child.shadowContext = pn.shadowContext;
+          child.nodeShadow = pn.nodeShadow;
+          child.shadowSibling = pn.shadowSibling
             ? pn.shadowSibling
             : shadowSibling;
           shadowSibling = null;
-          const result = this.setCurrent(nodeContext, false);
+          rebuilt = child;
+          i--;
+          const result = this.setCurrent(child, false);
           if (result.isPending()) {
             return result;
           }
@@ -3643,12 +3759,12 @@ export class ViewFactory
         return Task.newResult(false);
       })
       .then(() => {
-        frame.finish(nodeContext);
+        frame.finish(rebuilt ?? nodeContext.parent);
       });
     return frame.result();
   }
 
-  createElement(ns: string, tag: string): Element {
+  createElement(ns: string | null, tag: string): Element {
     if (ns == Base.NS.XHTML) {
       return this.document.createElement(tag);
     }
@@ -3727,6 +3843,7 @@ export class ViewFactory
                 this.styler.cascade,
                 contentElement,
                 this.styler.cascade.counterResolver,
+                this.styler.elementWindow.currentStyle,
                 "before",
               ),
             )
@@ -3830,7 +3947,7 @@ export class ViewFactory
           }
         }
       } else {
-        const blockSizeP = this.nodeContext.vertical ? "width" : "height";
+        const blockSizeP = nodeContext.vertical ? "width" : "height";
         if (Base.getCSSProperty(elem, blockSizeP)) {
           // When a box with a specified block size is fragmented,
           // the fragmented box should not have the block size.
@@ -3989,7 +4106,8 @@ export class ViewFactory
     anonymousBlock.className = "viv-anonymous-block";
 
     for (
-      let node = forcedBreakElem.nextSibling, nextNode = null;
+      let node: Node | null = forcedBreakElem.nextSibling,
+        nextNode: Node | null = null;
       node;
       node = nextNode
     ) {
@@ -4009,7 +4127,7 @@ export class ViewFactory
     const num = numeric.num;
     const unit = numeric.unit;
     if (Exprs.isFontRelativeLengthUnit(unit)) {
-      let elem = viewNode;
+      let elem: Node | null = viewNode;
       while (elem && elem.nodeType !== 1) {
         elem = elem.parentNode;
       }
@@ -4017,7 +4135,6 @@ export class ViewFactory
       const fontSize = parseFloat(
         clientLayout.getElementComputedStyle(elem as Element)["font-size"],
       );
-      Asserts.assert(this.context);
       return CssCascade.convertFontRelativeLengthToPx(
         numeric,
         fontSize,
@@ -4076,10 +4193,6 @@ export class ViewFactory
         return this.isSameNodePositionStep(step1, step2);
       })
     );
-  }
-
-  isPseudoelement(elem) {
-    return !!PseudoElement.getPseudoName(elem);
   }
 }
 
