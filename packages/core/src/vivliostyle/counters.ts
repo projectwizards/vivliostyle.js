@@ -1968,6 +1968,86 @@ export class CounterStore {
   }
 
   /**
+   * Returns the unresolved references to rerender pages for after the
+   * specified page was laid out, when all pages are rendered: the references
+   * of each referring page all of whose targets have been laid out now, the
+   * last of them on the specified page. So a page with many forward
+   * references, like a table of contents, is rendered again once, when its
+   * last target is laid out, and not for each page with one of its targets.
+   *
+   * With `flush` (after the last page of the document), returns all
+   * unresolved references whose targets have been laid out, also those of
+   * pages with references to targets that do not exist.
+   */
+  getDeferredUnresolvedRefsToPage(
+    page: Vtree.Page,
+    flush: boolean,
+  ): {
+    spineIndex: number;
+    pageIndex: number;
+    pageCounters: CssCascade.CounterValues | null;
+    refs: TargetCounterReference[];
+  }[] {
+    const groups = new Map<
+      string,
+      {
+        spineIndex: number;
+        pageIndex: number;
+        pageCounters: CssCascade.CounterValues | null;
+        refs: TargetCounterReference[];
+        hasPendingTarget: boolean;
+        hasTargetOnPage: boolean;
+      }
+    >();
+    for (const id of Object.keys(this.unresolvedReferences)) {
+      const isLaidOut = !!this.pageCountersById[id];
+      const isOnPage = !!page.elementsById[id];
+      for (const ref of this.unresolvedReferences[id]) {
+        if (ref.isResolved()) {
+          continue;
+        }
+        const key = `${ref.spineIndex}:${ref.pageIndex}`;
+        let group = groups.get(key);
+        if (!group) {
+          group = {
+            spineIndex: ref.spineIndex,
+            pageIndex: ref.pageIndex,
+            pageCounters: ref.pageCounters,
+            refs: [],
+            hasPendingTarget: false,
+            hasTargetOnPage: false,
+          };
+          groups.set(key, group);
+        }
+        if (isLaidOut || isOnPage) {
+          group.refs.push(ref);
+        } else {
+          group.hasPendingTarget = true;
+        }
+        if (isOnPage) {
+          group.hasTargetOnPage = true;
+        }
+      }
+    }
+    return [...groups.values()]
+      .filter(
+        (group) =>
+          group.refs.length > 0 &&
+          (flush || (group.hasTargetOnPage && !group.hasPendingTarget)),
+      )
+      .sort(
+        (g1, g2) =>
+          g1.spineIndex - g2.spineIndex || g1.pageIndex - g2.pageIndex,
+      )
+      .map(({ spineIndex, pageIndex, pageCounters, refs }) => ({
+        spineIndex,
+        pageIndex,
+        pageCounters,
+        refs,
+      }));
+  }
+
+  /**
    * Save current references to solve and set them to the values passed in.
    * The saved references can be restored by popReferencesToSolve method.
    */
