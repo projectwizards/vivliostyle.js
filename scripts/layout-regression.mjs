@@ -637,8 +637,22 @@ function resolveViewerSpec(spec) {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "");
     const label = `git-${sanitized}`;
+    const host = `vivliostyle-git-${sanitized}-vivliostyle`;
+    // Vercel truncates a subdomain longer than 63 characters (before
+    // `.vercel.app`) and appends a short content hash to keep it unique.
+    // That hash can't be predicted here, so the derived URL below is only
+    // reliable for short branch names; long ones need the real preview URL
+    // (e.g. from the PR's Vercel comment) passed via --actual-viewer <url>.
+    if (host.length > 63) {
+      console.warn(
+        `Warning: branch name "${branch}" produces a Vercel preview host longer than 63 characters.\n` +
+          `Vercel truncates and hashes such hosts unpredictably, so the derived URL below is likely wrong:\n` +
+          `  https://${host}.vercel.app/\n` +
+          `Pass the actual preview URL directly instead, e.g. --actual-viewer <url>.`,
+      );
+    }
     return {
-      url: `https://vivliostyle-git-${sanitized}-vivliostyle.vercel.app/`,
+      url: `https://${host}.vercel.app/`,
       label,
     };
   }
@@ -1696,11 +1710,15 @@ function toComparableError(err) {
  * via release() after use.
  */
 class ContextPool {
-  constructor(browser, { viewportWidth, viewportHeight, poolSize }) {
+  constructor(
+    browser,
+    { viewportWidth, viewportHeight, poolSize, deviceScaleFactor },
+  ) {
     this._browser = browser;
     this._viewportWidth = viewportWidth;
     this._viewportHeight = viewportHeight;
     this._poolSize = poolSize;
+    this._deviceScaleFactor = deviceScaleFactor;
     /** @type {Array<import('playwright').BrowserContext>} */
     this._all = [];
     /** @type {Array<import('playwright').BrowserContext>} */
@@ -1721,7 +1739,7 @@ class ContextPool {
           width: this._viewportWidth,
           height: this._viewportHeight,
         },
-        deviceScaleFactor: 2,
+        deviceScaleFactor: this._deviceScaleFactor,
       });
       this._all.push(ctx);
       return ctx;
@@ -1762,6 +1780,7 @@ async function captureOneSide({
   exportHtml,
   viewportWidth,
   viewportHeight,
+  deviceScaleFactor,
 }) {
   // When a context pool is available, check out a context exclusively and
   // use a dedicated page (closed after capture).  The context is returned
@@ -1820,8 +1839,8 @@ async function captureOneSide({
   try {
     context = await browser.newContext({
       viewport: { width: viewportWidth, height: viewportHeight },
-      // Use device scale factor 2 to get more accurate pixel diffs.
-      deviceScaleFactor: 2,
+      // Use the same context DPR as the pooled capture path.
+      deviceScaleFactor,
     });
     const page = await context.newPage();
     const captured = await capturePages({
@@ -3918,9 +3937,21 @@ async function main() {
   }
 
   const browserEngines = { chromium, firefox, webkit };
+  // Use startup scale 1 with context DPR2 for the original WPT rendering
+  // conditions. Ordinary comparisons and manual URL pairs use matched DPR1
+  // to avoid scale-dependent border rounding and pagination.
+  opts.deviceScaleFactor = targets.every((target) =>
+    ["reftest", "print-reftest", "manual"].includes(target.sourceType),
+  )
+    ? 2
+    : 1;
   const browserEngine = browserEngines[opts.browser] ?? chromium;
   const launchArgs =
-    opts.browser === "chromium" ? { args: ["--disable-web-security"] } : {};
+    opts.browser === "chromium"
+      ? {
+          args: ["--disable-web-security", "--force-device-scale-factor=1"],
+        }
+      : {};
   const browser = await browserEngine.launch({
     headless: true,
     ...launchArgs,
@@ -3935,6 +3966,7 @@ async function main() {
     viewportWidth: opts.viewportWidth,
     viewportHeight: opts.viewportHeight,
     poolSize: opts.concurrency,
+    deviceScaleFactor: opts.deviceScaleFactor,
   });
 
   const differences = [];
@@ -3966,6 +3998,7 @@ async function main() {
       exportHtml: opts.exportHtml,
       viewportWidth: opts.viewportWidth,
       viewportHeight: opts.viewportHeight,
+      deviceScaleFactor: opts.deviceScaleFactor,
     };
 
     if (opts.mode === "reftest-diff") {

@@ -26,7 +26,7 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
   - `string`、`raw-string`、`url`、`number`、単位型、およびサポートされる CSS 値型を指定する `type(<...>)` 構文をサポートします。[PR #1975](https://github.com/vivliostyle/vivliostyle.js/pull/1975) を参照
   - 型と単位の値は、`attr()` を使用するプロパティに対して検証されます。
 - [相互参照: `target-counter()`, `target-counters()` and `target-text()`](https://www.w3.org/TR/css-content-3/#cross-references)
-  - `content` プロパティの値としてのみサポートします。
+  - `content` および `bookmark-label` プロパティの値としてのみサポートします。
 - [`string()` 関数（名前付き文字列）](https://www.w3.org/TR/css-content-3/#string-function)
 - [`content()` 関数](https://www.w3.org/TR/css-content-3/#content-function)
 - [`running()` 関数（ランニング要素）](https://www.w3.org/TR/css-gcpm-3/#running-syntax)
@@ -361,6 +361,14 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 - [CSS Generated Content for Paged Media (GCPM) 3 のアットルール](#css-generated-content-for-paged-media-gcpm-3)
 - [値 - 相互参照・string()・content()・running()・element()・leader() 関数](#値)
 
+### [CSS Generated Content 3](https://www.w3.org/TR/css-content-3/)
+
+- [bookmark-level、bookmark-label、bookmark-state（ブックマーク）](https://www.w3.org/TR/css-content-3/#bookmark-generation)
+  - ブックマークから目次を生成し、ビューアの目次ボックスに表示するとともに `getTOC()` で返します。Vivliostyle CLI はこれを PDF のしおり（ブックマーク）の生成に使用します。[PR #2258](https://github.com/vivliostyle/vivliostyle.js/pull/2258) を参照
+  - EPUB のパッケージ文書または出版物マニフェストでナビゲーション文書が指定されている場合は、CSS のブックマークよりもそちらが優先されます。
+  - `bookmark-state` は目次ボックスで項目を最初に展開して表示するかどうかを指定し、`getTOC()` が返す項目の `state` にもなります。
+  - 注意: `::before` および `::after` 疑似要素のブックマークはサポートしていません。`bookmark-label` の中の相互参照は、参照先がまだレイアウトされていない場合は `??` と表示されます。
+
 ### [CSS Fragmentation 3](https://www.w3.org/TR/css-break-3/)
 
 - [break-after](https://www.w3.org/TR/css-break-3/#propdef-break-after)
@@ -379,12 +387,12 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 ### [CSS Page Floats](https://drafts.csswg.org/css-page-floats/)
 
 - [clear](https://drafts.csswg.org/css-page-floats/#propdef-clear)
-  - [`none`、`inline-start`、`inline-end`、`block-start`、`block-end`、`left`、`right`、`top`、`bottom`、`both`、`all`、`same`](https://drafts.csswg.org/css-page-floats/#propdef-clear) 値をサポートします。
+  - `none`、`inline-start`、`inline-end`、`block-start`、`block-end`、`left`、`right`、`top`、`bottom`、`both`、`all`、`same`、`page`、`column`、`region` 値をサポートします。
   - ブロックレベルボックス（ページフロート以外）に `all` を指定すると、ドキュメント順序でこのボックスより前にアンカーがある block-start / block-end ページフロートの後にボックスの block-start 辺が来るように下げられます。
   - ページフロートに `clear` 値を指定すると、先行のページフロートの後に配置されます。
   - `same` 値は、そのページフロートがフロートしている方向と同じ方向を意味します。
   - `float: snap-block` のページフロートが block-start 端に配置されるところが、`clear` 値によりその配置が禁止される場合、フロートは代わりに block-end 側に配置されます（`clear` 値がその配置も禁止しない場合）。
-  - `page`、`column`、`region` 値は、先行のページフロートが `clear` プロパティを持つ要素（ページフロート、通常フロート、またはブロックレベルボックス）を含むページ/カラム/リージョンの前に配置されることを保証します。
+  - `page`、`column`、`region` 値は、先行のページフロートが `clear` プロパティを持つ要素（ページフロート、通常フロート、またはブロックレベルボックス）を含むページ/カラム/リージョンの前に配置されることを保証します。これらの値は、現在の CSS Page Floats 草案に対する拡張としてサポートしています。[Issue #1551](https://github.com/vivliostyle/vivliostyle.js/issues/1551) を参照してください。
 - [float](https://drafts.csswg.org/css-page-floats/#propdef-float)
   - [`block-start`、`block-end`、`inline-start`、`inline-end`、`snap-block`、`left`、`right`、`top`、`bottom`、`none`](https://drafts.csswg.org/css-page-floats/#propdef-float) 値をサポートします。
   - 複数のキーワードを組み合わせた値をサポートします。例:
@@ -499,8 +507,13 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 
 - [text-autospace](https://www.w3.org/TR/css-text-4/#text-autospace-property)
   - サポート値: `normal | no-autospace | [ ideograph-alpha || ideograph-numeric ] | auto`
+  - ブラウザがその値をサポートしている場合は、要素内のテキストにブラウザ本来の `text-autospace` を使用します。それ以外の場合と、ブラウザによって挙動が異なる要素境界では、Vivliostyle 独自の実装を使用します。要素境界の間隔は、CSS Text 4 の定義どおり、境界を含む最も内側の要素で決まります。[Issue #2151](https://github.com/vivliostyle/vivliostyle.js/issues/2151) を参照
+  - SVG では、`text-autospace` と `text-spacing-trim` はブラウザの既定値になります。
 - [text-spacing-trim](https://www.w3.org/TR/css-text-4/#text-spacing-trim-property)
-  - 値: `space-all | normal | space-first | trim-start | trim-both | auto`
+  - 値: `space-all | normal | space-first | trim-start | trim-both | trim-all | auto`
+  - ブラウザがサポートしていて（現在は Chromium）、インライン整形文脈内のすべての約物を使用フォントで詰められる場合は、ブラウザ本来の `text-spacing-trim` を使用します。`trim-both` で行末の全角の閉じ約物を半角にする処理や `hanging-punctuation` など、ブラウザが提供しない処理には Vivliostyle 独自の実装を併用します。それ以外の場合は、そのインライン整形文脈全体で Vivliostyle 独自の実装を使用します。[Issue #2151](https://github.com/vivliostyle/vivliostyle.js/issues/2151) を参照
+  - `trim-all` はブラウザがサポートしていないため、常に Vivliostyle 独自の実装で処理します。全角のコロン類（`：；`）は簡体字中国語以外では全角の中点類として扱い、全角の句読点類（`、。，．`）は繁体字中国語でのみ全角の中点類として扱います。[Issue #2214](https://github.com/vivliostyle/vivliostyle.js/issues/2214) を参照
+  - 縦書きでは、日本語の全角コロン（`：`）以外の全角のコロン類は通常は回転しないため、Vivliostyle 独自の実装では詰めません。ただし、テキストを横倒しにした場合（`text-orientation: sideways` など）は詰めます。
 - [text-spacing](https://www.w3.org/TR/css-text-4/#text-spacing-property)
   - 値: `normal | none | auto | [<autospace> || <spacing-trim>]`
   - 注: `text-autospace` と `text-spacing-trim` プロパティをまとめて設定するショートハンドプロパティです。[PR #1142](https://github.com/vivliostyle/vivliostyle.js/pull/1142) を参照
@@ -511,6 +524,7 @@ Vivliostyle は現在、以下の各 CSS 機能（[値](#値)、[セレクタ](#
 - [text-decoration-line](https://www.w3.org/TR/css-text-decor-3/#text-decoration-line-property)
 - [text-decoration-style](https://www.w3.org/TR/css-text-decor-3/#text-decoration-style-property)
 - [text-emphasis](https://www.w3.org/TR/css-text-decor-3/#text-emphasis-property)
+  - Chromiumでは、ページ・ルート段の先頭行のblock-start側の余分な行送りを、[ルビ](#css-ruby-layout-1)と同じ先頭行・border・formatting contextの条件で補正します。加えて、対象ブロックのblock-start側のmarginとpaddingがゼロであり、圏点のあるテキストの算出された`line-height`が`normal`ではなく数値である必要があります。FirefoxとWebKitではブラウザ本来の圏点配置を維持します。WebKitで圏点により段落内の行送りが増える問題は制限事項として残ります。block-end側の圏点でもページ・段に入る行数が減る場合があります。[Issue #1604](https://github.com/vivliostyle/vivliostyle.js/issues/1604) を参照。
 - [text-emphasis-color](https://www.w3.org/TR/css-text-decor-3/#text-emphasis-color-property)
 - [text-emphasis-position](https://www.w3.org/TR/css-text-decor-3/#text-emphasis-position-property)
 - [text-emphasis-style](https://www.w3.org/TR/css-text-decor-3/#text-emphasis-style-property)
@@ -564,7 +578,8 @@ Vivliostyle は CSS マルチカラムレイアウトをサポートしていま
 - [text-combine-upright](https://www.w3.org/TR/css-writing-modes-3/#propdef-text-combine-upright)
 - [text-orientation](https://www.w3.org/TR/css-writing-modes-3/#propdef-text-orientation)
 - [unicode-bidi](https://www.w3.org/TR/css-writing-modes-3/#propdef-unicode-bidi)
-- [writing-mode](https://www.w3.org/TR/css-writing-modes-3/#propdef-writing-mode)
+- [writing-mode](https://www.w3.org/TR/css-writing-modes-4/#propdef-writing-mode)
+  - `horizontal-tb`、`vertical-rl`、`vertical-lr`、`sideways-rl`、`sideways-lr` をサポートします。
 
 ### [CSS Flexible Box 1](https://www.w3.org/TR/css-flexbox-1/)
 
@@ -588,14 +603,17 @@ Vivliostyle は CSS マルチカラムレイアウトをサポートしていま
 - [transform-origin](https://www.w3.org/TR/css-transforms-1/#propdef-transform-origin)
 - [backface-visibility](https://www.w3.org/TR/css-transforms-2/#propdef-backface-visibility)
 
-<!--
 ### [CSS Ruby Layout 1](https://www.w3.org/TR/css-ruby-1/)
 
-- [display](https://www.w3.org/TR/css-ruby-1/#propdef-display)
-  - Values: `ruby | ruby-base | ruby-text | ruby-base-container | ruby-text-container`
-- [ruby-align](https://www.w3.org/TR/css-ruby-1/#propdef-ruby-align)
-- [ruby-position](https://www.w3.org/TR/css-ruby-1/#propdef-ruby-position)
--->
+ほかのCSS機能と同様、ブラウザでサポートされているルビ関連のプロパティと値はすべて利用できます。ルビの配置と通常の行送りはブラウザのレイアウトに従います。
+
+以下の行送りの補正は、HTMLのルビと、`display: ruby`、`ruby-base`、`ruby-text`による単純なCSSルビが対象です。ルビの算出された`line-height`が`normal`ではなく数値である必要があります。WebKitでは、補正対象のCSSルビはこれらのdisplay値を指定した`span`要素に限ります。
+
+行送りの補正（[Issue #1604](https://github.com/vivliostyle/vivliostyle.js/issues/1604)）:
+
+- ChromiumとWebKitでは、ページ・ルート段の先頭行のblock-start側だけを補正します。対象は文書のルートのblock formatting context内にあり、対象ブロックとその本文の祖先ボックスにblock-start側のborderがない場合です。page boxのborderはこの条件に含めません。Firefoxにはルビのマージン補正を加えません。
+- 非ルート段組などの別のformatting contextは、この補正の対象外です。WebKitのルビやChromiumの横書きunderルビでは段落境界の行間が広がる場合があり、block-end側の注釈でもページ・段に入る行数が減る場合があります。over／under側の注釈の重なりを防ぐために必要な行間は維持します。
+- 全称セレクタによるリセットなど、通常のゼロマージンでは補正を無効にしません。ブラウザ本来の行送りを維持するには、`rt`または`display: ruby-text`の要素に`margin-block-start: 0 !important`を指定してください。作者が指定した非ゼロのマージンは尊重します。
 
 <!--
 ### [CSS Mobile Text Size Adjustment 1](https://drafts.csswg.org/css-size-adjust-1/)

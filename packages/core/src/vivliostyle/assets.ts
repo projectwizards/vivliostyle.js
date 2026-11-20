@@ -103,9 +103,10 @@ export const VivliostyleViewportCss = `
   transform-origin: left top;
 }
 
+/* Keep the normal height when measuring emphasis leading in debug mode.
+   right: auto keeps the empty box from covering text selection (PR #1740). */
 [data-vivliostyle-debug] [data-vivliostyle-layout-box] {
   right: auto;
-  bottom: auto;
   z-index: auto;
   overflow: visible;
 }
@@ -536,7 +537,7 @@ overflow-wrap = normal | break-word | anywhere;
 [moz]text-align-last = auto | start | end | left | right | center | justify | inside | outside;
 text-justify = auto | none | inter-word | inter-character;
 word-break = normal | keep-all | break-all | break-word;
-text-spacing-trim = auto | normal | space-all | trim-both | trim-auto |
+text-spacing-trim = auto | normal | space-all | trim-both | trim-all | trim-auto |
     [[ trim-start | space-start | space-first ] ||
      [ trim-end | space-end | allow-end ] ||
      [ trim-adjacent | space-adjacent ]];
@@ -569,7 +570,7 @@ text-overflow = [clip | ellipsis | STRING]{1,2};
 text-combine-upright = none | all; /* relaxed */
 [epub,webkit]text-orientation = mixed | upright | sideways-right | sideways-left | sideways | use-glyph-orientation /* the following values are kept for backward-compatibility */ | vertical-right | rotate-right | rotate-left | rotate-normal | auto;
 unicode-bidi = normal | embed | isolate | bidi-override | isolate-override | plaintext;
-[epub,webkit]writing-mode = horizontal-tb | vertical-rl | lr-tb | rl-tb | tb-rl | lr | rl | tb;
+[epub,webkit]writing-mode = horizontal-tb | vertical-rl | vertical-lr | sideways-rl | sideways-lr | lr-tb | rl-tb | tb-rl | lr | rl | tb;
 
 /* CSS Flex box */
 FLEX_BASIS = content | PAPLENGTH;
@@ -653,6 +654,11 @@ background-blend-mode = COMMA( BLEND_MODE+ );
 string-set = COMMA( SPACE( IDENT CONTENT_LIST )+ | none );
 footnote-display = block | inline | compact;
 footnote-policy = auto | line;
+
+/* CSS Generated Content: Bookmarks */
+bookmark-level = none | POS_INT;
+bookmark-label = CONTENT_LIST;
+bookmark-state = open | closed;
 
 /* CSS Repeated Headers and Footers */
 [viv]repeat-on-break = auto | none | header | footer;
@@ -854,20 +860,7 @@ word-wrap = overflow-wrap;
 export const UserAgentXml = `
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:s="http://www.pyroxy.com/ns/shadow">
-<head>
-<style><![CDATA[
-
-.-vivliostyle-footnote-content {
-  float: footnote;
-  --viv-semantic-footnote-content: 1;
-}
-
-.-vivliostyle-table-cell-container {
-  display: block;
-}
-
-]]></style>
-</head>
+<head></head>
 <body>
 
 <s:template id="footnote"><s:content/><s:include class="-vivliostyle-footnote-content"/></s:template>
@@ -877,13 +870,25 @@ export const UserAgentXml = `
 </body>
 </html>`;
 
+/**
+ * The style sheet for the templates in user-agent.xml. It is the only style
+ * sheet applied to user-agent.xml.
+ */
+export const UserAgentXmlCss = `
+.-vivliostyle-footnote-content {
+  float: footnote;
+  --viv-semantic-footnote-content: 1;
+}
+
+.-vivliostyle-table-cell-container {
+  display: block;
+}
+`;
+
 /** user-agent-page.css */
 export const UserAgentPageCss = `
 @namespace "http://www.w3.org/1999/xhtml";
 
-:root {
-  hyphens: -epubx-expr(pref-hyphenate? "auto": "manual");
-}
 :root[data-vivliostyle-epub-spine-properties~="page-spread-left"] {
   break-before: left;
 }
@@ -1517,6 +1522,11 @@ export const VivliostylePolyfillCss = `
   border-end-start-radius: 0 !important;
   border-end-end-radius: 0 !important;
 }
+/* Preserve internal leading compensation while discarding author margins. */
+[data-viv-margin-discard~="block-start"][data-viv-emphasis-adjust~="block-start"],
+[data-viv-box-break~="block-start"]:not([data-viv-box-break~="clone"]):not(table[style*="border-collapse: collapse"]:has(>thead))[data-viv-emphasis-adjust~="block-start"] {
+  margin-block-start: var(--viv-emphasis-start) !important;
+}
 [data-viv-box-break~="block-start"][data-viv-box-break~="text-start"] {
   text-indent: 0 !important;
 }
@@ -1538,6 +1548,10 @@ span.viv-anonymous-block {
   text-spacing-trim: space-all;
   text-autospace: no-autospace;
 }
+[data-vivliostyle-page-container] svg {
+  text-spacing-trim: initial;
+  text-autospace: initial;
+}
 /* see #2034 */
 @font-face {
   font-family: "-viv-ts-sp";
@@ -1547,13 +1561,39 @@ viv-ts-open.viv-ts-auto > viv-ts-inner,
 viv-ts-open.viv-ts-trim > viv-ts-inner {
   margin-inline-start: -0.5em;
 }
-viv-ts-close.viv-ts-auto > viv-ts-inner,
-viv-ts-close.viv-ts-trim > viv-ts-inner {
-  letter-spacing: -0.5em;
+/* see TextSpacingPolyfill.processTextSpacing() */
+viv-ts-close:is(.viv-ts-trim, .viv-ts-auto, .viv-hang-end, .viv-hang-last)
+  > viv-ts-inner {
+  position: relative;
+  inset-inline-start: var(--viv-ts-shift);
+  margin-inline-start: calc(-1 * var(--viv-ts-shift));
 }
-viv-ts-close.viv-hang-end > viv-ts-inner,
-viv-ts-close.viv-hang-last > viv-ts-inner {
-  letter-spacing: -1em;
+viv-ts-close:is(.viv-ts-trim, .viv-ts-auto, .viv-hang-hw) {
+  --viv-ts-shift: 0.5em;
+}
+/* The advance of the punctuation, if measured (Issue #2249) */
+viv-ts-close.viv-hang-end:not(.viv-hang-hw) {
+  --viv-ts-shift: var(--viv-ts-advance, 1em);
+}
+/* The punctuation reduced by a fixed amount, measured as full-width, is not
+   trimmed again by the native text-spacing-trim */
+viv-ts-open:is(.viv-ts-trim, .viv-ts-auto) > viv-ts-inner,
+viv-ts-close:is(.viv-ts-trim, .viv-ts-auto, .viv-hang-end:not(.viv-hang-hw))
+  > viv-ts-inner,
+viv-ts-middle.viv-ts-trim > viv-ts-inner {
+  text-spacing-trim: space-all;
+}
+/* The fullwidth middle dot punctuation set half-width by trim-all is
+   centered in the half-width advance, including the fullwidth dot
+   punctuation in Traditional Chinese that may hang */
+viv-ts-middle.viv-ts-trim > viv-ts-inner {
+  position: relative;
+  inset-inline-start: 0.25em;
+  margin-inline-start: -0.5em;
+}
+viv-ts-close[data-viv-ts-middle]:is(.viv-ts-trim, .viv-ts-auto)
+  > viv-ts-inner {
+  inset-inline-start: 0.25em;
 }
 viv-ts-open.viv-ts-auto::before,
 viv-ts-close.viv-ts-auto::after,
@@ -1567,20 +1607,21 @@ viv-ts-close.viv-hang-end::after {
   visibility: hidden;
 }
 viv-ts-close.viv-hang-end:not(.viv-hang-hw)::after {
-  /* 0.5em space + 0.5em = 1em */
-  letter-spacing: 0.5em;
+  /* 0.5em space + the rest = the advance of the punctuation */
+  letter-spacing: calc(var(--viv-ts-advance, 1em) - 0.5em);
 }
-viv-ts-close.viv-hang-hw > viv-ts-inner {
-  letter-spacing: -0.5em;
+/* With trim-all, the hanging punctuation is half-width where it does not
+   hang: 0.5em space */
+viv-ts-close[data-viv-ts-trim-all].viv-hang-end:not(.viv-hang-hw)::after {
+  letter-spacing: normal;
+}
+viv-ts-close[data-viv-ts-trim-all][data-viv-ts-middle].viv-hang-end:not(.viv-hang-hw)
+  > viv-ts-inner {
+  /* centered in the half-width advance where it does not hang */
+  inset-inline-start: 0.75em;
 }
 viv-ts-open.viv-hang-first > viv-ts-inner {
-  display: inline-block;
-  line-height: 1;
-  inline-size: 1em;
-  text-indent: 0;
-  text-align: end;
-  text-align-last: end;
-  margin-inline-start: -1em;
+  margin-inline-start: calc(-1 * var(--viv-ts-shift));
 }
 viv-ts-thin-sp::after {
   content: " ";
@@ -1592,6 +1633,12 @@ viv-ts-thin-sp::after {
   text-orientation: mixed;
   visibility: hidden;
 }
+/* Stops the native spacing and the ruby annotation overhang without spacing
+   (see TextSpacingPolyfill.processTextSpacing()) */
+viv-ts-thin-sp.viv-ts-zero::after {
+  /* Not zero, since WebKit lets the annotation overhang a zero-width space */
+  letter-spacing: -0.4995em;
+}
 [style*=text-decoration] :is(viv-ts-thin-sp, viv-ts-close.viv-ts-auto)::after {
   visibility: visible;
 }
@@ -1600,6 +1647,14 @@ span[data-viv-leader] {
   text-combine-upright: none;
   text-orientation: mixed;
   white-space: pre;
+}
+[data-viv-nowrap],
+[data-viv-nowrap] * {
+  text-wrap-mode: nowrap !important;
+}
+[data-viv-text-align-start] * {
+  text-align: start !important;
+  text-align-last: auto !important;
 }
 
 /* ::marker */
@@ -1683,6 +1738,17 @@ span[data-viv-leader] {
 [style*="--viv-initialLetter"]:has(>[data-adapt-pseudo="first-letter"])::first-letter {
   -webkit-initial-letter: var(--viv-initialLetter);
   initial-letter: var(--viv-initialLetter);
+}
+
+/* ::first-line metrics for the first line box's strut */
+[style*="--viv-firstLineFontFamily"]::first-line {
+  font-family: var(--viv-firstLineFontFamily);
+}
+[style*="--viv-firstLineFontSize"]::first-line {
+  font-size: var(--viv-firstLineFontSize);
+}
+[style*="--viv-firstLineLineHeight"]::first-line {
+  line-height: var(--viv-firstLineLineHeight);
 }
 `;
 

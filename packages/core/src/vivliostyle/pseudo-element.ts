@@ -21,7 +21,6 @@ import * as Css from "./css";
 import * as CssCascade from "./css-cascade";
 import * as CssStyler from "./css-styler";
 import * as Exprs from "./exprs";
-import * as TextPolyfill from "./text-polyfill";
 import * as Vtree from "./vtree";
 import { PseudoElement } from "./types";
 
@@ -78,13 +77,13 @@ export class PseudoelementStyler implements PseudoElement.PseudoelementStyler {
   /** @override */
   getStyle(element: Element, deep: boolean): CssCascade.ElementStyle {
     const pseudoName = getPseudoName(element);
-    if (!this.afterStyleTaken && pseudoName && pseudoName.match(/after$/)) {
+    if (!this.afterStyleTaken && pseudoName?.endsWith("after")) {
       this.style = this.styler.getStyle(this.element, true);
       this.afterStyleTaken = true;
     }
     const pseudoMap = CssCascade.getStyleMap(this.style, "_pseudos");
     const style = pseudoMap?.[pseudoName] || ({} as CssCascade.ElementStyle);
-    if (pseudoName.match(/^first-/) && !style["x-first-pseudo"]) {
+    if (pseudoName.startsWith("first-") && !style["x-first-pseudo"]) {
       let nest = 1;
       let r: RegExpMatchArray | null;
       if (pseudoName == "first-letter") {
@@ -119,8 +118,6 @@ export class PseudoelementStyler implements PseudoElement.PseudoelementStyler {
             this.exprContentListener,
           ),
         );
-        // text-spacing & hanging-punctuation support
-        TextPolyfill.preprocessForTextSpacing(element);
       }
     }
   }

@@ -44,6 +44,13 @@ export const firstLetterPattern =
  */
 export const ELEMENT_OFFSET_ATTR = "data-adapt-eloff";
 
+/**
+ * Indicates the spine index of the source document of a page container.
+ * Element offsets are numbered per source document, so this is needed to find
+ * an element by its offset among the pages of all source documents.
+ */
+export const SPINE_INDEX_ATTR = "data-vivliostyle-spine-index";
+
 export let emptyObj = {};
 
 export type JSON = any;
@@ -83,6 +90,26 @@ export function toTocBoxURL(url: string): string {
 }
 
 /**
+ * Prefix of the id generated for a source element that has a CSS bookmark
+ * but no id. The id is followed by the element offset.
+ */
+export const bookmarkIdPrefix = "viv-bookmark-";
+
+/**
+ * Ids generated for source elements. They are kept out of the source DOM so
+ * that they do not affect selector matching.
+ */
+const generatedIds = new WeakMap<Element, string>();
+
+export function setGeneratedId(element: Element, id: string): void {
+  generatedIds.set(element, id);
+}
+
+export function getGeneratedId(element: Element): string | undefined {
+  return generatedIds.get(element);
+}
+
+/**
  * Base URL relative to which URLs of resources are resolved.
  */
 export let baseURL = window.location.href;
@@ -91,13 +118,17 @@ export function setBaseURL(value: string): void {
 }
 
 /**
- * Base URL relative to which URLs of resources such as validation.txt and
- * user-agent.css are resolved.
+ * Base URL of the built-in resources such as the user agent style sheets and
+ * user-agent.xml. Their contents are embedded in the code (see assets.ts) and
+ * never fetched; the URLs only identify them.
  */
-export let resourceBaseURL = window.location.href;
-export function setResourceBaseURL(value: string): void {
-  resourceBaseURL = value;
-}
+export const builtinResourceBaseURL = "vivliostyle://resources/";
+
+/**
+ * URL of the built-in user-agent.xml, which holds the shadow templates
+ * (`#footnote`, `#table-cell`).
+ */
+export const userAgentXmlURL = `${builtinResourceBaseURL}user-agent.xml`;
 
 function getWptRawRepoRootURL(url: string): string | null {
   const matched = stripFragmentAndQuery(url).match(
@@ -140,14 +171,14 @@ export function resolveURL(relURL: string, baseURL: string): string {
     baseURL = `${baseURL}/`;
   }
   let r: string[] | null;
-  if (relURL.match(/^\/\//)) {
+  if (relURL.startsWith("//")) {
     r = baseURL.match(/^(\w{2,}:)\/\//);
     if (r) {
       return r[1] + relURL;
     }
     return relURL;
   }
-  if (relURL.match(/^\//)) {
+  if (relURL.startsWith("/")) {
     const wptRawRepoRootURL = getWptRawRepoRootURL(baseURL);
     if (wptRawRepoRootURL) {
       return wptRawRepoRootURL + relURL;
@@ -158,18 +189,18 @@ export function resolveURL(relURL: string, baseURL: string): string {
     }
     return relURL;
   }
-  if (relURL.match(/^\.(\/|$)/)) {
-    relURL = relURL.substr(2); // './foo' => 'foo'
+  if (relURL === "." || relURL.startsWith("./")) {
+    relURL = relURL.slice(2); // './foo' => 'foo'
   }
   baseURL = stripFragmentAndQuery(baseURL);
-  if (relURL.match(/^#/)) {
+  if (relURL.startsWith("#")) {
     return baseURL + relURL;
   }
   let i = baseURL.lastIndexOf("/");
   if (i < 0) {
     return relURL;
   }
-  let url = baseURL.substr(0, i + 1) + relURL;
+  let url = baseURL.slice(0, i + 1) + relURL;
   let urlOption = "";
   r = url.match(/^([^?#]*)([?#].*)$/);
   if (r) {
@@ -186,7 +217,7 @@ export function resolveURL(relURL: string, baseURL: string): string {
     if (j <= 0) {
       break;
     }
-    url = url.substr(0, j) + url.substr(i + 3);
+    url = url.slice(0, j) + url.slice(i + 3);
   }
   return url.replace(/\/(\.\/)+/g, "/") + urlOption;
 }
@@ -197,7 +228,7 @@ export function resolveURL(relURL: string, baseURL: string): string {
  * resolveURL("#id", data:...) intentionally returns just "#id".
  */
 export function resolveReferenceURL(relURL: string, baseURL: string): string {
-  if (relURL.match(/^#/) && baseURL) {
+  if (relURL.startsWith("#") && baseURL) {
     return stripFragment(baseURL) + relURL;
   }
   return resolveURL(relURL, baseURL);
@@ -400,7 +431,7 @@ export class PriorityQueue {
 
 export const knownPrefixes = ["", "-webkit-", "-moz-"];
 
-export const propNameMap: { [key: string]: string[] | null } = {};
+export const propNameMap = new Map<string, string[] | null>();
 
 export function checkIfPropertySupported(
   prefix: string,
@@ -410,7 +441,7 @@ export function checkIfPropertySupported(
 }
 
 export function getPrefixedPropertyNames(prop: string): string[] | null {
-  let prefixed = propNameMap[prop];
+  let prefixed = propNameMap.get(prop);
   if (prefixed || prefixed === null) {
     // null means the browser does not support the property
     return prefixed;
@@ -420,7 +451,7 @@ export function getPrefixedPropertyNames(prop: string): string[] | null {
     case "template":
     case "ua-list-item-count":
     case "x-first-pseudo":
-      propNameMap[prop] = null;
+      propNameMap.set(prop, null);
       return null;
     case "text-combine-upright":
       // Special case for Safari
@@ -428,7 +459,7 @@ export function getPrefixedPropertyNames(prop: string): string[] | null {
         checkIfPropertySupported("-webkit-", "text-combine") &&
         !checkIfPropertySupported("", "text-combine-upright")
       ) {
-        propNameMap[prop] = ["-webkit-text-combine"];
+        propNameMap.set(prop, ["-webkit-text-combine"]);
         return ["-webkit-text-combine"];
       }
       break;
@@ -436,15 +467,32 @@ export function getPrefixedPropertyNames(prop: string): string[] | null {
   for (const prefix of knownPrefixes) {
     if (checkIfPropertySupported(prefix, prop)) {
       prefixed = [prefix + prop];
-      propNameMap[prop] = prefixed;
+      propNameMap.set(prop, prefixed);
       return prefixed;
     }
   }
 
   // Not supported by the browser
   Logging.logger.warn("Property not supported by the browser: ", prop);
-  propNameMap[prop] = null;
+  propNameMap.set(prop, null);
   return null;
+}
+
+/**
+ * The documents in which ruby or text-emphasis annotations may need their
+ * boundary leading adjusted (see ruby-emphasis.ts): an inline style with
+ * "text-emphasis" was set, or a ruby annotation was prepared.
+ */
+const annotatedDocuments = new WeakSet<Document>();
+
+export function markAnnotatedDocument(doc: Document | null): void {
+  if (doc) {
+    annotatedDocuments.add(doc);
+  }
+}
+
+export function isAnnotatedDocument(doc: Document | null): boolean {
+  return !!doc && annotatedDocuments.has(doc);
 }
 
 export function setCSSProperty(
@@ -455,6 +503,9 @@ export function setCSSProperty(
   const elemStyle = (elem as HTMLElement)?.style;
   if (!elemStyle) {
     return;
+  }
+  if (prop.includes("text-emphasis") || value?.includes("text-emphasis")) {
+    markAnnotatedDocument(elem.ownerDocument);
   }
   if (prop.startsWith("--")) {
     elemStyle.setProperty(prop, value || " ");
@@ -473,14 +524,6 @@ export function setCSSProperty(
             break;
         }
         break;
-      case "text-combine-upright":
-        switch (value) {
-          case "all":
-            // workaround for Chrome 93 bug https://crbug.com/1242755
-            elemStyle.setProperty("text-indent", "0");
-            break;
-        }
-        break;
     }
     elemStyle.setProperty(prefixed, value);
   }
@@ -492,7 +535,7 @@ export function getCSSProperty(
   opt_value?: string,
 ): string {
   try {
-    const propertyNames = propNameMap[prop];
+    const propertyNames = propNameMap.get(prop);
     return (elem as HTMLElement).style.getPropertyValue(
       propertyNames ? propertyNames[0] : prop,
     );
@@ -625,7 +668,7 @@ export function isLetter(ch: string): boolean {
 
 export function escapeCharToHex(str: string, prefix?: string): string {
   prefix = typeof prefix === "string" ? prefix : "\\u";
-  return prefix + (65536 | str.charCodeAt(0)).toString(16).substr(1);
+  return prefix + (str.charCodeAt(0) || 0).toString(16).padStart(4, "0");
 }
 
 export function escapeNameStrToHex(str: string, prefix?: string): string {
@@ -641,7 +684,7 @@ export function escapeRegExp(str: string): string {
 
 export function unescapeCharFromHex(str: string, prefix?: string): string {
   prefix = typeof prefix === "string" ? prefix : "\\u";
-  if (str.indexOf(prefix) === 0) {
+  if (str.startsWith(prefix)) {
     return String.fromCharCode(parseInt(str.substring(prefix.length), 16));
   } else {
     return str;

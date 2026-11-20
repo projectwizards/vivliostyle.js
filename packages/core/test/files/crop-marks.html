@@ -1,9 +1,13 @@
 <!DOCTYPE html>
+<!-- Issue #599: expect two pages with bleed and printer marks, with no trailing blank page. -->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <title>Crop marks and bleed</title>
     <style>
+      html {
+        line-height: 1.25;
+      }
       @page {
         size: A4;
       }

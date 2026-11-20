@@ -32,13 +32,16 @@ import * as Base from "./base";
 import * as BreakPosition from "./break-position";
 import * as CssCascade from "./css-cascade";
 import * as Css from "./css";
+import * as CssLogicalUtil from "./css-logical-util";
 import * as GeometryUtil from "./geometry-util";
 import * as LayoutHelper from "./layout-helper";
+import * as RubyEmphasis from "./ruby-emphasis";
 import * as LayoutProcessor from "./layout-processor";
 import * as PageFloats from "./page-floats";
 import * as Plugin from "./plugin";
 import * as Matchers from "./matchers";
 import * as PseudoElement from "./pseudo-element";
+import * as RangeClientRects from "./range-client-rects";
 import * as SemanticFootnote from "./semantic-footnote";
 import * as Task from "./task";
 import * as Vgen from "./vgen";
@@ -336,6 +339,29 @@ export class AllLayoutConstraint implements LayoutConstraint {
   allowLayout(nodeContext: Vtree.NodeContext): boolean {
     return this.constraints.every((c) => c.allowLayout(nodeContext));
   }
+
+  allowLayoutAfterPageBreak(nodeContext: Vtree.NodeContext): boolean {
+    // Hooks may update retained layout state (the counter constraint does).
+    // Reject on ordinary constraints first so a later failure cannot leave a
+    // one-shot page-break allowance consumed by an otherwise rejected node.
+    for (const constraint of this.constraints) {
+      if (
+        !constraint.allowLayoutAfterPageBreak &&
+        !constraint.allowLayout(nodeContext)
+      ) {
+        return false;
+      }
+    }
+    for (const constraint of this.constraints) {
+      if (
+        constraint.allowLayoutAfterPageBreak &&
+        !constraint.allowLayoutAfterPageBreak(nodeContext)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
 }
 
 /**
@@ -385,7 +411,7 @@ export class BoxBreakPosition
   override getNodeContext(): Vtree.NodeContext | null {
     return this.alreadyEvaluated
       ? this.breakNodeContext
-      : this.checkPoints[this.checkPoints.length - 1];
+      : this.checkPoints.at(-1);
   }
 }
 
@@ -420,6 +446,42 @@ export function validateCheckPoints(
   }
 }
 
+/**
+ * A float laid out in a column, recorded to be placed again later if its
+ * block parent moves (Issue #1292).
+ */
+type PendingFloat = {
+  element: HTMLElement;
+  floatSide: string;
+  /** The clear side of the float in geometry, or null */
+  clearLR: string | null;
+  parent: Vtree.NodeContext | null;
+  /** The inline range available to the float (rotated coordinates) */
+  x1: number;
+  x2: number;
+  /** The margin box at the static position (rotated coordinates) */
+  staticFloatHorBox: GeometryUtil.Rect;
+  /**
+   * The margin box where the float element was placed (client coordinates),
+   * to restore its position if it is not moved
+   */
+  floatBox: GeometryUtil.Rect;
+  /** The block parent that may move, or null if it does not move */
+  parentViewNode: Element | null;
+  /** The block-start edge of the parent when the float was laid out */
+  parentBlockStart: number;
+};
+
+/**
+ * The float layout state before the first pending float (Issue #1292).
+ */
+type FloatLayoutState = {
+  bands: GeometryUtil.Band[];
+  leftFloatEdge: number;
+  rightFloatEdge: number;
+  bottommostFloatTop: number;
+};
+
 export class Column extends VtreeImpl.Container implements Layout.Column {
   last: Node | null;
   viewDocument: Document;
@@ -441,6 +503,13 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
   leftFloatEdge: number = 0; // bottom of the bottommost left float
   rightFloatEdge: number = 0; // bottom of the bottommost right float
   bottommostFloatTop: number = 0; // Top of the bottommost float
+  /**
+   * Floats laid out since the first float that may have to move with its
+   * block parent (see resolvePendingFloats()), and the float layout state
+   * before them.
+   */
+  private pendingFloats: PendingFloat[] = [];
+  private stateBeforePendingFloats: FloatLayoutState | null = null;
   stopAtOverflow: boolean = true;
   lastAfterPosition: Vtree.NodePosition | null = null;
   fragmentLayoutConstraints: FragmentLayoutConstraint[] = [];
@@ -486,7 +555,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
 
   getTopEdge(): number {
     return this.vertical
-      ? this.rtl
+      ? this.getInlineDir() < 0
         ? this.endEdge
         : this.startEdge
       : this.beforeEdge;
@@ -494,7 +563,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
 
   getBottomEdge(): number {
     return this.vertical
-      ? this.rtl
+      ? this.getInlineDir() < 0
         ? this.startEdge
         : this.endEdge
       : this.afterEdge;
@@ -502,7 +571,9 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
 
   getLeftEdge(): number {
     return this.vertical
-      ? this.afterEdge
+      ? this.getBoxDir() < 0
+        ? this.afterEdge
+        : this.beforeEdge
       : this.rtl
         ? this.endEdge
         : this.startEdge;
@@ -510,7 +581,9 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
 
   getRightEdge(): number {
     return this.vertical
-      ? this.beforeEdge
+      ? this.getBoxDir() < 0
+        ? this.beforeEdge
+        : this.afterEdge
       : this.rtl
         ? this.startEdge
         : this.endEdge;
@@ -571,12 +644,16 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     // multi-column measurement errors in exclusion shapes can make
     // footnoteEdge ~1.2px too small while the default 0.5px precision
     // (needed for float band snapping, Issue #1917) is too tight.
-    const precision = 1.5 / (this.clientLayout.pixelRatio || 1);
+    // A zero block-size region only takes zero block-size content, so even
+    // thin content must count as overflow there. (Issue #391)
+    const precision = this.isZeroBlockSizeRegion()
+      ? 0.01
+      : 1.5 / (this.clientLayout.pixelRatio || 1);
     if (this.almostEquals(edge, this.footnoteEdge, precision)) {
       return false;
     }
 
-    if (this.vertical) {
+    if (this.getBoxDir() < 0) {
       return edge < this.footnoteEdge;
     } else {
       return edge > this.footnoteEdge;
@@ -680,12 +757,12 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
             position.sourceNode.textContent = firstLetterText;
             viewNode.textContent = firstLetterText;
             position.sourceNode.nextSibling.textContent =
-              text2.substr(firstLetterLength);
+              text2.slice(firstLetterLength);
           }
         }
         if (firstLetterLength > 0) {
           const viewText = viewNode.textContent ?? "";
-          viewNode.textContent = viewText.substr(0, firstLetterLength);
+          viewNode.textContent = viewText.slice(0, firstLetterLength);
         }
         return this.layoutContext.peelOff(textPosition, firstLetterLength);
       }
@@ -732,7 +809,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
             // the browser's column breaking.
             const columnOver = LayoutHelper.checkIfBeyondColumnBreaks(
               rect,
-              this.vertical,
+              this.writingMode,
             );
             if (columnOver >= 2) {
               // When the box position is beyond two or more column breaks,
@@ -930,6 +1007,18 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
    * @param height float box progression dimension.
    * @return newly created float element.
    */
+  // Geometry bands use top-to-bottom coordinates for the vertical inline
+  // axis. In sideways-lr CSS float:left is at the bottom (line-left).
+  private floatSideInGeometry(side: string): string {
+    return this.writingMode === "sideways-lr"
+      ? side === "left"
+        ? "right"
+        : side === "right"
+          ? "left"
+          : side
+      : side;
+  }
+
   createFloat(
     ref: Node | null,
     side: string,
@@ -956,8 +1045,8 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       Base.setCSSProperty(div, "width", `${width}px`);
       Base.setCSSProperty(div, "height", `${height}px`);
     }
-    Base.setCSSProperty(div, "float", side);
-    Base.setCSSProperty(div, "clear", side);
+    Base.setCSSProperty(div, "float", this.floatSideInGeometry(side));
+    Base.setCSSProperty(div, "clear", this.floatSideInGeometry(side));
 
     // enable to visualize
     // Base.setCSSProperty(div, "background-color", "#50F0FF");
@@ -993,8 +1082,8 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     const bands = this.bands;
     const x1 = this.vertical ? this.getTopEdge() : this.getLeftEdge();
     const x2 = this.vertical ? this.getBottomEdge() : this.getRightEdge();
-    const y1 = this.vertical ? -this.getRightEdge() : this.getTopEdge();
-    const y2 = this.vertical ? -this.getLeftEdge() : this.getBottomEdge();
+    const y1 = this.getBoxDir() * this.beforeEdge;
+    const y2 = this.getBoxDir() * this.afterEdge;
     let foundNonZeroWidthBand: GeometryUtil.Band | null = null;
 
     // First pass: adjust band edges to column edges if they are almost equal
@@ -1132,7 +1221,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
 
     if (foundNonZeroWidthBand) {
       // Update footnoteEdge (Fix for issue #1298)
-      const lastBand = bands[bands.length - 1];
+      const lastBand = bands.at(-1);
       // Use wider tolerance for the y2 comparison: in multi-column layout,
       // getBoundingClientRect() can report band edges ~1.2px off from the
       // actual column edge. The default 0.5px precision (pixelRatio=0) is
@@ -1142,9 +1231,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         foundNonZeroWidthBand !== lastBand &&
         (lastBand.y2 >= y2 || this.almostEquals(lastBand.y2, y2, y2Precision))
       ) {
-        this.footnoteEdge = this.vertical
-          ? -foundNonZeroWidthBand.y2
-          : foundNonZeroWidthBand.y2;
+        this.footnoteEdge = this.getBoxDir() * foundNonZeroWidthBand.y2;
 
         // Remove unnecessary floats that may cause layout issues
         // (Fix for issue #1662; Partial fix for issue #1490)
@@ -1197,7 +1284,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     ) {
       const sizeProp = this.vertical ? "width" : "height";
       Base.setCSSProperty(this.element, sizeProp, `${blockSize}px`);
-      if (this.vertical) {
+      if (this.getBoxDir() < 0) {
         const left = this.left + (initialBlockSize - blockSize);
         Base.setCSSProperty(this.element, "left", `${left}px`);
       }
@@ -1229,7 +1316,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         nodeContext,
         this.clientLayout,
         0,
-        this.vertical,
+        this.writingMode,
       );
       if (!isNaN(edge)) {
         return edge;
@@ -1242,7 +1329,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         nodeContext,
         this.clientLayout,
         offset,
-        this.vertical,
+        this.writingMode,
       );
       if (!isNaN(edge)) {
         return edge;
@@ -1397,11 +1484,13 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     const frame: Task.Frame<Vtree.NodeContext | null> =
       Task.newFrame("layoutFloat");
     const element = nodeContext.viewNode as Element;
-    const floatSide = PageFloats.resolveInlineFloatDirection(
-      nodeContext.floatSide,
-      nodeContext.vertical,
-      nodeContext.direction,
-      (this.layoutContext as Vgen.ViewFactory).page.side,
+    const floatSide = this.floatSideInGeometry(
+      PageFloats.resolveInlineFloatDirection(
+        nodeContext.floatSide,
+        nodeContext.writingMode,
+        nodeContext.direction,
+        (this.layoutContext as Vgen.ViewFactory).page.side,
+      ),
     );
     Base.setCSSProperty(element, "float", "none");
     Base.setCSSProperty(element, "display", "inline-block");
@@ -1410,7 +1499,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       const floatBBox = LayoutHelper.getElementClientRectAdjusted(
         this.clientLayout,
         element,
-        this.vertical,
+        this.writingMode,
       );
       const margin = this.getComputedMargin(element);
       let floatBox = new GeometryUtil.Rect(
@@ -1419,8 +1508,8 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         floatBBox.right + margin.right,
         floatBBox.bottom + margin.bottom,
       );
-      let x1 = this.rtl ? this.endEdge : this.startEdge;
-      let x2 = this.rtl ? this.startEdge : this.endEdge;
+      let x1 = this.getInlineDir() < 0 ? this.endEdge : this.startEdge;
+      let x2 = this.getInlineDir() < 0 ? this.startEdge : this.endEdge;
       let parent = nodeContext.parent;
       while (parent && parent.inline) {
         parent = parent.parent;
@@ -1446,14 +1535,18 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         const parentBox = LayoutHelper.getElementClientRectAdjusted(
           this.clientLayout,
           probe,
-          this.vertical,
+          this.writingMode,
         );
         x1 = Math.max(
-          this.rtl ? this.getEndEdge(parentBox) : this.getStartEdge(parentBox),
+          this.getInlineDir() < 0
+            ? this.getEndEdge(parentBox)
+            : this.getStartEdge(parentBox),
           x1,
         );
         x2 = Math.min(
-          this.rtl ? this.getStartEdge(parentBox) : this.getEndEdge(parentBox),
+          this.getInlineDir() < 0
+            ? this.getStartEdge(parentBox)
+            : this.getEndEdge(parentBox),
           x2,
         );
         parentViewNode.removeChild(probe);
@@ -1473,6 +1566,12 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         // after the layout of the float is done.
         if (parent !== nodeContext.parent && !nodeContext.firstPseudo) {
           // Unless float is specified on ::first-letter (Fix for issue #923)
+          // The inherited properties of the inline ancestors are set on the
+          // float by the view factory (Vgen.ViewFactory#inheritFromSourceParent),
+          // but the language is not a property. (Issue #1479)
+          if (nodeContext.lang && nodeContext.lang !== parent.lang) {
+            element.setAttribute("lang", nodeContext.lang);
+          }
           parentViewNode.appendChild(element);
 
           // Mark the moved float box so that it is not removed wrongly
@@ -1482,65 +1581,38 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         }
       }
 
-      // box is rotated for vertical orientation
-      let box = new GeometryUtil.Rect(
-        x1,
-        this.getBoxDir() * this.beforeEdge,
-        x2,
-        this.getBoxDir() * this.afterEdge,
-      );
       let floatHorBox = floatBox;
       if (this.vertical) {
-        floatHorBox = GeometryUtil.rotateBox(floatBox);
+        floatHorBox = GeometryUtil.rotateBox(floatBox, this.getBoxDir());
       }
-      const dir = this.getBoxDir();
-      if (floatHorBox.y1 < this.bottommostFloatTop * dir) {
-        const boxExtent = floatHorBox.y2 - floatHorBox.y1;
-        floatHorBox.y1 = this.bottommostFloatTop * dir;
-        floatHorBox.y2 = floatHorBox.y1 + boxExtent;
-      }
-
+      // The static position before placement, kept for re-placement when the
+      // parent moves (Issue #1292)
+      const staticFloatHorBox = new GeometryUtil.Rect(
+        floatHorBox.x1,
+        floatHorBox.y1,
+        floatHorBox.x2,
+        floatHorBox.y2,
+      );
       // Handle clear property on inline floats (Issue #1803)
-      if (nodeContext.clearSide) {
-        const clearLR =
-          /^(top|bottom|inside|outside|(block|inline)-(start|end))$/.test(
-            nodeContext.clearSide,
+      const clearLR = nodeContext.clearSide
+        ? this.floatSideInGeometry(
+            /^(top|bottom|inside|outside|(block|inline)-(start|end))$/.test(
+              nodeContext.clearSide,
+            )
+              ? PageFloats.resolveInlineFloatDirection(
+                  nodeContext.clearSide,
+                  nodeContext.writingMode,
+                  nodeContext.direction,
+                  (this.layoutContext as Vgen.ViewFactory).page.side,
+                )
+              : nodeContext.clearSide === "same"
+                ? this.floatSideInGeometry(floatSide)
+                : nodeContext.clearSide,
           )
-            ? PageFloats.resolveInlineFloatDirection(
-                nodeContext.clearSide,
-                nodeContext.vertical,
-                nodeContext.direction,
-                (this.layoutContext as Vgen.ViewFactory).page.side,
-              )
-            : nodeContext.clearSide === "same"
-              ? floatSide
-              : nodeContext.clearSide;
-        let clearEdge = this.beforeEdge;
-        if (clearLR !== "right") {
-          clearEdge = dir * Math.max(clearEdge * dir, this.leftFloatEdge * dir);
-        }
-        if (clearLR !== "left") {
-          clearEdge =
-            dir * Math.max(clearEdge * dir, this.rightFloatEdge * dir);
-        }
-        const clearY = clearEdge * dir;
-        if (floatHorBox.y1 < clearY) {
-          const boxExtent = floatHorBox.y2 - floatHorBox.y1;
-          floatHorBox.y1 = clearY;
-          floatHorBox.y2 = floatHorBox.y1 + boxExtent;
-        }
-      }
-
-      // When compensation is enabled, extend box after-edge slightly so
-      // positionFloat() does not reject a float that barely overflows due to
-      // sub-pixel rounding when clear pushes it near the column boundary.
-      // With pixelRatio=0 this stays unchanged (no extra extension).
-      // (Issue #1803, #1913)
-      box.y2 += this.getFloatLayoutUnit();
-
-      GeometryUtil.positionFloat(box, this.bands, floatHorBox, floatSide);
+        : null;
+      this.placeFloatHorBox(floatHorBox, x1, x2, floatSide, clearLR);
       if (this.vertical) {
-        floatBox = GeometryUtil.unrotateBox(floatHorBox);
+        floatBox = GeometryUtil.unrotateBox(floatHorBox, this.getBoxDir());
       }
       const insets = this.getComputedInsets(element);
       Base.setCSSProperty(
@@ -1556,78 +1628,62 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       Base.setCSSProperty(element, "position", "absolute");
       Asserts.assert(nodeContext.display);
       Base.setCSSProperty(element, "display", nodeContext.display);
-      let offsets;
-      const containingBlockForAbsolute = parent
-        ? parent.containingBlockForAbsolute
-          ? VtreeImpl.asElementNodeContext(parent)
-          : parent.getContainingBlockForAbsolute()
-        : null;
-      if (containingBlockForAbsolute) {
-        const containingBlockViewNode = containingBlockForAbsolute.viewNode;
-        const probe =
-          containingBlockViewNode.ownerDocument.createElement("div");
-        probe.style.position = "absolute";
-        if (containingBlockForAbsolute.vertical) {
-          probe.style.right = "0";
-        } else {
-          probe.style.left = "0";
-        }
-        probe.style.top = "0";
-        containingBlockViewNode.appendChild(probe);
-        offsets = LayoutHelper.getElementClientRectAdjusted(
-          this.clientLayout,
-          probe,
-          this.vertical,
-        );
-        containingBlockViewNode.removeChild(probe);
-      } else {
-        offsets = {
-          left: this.getLeftEdge() - this.paddingLeft,
-          right: this.getRightEdge() + this.paddingRight,
-          top: this.getTopEdge() - this.paddingTop,
-        };
-      }
-      // The computed float offset from the block-start edge of its
-      // containing block may be negative when the containing block has
-      // `position: relative` and has been pushed along the block-progression
-      // direction by a margin carried over from a preceding sibling across
-      // a column/page break. Clamp the offset to be non-negative so that
-      // the float stays inside the containing block. (Issue #1885)
-      if (
-        containingBlockForAbsolute
-          ? containingBlockForAbsolute.vertical
-          : this.vertical
-      ) {
-        const rightValue = Math.max(0, offsets.right - floatBox.x2);
-        Base.setCSSProperty(element, "right", `${rightValue}px`);
-      } else {
-        const leftValue = Math.max(0, floatBox.x1 - offsets.left);
-        Base.setCSSProperty(element, "left", `${leftValue}px`);
-      }
-      const topValue = Math.max(0, floatBox.y1 - offsets.top);
-      Base.setCSSProperty(element, "top", `${topValue}px`);
+      // The margin box where the float element is actually placed
+      const placedFloatBox = this.setFloatElementOffsets(
+        element,
+        floatBox,
+        parent,
+      );
       if (nodeContext.clearSpacer) {
         nodeContext.clearSpacer.remove();
         nodeContext.clearSpacer = null;
       }
-      const floatBoxEdge = this.vertical ? floatBox.x1 : floatBox.y2;
-      const floatBoxTop = this.vertical ? floatBox.x2 : floatBox.y1;
+      const floatBoxEdge = this.getRectAfterEdge(floatBox);
+      const floatBoxTop = this.getRectBeforeEdge(floatBox);
 
       // TODO: subtract after margin when determining overflow.
-      if (!this.isOverflown(floatBoxEdge) || this.breakPositions.length == 0) {
+      // The first float is accepted even if it overflows, except in a zero
+      // block-size region, which must never take non-fitting content.
+      // (Issue #391)
+      if (
+        !this.isOverflown(floatBoxEdge) ||
+        (this.breakPositions.length == 0 && !this.isZeroBlockSizeRegion())
+      ) {
         // no overflow
         this.killFloats();
-        box = new GeometryUtil.Rect(
-          this.getLeftEdge(),
-          this.getTopEdge(),
-          this.getRightEdge(),
-          this.getBottomEdge(),
-        );
-        if (this.vertical) {
-          box = GeometryUtil.rotateBox(box);
+        const parentBlockStart = this.pseudoParent
+          ? null
+          : this.getMovableFloatParentBlockStart(parentRendered, element);
+        if (this.pendingFloats.length === 0 && parentBlockStart !== null) {
+          // Keep the state before this float so that the floats can be
+          // placed again when they have to move later.
+          this.stateBeforePendingFloats = this.getFloatLayoutState();
+        }
+        if (this.stateBeforePendingFloats && !this.pseudoParent) {
+          if (parentBlockStart !== null) {
+            // The static position is at the block-start of the parent.
+            const extent = staticFloatHorBox.y2 - staticFloatHorBox.y1;
+            staticFloatHorBox.y1 = this.getBoxDir() * parentBlockStart;
+            staticFloatHorBox.y2 = staticFloatHorBox.y1 + extent;
+          }
+          this.pendingFloats.push({
+            element: element as HTMLElement,
+            floatSide,
+            clearLR,
+            parent,
+            x1,
+            x2,
+            staticFloatHorBox,
+            floatBox: placedFloatBox,
+            parentViewNode:
+              parentBlockStart !== null
+                ? (parentRendered.viewNode as Element)
+                : null,
+            parentBlockStart: parentBlockStart ?? 0,
+          });
         }
         GeometryUtil.addFloatToBands(
-          box,
+          this.getFloatBandsBox(),
           this.bands,
           floatHorBox,
           null,
@@ -1649,6 +1705,384 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       }
     });
     return frame.result();
+  }
+
+  /**
+   * Place a float box (rotated for vertical writing mode) in the inline range
+   * x1-x2, below the top of the bottommost float, applying the clear property
+   * of the float, and avoiding the floats in the bands.
+   * Returns false if the float does not fit in the column; the box is then
+   * left where clear and the bottommost float put it.
+   */
+  private placeFloatHorBox(
+    floatHorBox: GeometryUtil.Rect,
+    x1: number,
+    x2: number,
+    floatSide: string,
+    clearLR: string | null,
+  ): boolean {
+    const dir = this.getBoxDir();
+    const moveTo = (y: number) => {
+      if (floatHorBox.y1 < y) {
+        const boxExtent = floatHorBox.y2 - floatHorBox.y1;
+        floatHorBox.y1 = y;
+        floatHorBox.y2 = floatHorBox.y1 + boxExtent;
+      }
+    };
+    moveTo(this.bottommostFloatTop * dir);
+
+    // Handle clear property on inline floats (Issue #1803)
+    if (clearLR) {
+      let clearEdge = this.beforeEdge;
+      if (clearLR !== "right") {
+        clearEdge = dir * Math.max(clearEdge * dir, this.leftFloatEdge * dir);
+      }
+      if (clearLR !== "left") {
+        clearEdge = dir * Math.max(clearEdge * dir, this.rightFloatEdge * dir);
+      }
+      moveTo(clearEdge * dir);
+    }
+
+    // box is rotated for vertical orientation
+    // When compensation is enabled, extend box after-edge slightly so
+    // positionFloat() does not reject a float that barely overflows due to
+    // sub-pixel rounding when clear pushes it near the column boundary.
+    // With pixelRatio=0 this stays unchanged (no extra extension).
+    // (Issue #1803, #1913)
+    const box = new GeometryUtil.Rect(
+      x1,
+      dir * this.beforeEdge,
+      x2,
+      dir * this.afterEdge + this.getFloatLayoutUnit(),
+    );
+    return GeometryUtil.positionFloat(box, this.bands, floatHorBox, floatSide);
+  }
+
+  /**
+   * Block-end edge of a box in the client coordinates.
+   */
+  private getRectAfterEdge(rect: GeometryUtil.Rect): number {
+    return this.vertical ? (this.getBoxDir() < 0 ? rect.x1 : rect.x2) : rect.y2;
+  }
+
+  /**
+   * Block-start edge of a box in the client coordinates.
+   */
+  private getRectBeforeEdge(rect: GeometryUtil.Rect): number {
+    return this.vertical ? (this.getBoxDir() < 0 ? rect.x2 : rect.x1) : rect.y1;
+  }
+
+  /**
+   * The column box used to add floats to the bands, rotated for vertical
+   * writing mode.
+   */
+  private getFloatBandsBox(): GeometryUtil.Rect {
+    const box = new GeometryUtil.Rect(
+      this.getLeftEdge(),
+      this.getTopEdge(),
+      this.getRightEdge(),
+      this.getBottomEdge(),
+    );
+    return this.vertical ? GeometryUtil.rotateBox(box, this.getBoxDir()) : box;
+  }
+
+  /**
+   * Set the left/right and top properties of an absolutely positioned float
+   * element so that its margin box is placed at floatBox.
+   * Returns the margin box where the float is actually placed, which differs
+   * from floatBox when the offsets are clamped.
+   */
+  private setFloatElementOffsets(
+    element: Element,
+    floatBox: GeometryUtil.Rect,
+    parent: Vtree.NodeContext | null,
+    clampToContainingBlock: boolean = true,
+  ): GeometryUtil.Rect {
+    let offsets: { left: number; right: number; top: number };
+    const containingBlockForAbsolute = parent
+      ? parent.containingBlockForAbsolute
+        ? VtreeImpl.asElementNodeContext(parent)
+        : parent.getContainingBlockForAbsolute()
+      : null;
+    if (containingBlockForAbsolute) {
+      const containingBlockViewNode = containingBlockForAbsolute.viewNode;
+      const probe = containingBlockViewNode.ownerDocument.createElement("div");
+      probe.style.position = "absolute";
+      if (
+        CssLogicalUtil.isBlockReversed(containingBlockForAbsolute.writingMode)
+      ) {
+        probe.style.right = "0";
+      } else {
+        probe.style.left = "0";
+      }
+      probe.style.top = "0";
+      containingBlockViewNode.appendChild(probe);
+      offsets = LayoutHelper.getElementClientRectAdjusted(
+        this.clientLayout,
+        probe,
+        this.writingMode,
+      );
+      containingBlockViewNode.removeChild(probe);
+    } else {
+      offsets = {
+        left: this.getLeftEdge() - this.paddingLeft,
+        right: this.getRightEdge() + this.paddingRight,
+        top: this.getTopEdge() - this.paddingTop,
+      };
+    }
+    // The computed float offset from the block-start edge of its
+    // containing block may be negative when the containing block has
+    // `position: relative` and has been pushed along the block-progression
+    // direction by a margin carried over from a preceding sibling across
+    // a column/page break. Clamp the offset to be non-negative so that
+    // the float stays inside the containing block. (Issue #1885)
+    // Not clamped when restoring a float position that was computed before
+    // the containing block moved. (Issue #1292)
+    const clamp = (value: number) =>
+      clampToContainingBlock ? Math.max(0, value) : value;
+    let dx = 0;
+    if (
+      containingBlockForAbsolute
+        ? CssLogicalUtil.isBlockReversed(containingBlockForAbsolute.writingMode)
+        : this.getBoxDir() < 0
+    ) {
+      const rightValue = clamp(offsets.right - floatBox.x2);
+      Base.setCSSProperty(element, "right", `${rightValue}px`);
+      dx = offsets.right - rightValue - floatBox.x2;
+    } else {
+      const leftValue = clamp(floatBox.x1 - offsets.left);
+      Base.setCSSProperty(element, "left", `${leftValue}px`);
+      dx = offsets.left + leftValue - floatBox.x1;
+    }
+    const topValue = clamp(floatBox.y1 - offsets.top);
+    Base.setCSSProperty(element, "top", `${topValue}px`);
+    const dy = offsets.top + topValue - floatBox.y1;
+    return new GeometryUtil.Rect(
+      floatBox.x1 + dx,
+      floatBox.y1 + dy,
+      floatBox.x2 + dx,
+      floatBox.y2 + dy,
+    );
+  }
+
+  /**
+   * When a float is placed at the block-start of its block parent, the parent
+   * can still move in the block direction because its block-start margin may
+   * collapse with the block-start margin of a following in-flow block, e.g.
+   * `<body><figure style="float:left"/><p style="margin-top:20px">`.
+   * The float is out of flow, so this collapsing moves the parent and the
+   * float has to move with it. (Issue #1292)
+   *
+   * Returns the block-start edge of the parent if it may move this way,
+   * otherwise null. This must be called after the float is made absolutely
+   * positioned and with the exclusion floats removed.
+   */
+  private getMovableFloatParentBlockStart(
+    parent: Vtree.RenderedNodeContext | null,
+    floatElement: Element,
+  ): number | null {
+    if (!parent || parent.establishesBFC || parent.inline) {
+      return null;
+    }
+    const parentViewNode = parent.viewNode as Element;
+    const style = this.clientLayout.getElementComputedStyle(parentViewNode);
+    if (!style || this.hasNonZeroBlockStartInset(style)) {
+      // The parent's margin does not collapse with its children's margins.
+      return null;
+    }
+    const parentBlockStart = this.getBeforeEdge(
+      LayoutHelper.getElementClientRectAdjusted(
+        this.clientLayout,
+        parentViewNode,
+        this.writingMode,
+      ),
+    );
+    // The float must be at the block-start of the parent, i.e., there is no
+    // in-flow content before the float in the parent. Check it with an empty
+    // block placed just before the float: it is at the block-start of the
+    // parent only if nothing in flow precedes it.
+    const probe = floatElement.ownerDocument.createElement("div");
+    probe.style.display = "block";
+    probe.style.position = "static";
+    probe.style.float = "none";
+    probe.style.clear = "none";
+    probe.style.margin = "0";
+    probe.style.padding = "0";
+    probe.style.border = "0";
+    probe.style.setProperty(this.vertical ? "width" : "height", "0");
+    floatElement.parentNode.insertBefore(probe, floatElement);
+    const probeBlockStart = this.getBeforeEdge(
+      LayoutHelper.getElementClientRectAdjusted(
+        this.clientLayout,
+        probe,
+        this.writingMode,
+      ),
+    );
+    probe.remove();
+    if (Math.abs(probeBlockStart - parentBlockStart) > 0.5) {
+      return null;
+    }
+    return parentBlockStart;
+  }
+
+  private getFloatLayoutState(): FloatLayoutState {
+    return {
+      bands: this.bands.map(
+        (band) => new GeometryUtil.Band(band.y1, band.y2, band.x1, band.x2),
+      ),
+      leftFloatEdge: this.leftFloatEdge,
+      rightFloatEdge: this.rightFloatEdge,
+      bottommostFloatTop: this.bottommostFloatTop,
+    };
+  }
+
+  private setFloatLayoutState(state: FloatLayoutState): void {
+    this.bands = state.bands;
+    this.leftFloatEdge = state.leftFloatEdge;
+    this.rightFloatEdge = state.rightFloatEdge;
+    this.bottommostFloatTop = state.bottommostFloatTop;
+  }
+
+  /**
+   * Keep the pending floats where they were laid out, restoring the float
+   * layout state after them. Their elements are positioned again since they
+   * may have moved with a moved containing block (e.g. a parent with
+   * `position: relative`).
+   */
+  private keepPendingFloats(
+    pendingFloats: PendingFloat[],
+    stateAfter: FloatLayoutState,
+  ): void {
+    this.setFloatLayoutState(stateAfter);
+    for (const pendingFloat of pendingFloats) {
+      this.setFloatElementOffsets(
+        pendingFloat.element,
+        pendingFloat.floatBox,
+        pendingFloat.parent,
+        false,
+      );
+    }
+    this.createFloats();
+  }
+
+  private clearPendingFloats(): void {
+    this.pendingFloats = [];
+    this.stateBeforePendingFloats = null;
+  }
+
+  /**
+   * Move the floats laid out at the block-start of their block parents
+   * if the parents have moved since then due to margin collapsing with the
+   * following in-flow content. (Issue #1292)
+   */
+  private resolvePendingFloats(): void {
+    const pendingFloats = this.pendingFloats;
+    const stateBefore = this.stateBeforePendingFloats;
+    this.clearPendingFloats();
+    if (!stateBefore || !pendingFloats.some((f) => f.parentViewNode)) {
+      return;
+    }
+    if (
+      pendingFloats.some(
+        ({ element, parentViewNode }) =>
+          !element.isConnected ||
+          (parentViewNode && !parentViewNode.isConnected),
+      )
+    ) {
+      return;
+    }
+    const measureDeltas = () =>
+      pendingFloats.map(({ parentViewNode, parentBlockStart }) => {
+        const delta = parentViewNode
+          ? this.getBeforeEdge(
+              LayoutHelper.getElementClientRectAdjusted(
+                this.clientLayout,
+                parentViewNode,
+                this.writingMode,
+              ),
+            ) - parentBlockStart
+          : 0;
+        return Math.abs(delta) < 0.01 ? 0 : delta;
+      });
+    // Usually the parents have not moved, which is checked first without
+    // touching the exclusion floats.
+    let deltas = measureDeltas();
+    if (deltas.every((delta) => delta === 0)) {
+      return;
+    }
+    // Measure the parents again without the exclusion floats. Otherwise a
+    // parent whose first line does not fit beside the floats can be pushed
+    // below them, which is not a move caused by margin collapsing.
+    this.killFloats();
+    deltas = measureDeltas();
+    if (deltas.every((delta) => delta === 0)) {
+      this.createFloats();
+      return;
+    }
+
+    // Place the floats again from the state before them, so that they avoid
+    // each other and the clearance from the preceding floats is kept.
+    const stateAfter = this.getFloatLayoutState();
+    this.setFloatLayoutState(stateBefore);
+    const dir = this.getBoxDir();
+    const bandsBox = this.getFloatBandsBox();
+    const newFloatBoxes: GeometryUtil.Rect[] = [];
+    for (let i = 0; i < pendingFloats.length; i++) {
+      const pendingFloat = pendingFloats[i];
+      const { staticFloatHorBox } = pendingFloat;
+      const floatHorBox = new GeometryUtil.Rect(
+        staticFloatHorBox.x1,
+        staticFloatHorBox.y1 + dir * deltas[i],
+        staticFloatHorBox.x2,
+        staticFloatHorBox.y2 + dir * deltas[i],
+      );
+      if (floatHorBox.y1 < dir * this.beforeEdge) {
+        // Do not move the float before the block-start edge of the column.
+        this.keepPendingFloats(pendingFloats, stateAfter);
+        return;
+      }
+      const placed = this.placeFloatHorBox(
+        floatHorBox,
+        pendingFloat.x1,
+        pendingFloat.x2,
+        pendingFloat.floatSide,
+        pendingFloat.clearLR,
+      );
+      const floatBox = this.vertical
+        ? GeometryUtil.unrotateBox(floatHorBox, dir)
+        : floatHorBox;
+      const floatBoxEdge = this.getRectAfterEdge(floatBox);
+      if (!placed || this.isOverflown(floatBoxEdge)) {
+        // Keep the floats where they are rather than pushing them out of the
+        // column or letting them overlap when they no longer fit.
+        this.keepPendingFloats(pendingFloats, stateAfter);
+        return;
+      }
+      GeometryUtil.addFloatToBands(
+        bandsBox,
+        this.bands,
+        floatHorBox,
+        null,
+        pendingFloat.floatSide,
+      );
+      if (pendingFloat.floatSide == "left") {
+        this.leftFloatEdge = floatBoxEdge;
+      } else {
+        this.rightFloatEdge = floatBoxEdge;
+      }
+      this.bottommostFloatTop = this.getRectBeforeEdge(floatBox);
+      newFloatBoxes.push(floatBox);
+    }
+    pendingFloats.forEach((pendingFloat, i) => {
+      const floatBox = newFloatBoxes[i];
+      this.setFloatElementOffsets(
+        pendingFloat.element,
+        floatBox,
+        pendingFloat.parent,
+      );
+      this.updateMaxReachedAfterEdge(this.getRectAfterEdge(floatBox));
+    });
+    this.createFloats();
   }
 
   setupFloatArea(
@@ -1760,6 +2194,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       pageFloatLayoutContext,
       parentContainer,
       {
+        writingMode: floatContainer.writingMode,
         vertical: floatContainer.vertical,
         rtl: floatContainer.rtl,
         snapWidth: 0,
@@ -1785,7 +2220,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         borderBoxSizing: false,
       },
       null,
-      (floatContainer.exclusions || []).concat(),
+      [...(floatContainer.exclusions || [])],
       this.flowRootFormattingContext,
     );
     floatArea.isFloat = true;
@@ -2131,6 +2566,11 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
                 newPosition.primary,
               );
               context.deferPageFloat(continuation);
+            } else {
+              // A retry can fit a float that was deferred on an earlier pass.
+              context
+                .getPageFloatLayoutContext(float.floatReference)
+                .removeFloatDeferredToNext(float);
             }
             frame.finish(true);
           } else {
@@ -2372,10 +2812,10 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
           const rect = LayoutHelper.getElementClientRectAdjusted(
             this.clientLayout,
             viewNode as Element,
-            this.vertical,
+            this.writingMode,
           );
           if (rect.right >= rect.left && rect.bottom >= rect.top) {
-            return this.vertical ? rect.left : rect.bottom;
+            return this.getAfterEdge(rect);
           }
           return NaN;
         };
@@ -2383,7 +2823,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
           nodeContextAfter,
           this.clientLayout,
           0,
-          this.vertical,
+          this.writingMode,
         );
         if (nodeContext.floatSide === "footnote") {
           const footnote = float as Footnote;
@@ -2488,7 +2928,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     if (VIVLIOSTYLE_DEBUG) {
       validateCheckPoints(checkPoints);
     }
-    let lastCheckPoints = checkPoints.concat([]); // make a copy
+    let lastCheckPoints = [...checkPoints]; // make a copy
     checkPoints.splice(0, checkPoints.length); // make empty
     let totalLineCount = 0;
     let firstPseudo = nodeContext.firstPseudo; // :first-letter is not processed here
@@ -2512,11 +2952,23 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
           linePositions[count - 1],
           true,
         );
-        const childLineBreak =
+        let childLineBreak =
           lineBreak && VtreeImpl.asChildNodeContext(lineBreak);
         if (!childLineBreak) {
           loopFrame.breakLoop();
           return;
+        }
+        // The <br> marker's box belongs to the line it ends, but the marker
+        // itself must be outside the ::first-line fragment. Otherwise peeling
+        // off the line reprocesses the same source <br> and creates a blank
+        // line after the fragment. (Issue #2196)
+        if (
+          childLineBreak.after &&
+          childLineBreak.viewNode?.nodeType === Node.ELEMENT_NODE &&
+          (childLineBreak.viewNode as Element).localName === "br"
+        ) {
+          childLineBreak = childLineBreak.modify();
+          childLineBreak.after = false;
         }
         this.finishBreak(childLineBreak, false, false).then(() => {
           totalLineCount += count;
@@ -2529,6 +2981,12 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
               this.buildViewToNextBlockEdge(nodeContext, lastCheckPoints).then(
                 (resNodeContextParam) => {
                   resNodeContext = resNodeContextParam;
+                  // The rest of the block has been rebuilt with new view
+                  // nodes, so text-spacing etc. must be applied again.
+                  // (Issue #2196)
+                  if (lastCheckPoints.length > 0) {
+                    this.postLayoutBlock(resNodeContext, lastCheckPoints);
+                  }
                   loopFrame.continueLoop();
                 },
               );
@@ -2536,7 +2994,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         });
       })
       .then(() => {
-        Array.prototype.push.apply(checkPoints, lastCheckPoints);
+        checkPoints.push(...lastCheckPoints);
         if (VIVLIOSTYLE_DEBUG) {
           validateCheckPoints(checkPoints);
         }
@@ -2610,7 +3068,9 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         break;
       }
       const margin = this.getComputedMargin(nodeContext.viewNode as Element);
-      const m = this.vertical ? -margin.left : margin.bottom;
+      const m = this.vertical
+        ? this.getBoxDir() * (this.getBoxDir() < 0 ? margin.left : margin.right)
+        : margin.bottom;
       if (m > 0) {
         maxPos = Math.max(maxPos, m);
       } else {
@@ -2646,46 +3106,6 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         // Text-spacing etc. must be done before calculating edge. (Issue #898)
         this.postLayoutBlock(resNodeContext, checkPoints);
 
-        // Record the height
-        // TODO: should this be done after first-line calculation?
-        // Suppress ancestor block-end padding/border during edge
-        // calculation to prevent false overflow from browser column
-        // breaking. (Issue #1846)
-        const restoreInset = this.suppressOpenAncestorBlockEndInset(
-          resNodeContext ?? nodeContext,
-        );
-        let edge = this.calculateEdge(
-          resNodeContext,
-          checkPoints,
-          checkPointIndex,
-          checkPoints[checkPointIndex].boxOffset,
-        );
-        restoreInset();
-        let overflown = false;
-        if (
-          !resNodeContext ||
-          !LayoutHelper.isOrphan(resNodeContext.viewNode)
-        ) {
-          const offsets = BreakPosition.calculateOffset(
-            resNodeContext,
-            this.collectElementsOffset(),
-          );
-          overflown = this.isOverflown(
-            edge + (this.vertical ? -1 : 1) * offsets.minimum,
-          );
-          if (
-            this.isOverflown(
-              edge + (this.vertical ? -1 : 1) * offsets.current,
-            ) &&
-            !this.nodeContextOverflowingDueToRepetitiveElements
-          ) {
-            this.nodeContextOverflowingDueToRepetitiveElements = resNodeContext;
-          }
-        }
-        if (resNodeContext == null) {
-          edge += this.getTrailingMarginEdgeAdjustment(checkPoints);
-        }
-        this.updateMaxReachedAfterEdge(edge);
         let lineCont: Task.Result<Vtree.NodeContext | null>;
         if (nodeContext.firstPseudo) {
           // possibly need to deal with :first-line and friends
@@ -2697,9 +3117,51 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         } else {
           lineCont = Task.newResult(resNodeContext);
         }
-        lineCont.then((nodeContext) => {
-          // Text-spacing etc. must be done before calculating edge. (Issue #898)
-          // this.postLayoutBlock(nodeContext, checkPoints);
+        lineCont.then((resNodeContext) => {
+          // Record the height. This must be done after the ::first-line
+          // calculation: until then the whole block is laid out with the
+          // ::first-line style, which can make it look taller than it is
+          // and cause a false overflow.
+          let overflown = false;
+          const checkPointIndex = checkPoints.length - 1;
+          if (checkPointIndex >= 0) {
+            // Suppress ancestor block-end padding/border during edge
+            // calculation to prevent false overflow from browser column
+            // breaking. (Issue #1846)
+            let edge = this.withOpenAncestorBlockEndInsetSuppressed(
+              resNodeContext ?? nodeContext,
+              () =>
+                this.calculateEdge(
+                  resNodeContext,
+                  checkPoints,
+                  checkPointIndex,
+                  checkPoints[checkPointIndex].boxOffset,
+                ),
+            );
+            if (
+              !resNodeContext ||
+              !LayoutHelper.isOrphan(resNodeContext.viewNode)
+            ) {
+              const offsets = BreakPosition.calculateOffset(
+                resNodeContext,
+                this.collectElementsOffset(),
+              );
+              overflown = this.isOverflown(
+                edge + this.getBoxDir() * offsets.minimum,
+              );
+              if (
+                this.isOverflown(edge + this.getBoxDir() * offsets.current) &&
+                !this.nodeContextOverflowingDueToRepetitiveElements
+              ) {
+                this.nodeContextOverflowingDueToRepetitiveElements =
+                  resNodeContext;
+              }
+            }
+            if (resNodeContext == null) {
+              edge += this.getTrailingMarginEdgeAdjustment(checkPoints);
+            }
+            this.updateMaxReachedAfterEdge(edge);
+          }
 
           const lineFootnoteOverflowBreak =
             this.findLineFootnoteOverflowBreak(checkPoints);
@@ -2719,12 +3181,12 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
             this.saveBoxBreakPosition(checkPoints);
 
             // TODO: how to signal overflow in the last pagargaph???
-            if (overflown && !this.isLoneImage(checkPoints) && nodeContext) {
-              nodeContext = nodeContext.modify();
-              nodeContext.overflow = true;
+            if (overflown && !this.isLoneImage(checkPoints) && resNodeContext) {
+              resNodeContext = resNodeContext.modify();
+              resNodeContext.overflow = true;
             }
           }
-          frame.finish(nodeContext);
+          frame.finish(resNodeContext);
         });
       },
     );
@@ -2735,6 +3197,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     nodeContext: Vtree.NodeContext | null,
     checkPoints: Vtree.RenderedNodeContext[],
   ) {
+    RubyEmphasis.adjustAnnotationsForNodes(checkPoints, this.clientLayout);
     const hooks: Plugin.PostLayoutBlockHook[] = Plugin.getHooksForName(
       Plugin.HOOKS.POST_LAYOUT_BLOCK,
     );
@@ -2759,9 +3222,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     // Workaround for Blink not returning correct fractional values for
     // Range.getClientRects.
     // https://bugs.chromium.org/p/chromium/issues/detail?id=629828
-    const effectiveLinePosition = this.vertical
-      ? linePosition - 1
-      : linePosition + 1;
+    const effectiveLinePosition = linePosition + this.getBoxDir();
 
     // find the first character which is out
     let lowCP = 0;
@@ -2785,11 +3246,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         }
       }
       const edge = this.calculateEdge(null, checkPoints, low1, mid);
-      if (
-        this.vertical
-          ? edge <= effectiveLinePosition
-          : edge >= effectiveLinePosition
-      ) {
+      if (this.getBoxDir() * edge >= this.getBoxDir() * effectiveLinePosition) {
         high = mid - 1;
         while (checkPoints[low1].boxOffset == mid) {
           low1--;
@@ -2871,6 +3328,13 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
           }
           nodeContext = nodeContext.parent;
         }
+      } else if (viewNode.nodeType !== 1 && !nodeContext.after) {
+        // The text in a text-spacing wrapper, which may be split from a
+        // longer text node and have no after check point (see
+        // TextSpacingPolyfill.postLayoutBlock()), fits: break after it.
+        nodeContext = nodeContext.modify();
+        nodeContext.offsetInNode += (viewNode as Text).length;
+        nodeContext.breakBefore = null;
       }
     }
     this.clearOverflownViewNodes(nodeContext, false);
@@ -2895,93 +3359,193 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     end: Element | Text,
   ): Vtree.ClientRect[] {
     const arr: Vtree.ClientRect[] = [];
-    const range = start.ownerDocument.createRange();
+    // The elements' own boxes, collected separately: the merged range
+    // measurement this replaces included the border boxes (padding, border) of
+    // the elements fully contained in the measured range, because those boxes
+    // extend beyond the boxes of their text. They are added after the walk,
+    // except for the elements that contain the range boundaries (the first and
+    // last measured node): those were only partially contained in the merged
+    // range. (Issue #2163)
+    const elementBoxes: { element: Element; rects: Vtree.ClientRect[] }[] = [];
+    let firstMeasuredNode: Node | null = null;
+    let lastMeasuredNode: Node | null = null;
     let wentUp = false;
     let node: Node = start;
-    let lastGood: Node | null = null;
-    let haveStart = false;
     let endNotReached = true;
     while (endNotReached) {
-      let seekRange = true;
-      do {
-        let next: Node | null = null;
-        if (node == end) {
-          if (end.nodeType === 1) {
-            // If end is an element, continue traversing its children to find
-            // the last text node inside it. Finish when end has no child or
-            // when came back from its children (wentUp==true).
-            endNotReached = !(!end.firstChild || wentUp);
-          } else {
-            endNotReached = false;
-          }
-        }
-        const element = node.nodeType === 1 ? (node as Element) : null;
-        if (!element) {
-          if (!haveStart) {
-            if (node.parentNode == null) {
-              endNotReached = false;
-            } else {
-              range.setStartBefore(node);
-              haveStart = true;
-            }
-          }
-          lastGood = node;
-        } else if (wentUp) {
-          wentUp = false;
-        } else if (LayoutHelper.isSpecial(element)) {
-          // Skip special
-          seekRange = !haveStart;
-        } else if (
-          !element.firstChild ||
-          Base.mediaTags[element.localName] ||
-          /^r(uby|[bt]c?)$/.test(element.localName) ||
-          LayoutHelper.isSpecialInlineDisplay(
-            this.clientLayout.getElementComputedStyle(element).display,
-          )
-        ) {
-          // img, ruby, inline-block, etc.
-          seekRange = !haveStart;
-          if (seekRange) {
-            if (element.localName === "ruby" && node.firstChild) {
-              // Fix for issue #985
-              node = node.firstChild;
-            }
-            range.setStartBefore(node);
-            haveStart = true;
-            lastGood = node;
-          } else if (!/^r(uby|tc?)$/.test(element.localName)) {
-            // Fix for issue #1319 and #1401
-            lastGood = node;
-          }
-          if (node.contains(end)) {
-            endNotReached = false;
-          }
+      let next: Node | null = null;
+      if (node == end) {
+        if (end.nodeType === 1) {
+          // If end is an element, continue traversing its children to find
+          // the last text node inside it. Finish when end has no child or
+          // when came back from its children (wentUp==true).
+          endNotReached = !(!end.firstChild || wentUp);
         } else {
-          next = node.firstChild;
+          endNotReached = false;
         }
+      }
+      const element = node.nodeType === 1 ? (node as Element) : null;
+      if (!element) {
+        // Measure each text node individually so that its rects can be
+        // adjusted to the line box (line-height) of the element containing it.
+        // (Issue #2163)
+        if (node.nodeType === 3 && node.parentNode) {
+          this.measureTextNodeBoxes(node as Text, arr);
+          firstMeasuredNode ??= node;
+          lastMeasuredNode = node;
+        } else if (node.parentNode == null) {
+          endNotReached = false;
+        }
+      } else if (wentUp) {
+        wentUp = false;
+      } else if (
+        LayoutHelper.isSpecial(element) ||
+        LayoutHelper.isCssOutOfFlow(element)
+      ) {
+        // Out-of-flow annotations stay in inline traversal (#2162), but their
+        // boxes must not participate in line grouping or page-break fitting.
+        if (node.contains(end)) {
+          endNotReached = false;
+        }
+      } else if (
+        !element.firstChild ||
+        Base.mediaTags[element.localName] ||
+        /^r(uby|[bt]c?)$/.test(element.localName) ||
+        LayoutHelper.isSpecialInlineDisplay(
+          this.clientLayout.getElementComputedStyle(element).display,
+        )
+      ) {
+        // img, ruby, inline-block, etc.
+        if (
+          (element.localName === "ruby" ||
+            (this.clientLayout.getElementComputedStyle(element).display ===
+              "ruby" &&
+              element.querySelector("[data-viv-ruby-end]"))) &&
+          element.firstChild
+        ) {
+          // Fix for issue #985
+          node = element.firstChild;
+        }
+        if (node.nodeType === 3) {
+          this.measureTextNodeBoxes(node as Text, arr);
+        } else {
+          this.measureBoxesOfNode(node, arr);
+        }
+        firstMeasuredNode ??= node;
+        lastMeasuredNode = node;
+        if (node.contains(end)) {
+          endNotReached = false;
+        }
+      } else {
+        if (node !== start && node !== end) {
+          // Measure only the element's own boxes: the rects of its contents
+          // are the boxes of the descendant text nodes, which are measured
+          // (and adjusted to the line box) above, and appending them here
+          // again would reintroduce the unadjusted glyph boxes. (Issue #2163)
+          const rects = this.clientLayout.getElementClientRects(element);
+          // Adjust the rects' positions for column breaking, like the other
+          // measured boxes, so that the synthetic column offsets of the
+          // browser's multi-column layout are normalized. (Issue #2163)
+          LayoutHelper.adjustRectsForColumnBreaking(rects, this.writingMode);
+          LayoutHelper.adjustInlineRectsForLineHeight(
+            rects,
+            element,
+            this.clientLayout,
+            this.writingMode,
+          );
+          elementBoxes.push({ element, rects });
+        }
+        next = node.firstChild;
+      }
+      if (!next) {
+        next = node.nextSibling;
         if (!next) {
-          next = node.nextSibling;
-          if (!next) {
-            wentUp = true;
-            next = node.parentNode;
-          }
+          wentUp = true;
+          next = node.parentNode;
         }
-        node = next;
-      } while (seekRange && endNotReached);
-      if (haveStart) {
-        range.setEndAfter(lastGood);
-        const boxList = this.clientLayout.getRangeClientRects(range);
-
-        // Adjust boxes' positions for column breaking
-        LayoutHelper.adjustRectsForColumnBreaking(boxList, this.vertical);
-
-        for (let i = 0; i < boxList.length; i++) {
-          arr.push(boxList[i]);
-        }
-        haveStart = false;
+      }
+      node = next;
+    }
+    for (const { element, rects } of elementBoxes) {
+      if (
+        (firstMeasuredNode && element.contains(firstMeasuredNode)) ||
+        (lastMeasuredNode && element.contains(lastMeasuredNode))
+      ) {
+        continue;
+      }
+      for (let i = 0; i < rects.length; i++) {
+        arr.push(rects[i]);
       }
     }
     return arr;
+  }
+
+  /**
+   * Measure the client rects of a text node, adjusting their block-direction
+   * size to the line box (line-height) of the element containing the text.
+   * (Issue #2163)
+   */
+  private measureTextNodeBoxes(text: Text, arr: Vtree.ClientRect[]): void {
+    if (!text.length) {
+      return;
+    }
+    const boxes = RangeClientRects.getLayoutClientRectsBetween(
+      this.clientLayout,
+      RangeClientRects.at(text, 0),
+      RangeClientRects.at(text, text.length),
+    );
+
+    // Adjust boxes' positions for column breaking
+    LayoutHelper.adjustRectsForColumnBreaking(boxes, this.writingMode);
+
+    // Measure the line box instead of the glyph box. (Issue #2163)
+    LayoutHelper.adjustTextRectsForLineHeight(
+      boxes,
+      text.parentElement,
+      this.clientLayout,
+      this.vertical,
+    );
+    for (let i = 0; i < boxes.length; i++) {
+      arr.push(boxes[i]);
+    }
+  }
+
+  /**
+   * Measure the client rects of an element box (a replaced element, an
+   * inline-block, `<br>`, an empty inline element, etc.). Keep BR range rects
+   * unchanged for line grouping in fragmented browser columns; calculateEdge
+   * measures their line-height-adjusted ends separately with a marker.
+   */
+  private measureBoxesOfNode(node: Node, arr: Vtree.ClientRect[]): void {
+    const boxes = RangeClientRects.getLayoutClientRectsBetween(
+      this.clientLayout,
+      RangeClientRects.before(node),
+      RangeClientRects.after(node),
+    );
+
+    // Adjust boxes' positions for column breaking
+    LayoutHelper.adjustRectsForColumnBreaking(boxes, this.writingMode);
+
+    if (node.nodeType === 1 && (node as Element).localName !== "br") {
+      LayoutHelper.adjustInlineRectsForLineHeight(
+        boxes,
+        node as Element,
+        this.clientLayout,
+        this.writingMode,
+      );
+      if (Base.browserType === "webkit") {
+        RubyEmphasis.includeRubyBaseInLineRects(
+          boxes,
+          node as Element,
+          this.clientLayout,
+          this.writingMode,
+        );
+      }
+    }
+
+    for (let i = 0; i < boxes.length; i++) {
+      arr.push(boxes[i]);
+    }
   }
 
   /**
@@ -2990,22 +3554,36 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
    * @return position of line breaks
    */
   findLinePositions(checkPoints: Vtree.RenderedNodeContext[]): number[] {
+    return this.findLinePositionsInRange(
+      checkPoints[0].viewNode,
+      checkPoints.at(-1).viewNode,
+    );
+  }
+
+  /**
+   * Returns the after-edge positions of the lines that the content from
+   * `start` to `end` (inclusive, in document order) is laid out on.
+   */
+  findLinePositionsInRange(
+    start: Element | Text,
+    end: Element | Text,
+  ): number[] {
     const LOW_OVERLAP = 0.2;
     const MID_OVERLAP = 0.6;
     const positions: number[] = [];
-    const boxes = this.getRangeBoxes(
-      checkPoints[0].viewNode,
-      checkPoints[checkPoints.length - 1].viewNode,
-    );
+    const boxes = this.getRangeBoxes(start, end);
     boxes.sort(
-      this.vertical
-        ? VtreeImpl.clientrectDecreasingRight
-        : VtreeImpl.clientrectIncreasingTop,
+      (a, b) =>
+        this.getBoxDir() * (this.getBeforeEdge(a) - this.getBeforeEdge(b)),
     );
     let lineBefore = 0;
     let lineAfter = 0;
     let lineEnd = 0;
     let lineLength = 0;
+    // Block extent of the line box, reported as the line's position. Unlike
+    // `lineBefore`/`lineAfter`, it includes the boxes of line break markers
+    // (e.g. `<br>`), whose block extent is the line box of the line it ends.
+    let lineBoxAfter = 0;
     let i = 0;
     const dir = this.getBoxDir();
     while (true) {
@@ -3025,19 +3603,38 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         if (
           lineLength == 0 ||
           overlap >= MID_OVERLAP ||
-          (overlap >= LOW_OVERLAP && this.getStartEdge(box) >= lineEnd - 1)
+          (overlap >= LOW_OVERLAP &&
+            this.getInlineDir() * (this.getStartEdge(box) - lineEnd) >= -1)
         ) {
           lineEnd = this.getEndEdge(box);
-          if (this.vertical) {
+          // A box without inline extent (e.g. `<br>`) does not contain any
+          // content: its block extent is the line box of the line it ends, so
+          // it extends the reported line box, but it must not extend the line
+          // extent used above. Browsers can report such a box with a position
+          // that straddles the boundary between two lines (e.g. in content
+          // fragmented into columns); extending the line extent with it would
+          // make the following lines merge into this line, losing line
+          // positions and disturbing the page/column break decisions.
+          // (Issue #2163)
+          const isLineBreakMarker =
+            lineLength > 0 &&
+            this.getInlineSize(box) === 0 &&
+            this.getBoxSize(box) > 0;
+          lineBoxAfter =
+            lineLength === 0
+              ? this.getAfterEdge(box)
+              : dir *
+                Math.max(dir * lineBoxAfter, dir * this.getAfterEdge(box));
+          if (!isLineBreakMarker) {
             lineBefore =
-              lineLength == 0 ? box.right : Math.max(lineBefore, box.right);
+              lineLength === 0
+                ? this.getBeforeEdge(box)
+                : dir *
+                  Math.min(dir * lineBefore, dir * this.getBeforeEdge(box));
             lineAfter =
-              lineLength == 0 ? box.left : Math.min(lineAfter, box.left);
-          } else {
-            lineBefore =
-              lineLength == 0 ? box.top : Math.min(lineBefore, box.top);
-            lineAfter =
-              lineLength == 0 ? box.bottom : Math.max(lineAfter, box.bottom);
+              lineLength === 0
+                ? this.getAfterEdge(box)
+                : dir * Math.max(dir * lineAfter, dir * this.getAfterEdge(box));
           }
           lineLength++;
           i++;
@@ -3047,7 +3644,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
 
       // Add line
       if (lineLength > 0) {
-        positions.push(lineAfter);
+        positions.push(lineBoxAfter);
         lineLength = 0;
       }
       if (i >= boxes.length) {
@@ -3055,7 +3652,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       }
     }
     positions.sort(Base.numberCompare);
-    if (this.vertical) {
+    if (this.getBoxDir() < 0) {
       positions.reverse();
     }
     return positions;
@@ -3071,11 +3668,14 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         const paddingBorders = this.getComputedPaddingBorder(
           nc.viewNode as Element,
         );
+        const dir = CssLogicalUtil.isBlockReversed(nc.writingMode) ? -1 : 1;
         clonedPaddingBorder += nc.vertical
-          ? -paddingBorders.left
+          ? dir * (dir < 0 ? paddingBorders.left : paddingBorders.right)
           : paddingBorders.bottom;
         if (nc.display === "table") {
-          clonedPaddingBorder += (nc.vertical ? -1 : 1) * nc.blockBorderSpacing;
+          clonedPaddingBorder +=
+            (CssLogicalUtil.isBlockReversed(nc.writingMode) ? -1 : 1) *
+            nc.blockBorderSpacing;
         }
       }
     }
@@ -3154,7 +3754,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     }
     let lineIndex = Base.binarySearch(linePositions.length, (i) => {
       const p = linePositions[i];
-      return this.vertical
+      return this.getBoxDir() < 0
         ? p < edge || p <= firstOverflowing.edge
         : p > edge || p >= firstOverflowing.edge;
     });
@@ -3164,14 +3764,15 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     // line just before it.
     const forceCutBeforeOverflowing = lineIndex <= 0;
     if (forceCutBeforeOverflowing) {
-      lineIndex = Base.binarySearch(linePositions.length, (i) =>
-        this.vertical ? linePositions[i] < edge : linePositions[i] > edge,
+      lineIndex = Base.binarySearch(
+        linePositions.length,
+        (i) => this.getBoxDir() * linePositions[i] > this.getBoxDir() * edge,
       );
     }
 
     // Workaround for the case of block child after text in parent block
     // (Issue #1036)
-    let lastNode = checkPoints[checkPoints.length - 1].viewNode;
+    let lastNode = checkPoints.at(-1).viewNode;
     lastNode = LayoutHelper.textSpacingWrapperOf(lastNode) ?? lastNode;
     if (
       (lineIndex === linePositions.length && lastNode.nextSibling) ||
@@ -3239,7 +3840,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         blockParent,
         this.clientLayout,
         0,
-        this.vertical,
+        this.writingMode,
       );
     } else {
       return NaN;
@@ -3300,12 +3901,177 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     return result;
   }
 
-  findAcceptableBreakPosition(): BreakPositionAndNodeContext | null {
+  /**
+   * When the overflowing content is inside an atomic inline (e.g., an
+   * inline-block), a break must not fall inside that box. Break just before
+   * the line that holds the box instead: before the first atomic inline laid
+   * out on that line, or before their block when that is its first line
+   * (as in `findAcceptableBreakInside()`, Issue #1459).
+   * Returns null when that line starts with other content or nothing
+   * precedes it in this column, so the usual break search applies.
+   * Also returns the penalty of that break, to compare it with the saved
+   * break positions. This has no side effects; the caller clears the
+   * overflown view nodes.
+   */
+  private findBreakBeforeOverflowingAtomicInline(
+    overflownNodeContext: Vtree.NodeContext,
+  ): { nodeContext: Vtree.NodeContext; penalty: number } | null {
+    const atomicInline =
+      LayoutHelper.findOutermostSpecialInlineNodeContext(overflownNodeContext);
+    if (!atomicInline) {
+      return null;
+    }
+    const lastRectOf = (node: Node): Vtree.ClientRect | null => {
+      let rects: Vtree.ClientRect[];
+      if (node.nodeType === 1) {
+        rects = this.clientLayout.getElementClientRects(node as Element);
+      } else {
+        const range = node.ownerDocument.createRange();
+        range.selectNodeContents(node);
+        rects = this.clientLayout.getRangeClientRects(range);
+      }
+      return rects.length ? rects[rects.length - 1] : null;
+    };
+    const lineRect = lastRectOf(atomicInline.viewNode);
+    if (!lineRect) {
+      return null;
+    }
+    const isOnSameLine = (node: Node): boolean => {
+      const rect = lastRectOf(node);
+      if (
+        !rect ||
+        LayoutHelper.checkIfBeyondColumnBreaks(rect, this.writingMode) !==
+          LayoutHelper.checkIfBeyondColumnBreaks(lineRect, this.writingMode)
+      ) {
+        return false;
+      }
+      return this.vertical
+        ? rect.left < lineRect.right && lineRect.left < rect.right
+        : rect.top < lineRect.bottom && lineRect.top < rect.bottom;
+    };
+    const previousContent = (nc: Vtree.NodeContext): Node | null => {
+      let node = nc.viewNode?.previousSibling;
+      while (
+        node &&
+        (VtreeImpl.canIgnore(node, nc.parent?.whitespace) ||
+          LayoutHelper.isOutOfFlow(node))
+      ) {
+        node = node.previousSibling;
+      }
+      return node ?? null;
+    };
+
+    // The atomic inlines laid out so far on the same line, from the saved
+    // break positions inside them.
+    let nodeContext: Vtree.NodeContext = atomicInline;
+    for (const bp of this.breakPositions) {
+      const position =
+        bp instanceof BreakPosition.EdgeBreakPosition
+          ? bp.position
+          : bp instanceof BoxBreakPosition
+            ? bp.checkPoints[0]
+            : null;
+      const other =
+        position &&
+        LayoutHelper.findOutermostSpecialInlineNodeContext(position);
+      if (
+        other &&
+        other.viewNode !== atomicInline.viewNode &&
+        other.viewNode.parentNode === atomicInline.viewNode.parentNode &&
+        isOnSameLine(other.viewNode)
+      ) {
+        nodeContext = other;
+        break;
+      }
+    }
+    while (
+      nodeContext.inline &&
+      nodeContext.parent &&
+      !previousContent(nodeContext)
+    ) {
+      nodeContext = nodeContext.parent;
+    }
+    const previous = previousContent(nodeContext);
+    if (previous && isOnSameLine(previous)) {
+      // The line starts with other content, e.g. text before an inline
+      // wrapper of the box.
+      return null;
+    }
+    for (let nc: Vtree.NodeContext | null = nodeContext; ; nc = nc.parent) {
+      if (!nc) {
+        // Nothing precedes the line in this column.
+        return null;
+      }
+      if (previousContent(nc)) {
+        break;
+      }
+    }
+
+    // Penalty of the break, as in EdgeBreakPosition.getMinBreakPenalty(): a
+    // break before the block also has the avoid value at its edge (e.g.
+    // `break-after: avoid` on a preceding heading), from the saved edge.
+    let penalty = nodeContext.parent?.breakPenalty ?? 0;
+    if (!nodeContext.inline) {
+      const edge = this.breakPositions.find(
+        (bp): bp is BreakPosition.EdgeBreakPosition =>
+          bp instanceof BreakPosition.EdgeBreakPosition &&
+          (bp.position.after
+            ? bp.position.viewNode === previous
+            : bp.position.viewNode === nodeContext.viewNode),
+      );
+      if (edge && Break.isAvoidBreakValue(edge.breakOnEdge)) {
+        penalty++;
+      }
+    } else {
+      // A break between lines of a block must leave at least `orphans` lines
+      // before it, as in findBoxBreakPosition(); otherwise it is a forced
+      // break, which footnotes never allow. (`widows` cannot be checked here:
+      // the content after the overflowing box is not laid out yet.)
+      let block: Vtree.NodeContext | null = nodeContext.parent;
+      while (block?.inline) {
+        block = block.parent;
+      }
+      const firstNode = block?.viewNode?.firstChild;
+      if (block && previous && firstNode) {
+        const orphans = Math.max(
+          Number(block.inheritedProps["orphans"]) || 2,
+          1,
+        );
+        const linesBefore = this.findLinePositionsInRange(
+          firstNode as Element | Text,
+          previous as Element | Text,
+        ).length;
+        if (linesBefore < orphans) {
+          if (this.isFootnote) {
+            return null;
+          }
+          penalty++;
+        }
+      }
+    }
+    if (nodeContext.after) {
+      // A saved after-edge of the box itself (e.g. for SVG): break before it,
+      // without changing the saved break position.
+      nodeContext = nodeContext.copy().modify();
+      nodeContext.after = false;
+    }
+    return { nodeContext, penalty };
+  }
+
+  /**
+   * @param maxPenalty only break positions with up to this penalty are used.
+   */
+  findAcceptableBreakPosition(
+    maxPenalty: number = Number.MAX_VALUE,
+  ): BreakPositionAndNodeContext | null {
     let found: BreakPositionAndNodeContext | null = null;
     let penalty = 0;
     let nextPenalty = 0;
     do {
       penalty = nextPenalty;
+      if (penalty > maxPenalty) {
+        break;
+      }
       nextPenalty = Number.MAX_VALUE;
       for (let i = this.breakPositions.length - 1; i >= 0 && !found; --i) {
         const bp = this.breakPositions[i];
@@ -3404,17 +4170,11 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
    * Handles both horizontal and vertical writing modes.
    */
   hasNonZeroBlockStartInset(style: CSSStyleDeclaration): boolean {
-    if (this.vertical) {
-      return !(
-        this.isZeroLength(style.paddingRight) &&
-        this.isZeroLength(style.borderRightWidth)
-      );
-    } else {
-      return !(
-        this.isZeroLength(style.paddingTop) &&
-        this.isZeroLength(style.borderTopWidth)
-      );
-    }
+    const side = CssLogicalUtil.toPhysical("block-start", this.writingMode);
+    return !(
+      this.isZeroLength(style.getPropertyValue(`padding-${side}`)) &&
+      this.isZeroLength(style.getPropertyValue(`border-${side}-width`))
+    );
   }
 
   /**
@@ -3422,17 +4182,11 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
    * Handles both horizontal and vertical writing modes.
    */
   hasNonZeroBlockEndInset(style: CSSStyleDeclaration): boolean {
-    if (this.vertical) {
-      return !(
-        this.isZeroLength(style.paddingLeft) &&
-        this.isZeroLength(style.borderLeftWidth)
-      );
-    } else {
-      return !(
-        this.isZeroLength(style.paddingBottom) &&
-        this.isZeroLength(style.borderBottomWidth)
-      );
-    }
+    const side = CssLogicalUtil.toPhysical("block-end", this.writingMode);
+    return !(
+      this.isZeroLength(style.getPropertyValue(`padding-${side}`)) &&
+      this.isZeroLength(style.getPropertyValue(`border-${side}-width`))
+    );
   }
 
   /**
@@ -3443,13 +4197,15 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
    * will be removed at actual break points due to box-decoration-break:
    * slice (the default). (Issue #1846)
    *
-   * Returns a cleanup function that restores the original state.
+   * Returns the containers whose padding/border was suppressed, and a cleanup
+   * function that restores the original state.
    */
-  private suppressOpenAncestorBlockEndInset(
-    nodeContext: Vtree.NodeContext,
-  ): () => void {
+  private suppressOpenAncestorBlockEndInset(nodeContext: Vtree.NodeContext): {
+    elements: Element[];
+    restore: () => void;
+  } {
     if (!LayoutHelper.isUsingBrowserColumnBreaking(this)) {
-      return () => {};
+      return { elements: [], restore: () => {} };
     }
     const saved: { element: Element; original: string | null }[] = [];
     for (let nc = nodeContext?.parent; nc; nc = nc.parent) {
@@ -3471,15 +4227,55 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       Break.setBoxBreakFlag(element, "block-end");
       saved.push({ element, original });
     }
-    return () => {
-      for (const { element, original } of saved) {
-        if (original === null) {
-          element.removeAttribute("data-viv-box-break");
-        } else {
-          element.setAttribute("data-viv-box-break", original);
+    return {
+      elements: saved.map(({ element }) => element),
+      restore: () => {
+        for (const { element, original } of saved) {
+          if (original === null) {
+            element.removeAttribute("data-viv-box-break");
+          } else {
+            element.setAttribute("data-viv-box-break", original);
+          }
         }
-      }
+      },
     };
+  }
+
+  /**
+   * Measure with the block-end padding/border of open ancestor containers
+   * suppressed (see suppressOpenAncestorBlockEndInset()).
+   *
+   * Chromium does not lay out the content of a container again when only its
+   * block-end padding/border is removed: content that was pushed to the next
+   * column to make room for the padding/border stays there, as if the
+   * padding/border were still present. This happens when the browser laid out
+   * the container with the padding/border between the measurements, and
+   * causes a false overflow. A suppressed container fragmented across columns
+   * may be in that state, so lay it out from scratch and measure again.
+   */
+  private withOpenAncestorBlockEndInsetSuppressed(
+    nodeContext: Vtree.NodeContext,
+    measure: () => number,
+  ): number {
+    const { elements, restore } =
+      this.suppressOpenAncestorBlockEndInset(nodeContext);
+    let result = measure();
+    const fragmented = elements.filter(
+      (element) => this.clientLayout.getElementClientRects(element).length > 1,
+    );
+    if (fragmented.length) {
+      for (const element of fragmented) {
+        const style = (element as HTMLElement).style;
+        const display = style.getPropertyValue("display");
+        const priority = style.getPropertyPriority("display");
+        style.setProperty("display", "none", "important");
+        element.getBoundingClientRect();
+        style.setProperty("display", display, priority);
+      }
+      result = measure();
+    }
+    restore();
+    return result;
   }
 
   /**
@@ -3500,23 +4296,23 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     if (LayoutHelper.isOrphan(nodeContext.viewNode)) {
       return false;
     }
-    const restoreInset = this.suppressOpenAncestorBlockEndInset(nodeContext);
-    let edge = LayoutHelper.calculateEdge(
-      nodeContext,
-      this.clientLayout,
-      0,
-      this.vertical,
+    let edge = this.withOpenAncestorBlockEndInsetSuppressed(nodeContext, () =>
+      LayoutHelper.calculateEdge(
+        nodeContext,
+        this.clientLayout,
+        0,
+        this.writingMode,
+      ),
     );
-    restoreInset();
     const offsets = BreakPosition.calculateOffset(
       nodeContext,
       this.collectElementsOffset(),
     );
     const overflown = this.isOverflown(
-      edge + (this.vertical ? -1 : 1) * offsets.minimum,
+      edge + this.getBoxDir() * offsets.minimum,
     );
     if (
-      this.isOverflown(edge + (this.vertical ? -1 : 1) * offsets.current) &&
+      this.isOverflown(edge + this.getBoxDir() * offsets.current) &&
       !this.nodeContextOverflowingDueToRepetitiveElements
     ) {
       this.nodeContextOverflowingDueToRepetitiveElements = nodeContext;
@@ -3527,9 +4323,10 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         edge + this.getTrailingMarginEdgeAdjustment(trailingEdgeContexts);
       const footnoteEdge =
         this.footnoteEdge - this.getBoxDir() * offsets.current;
-      edge = this.vertical
-        ? Math.min(edge, Math.max(marginEdge, footnoteEdge))
-        : Math.max(edge, Math.min(marginEdge, footnoteEdge));
+      edge =
+        this.getBoxDir() < 0
+          ? Math.min(edge, Math.max(marginEdge, footnoteEdge))
+          : Math.max(edge, Math.min(marginEdge, footnoteEdge));
     }
     this.updateMaxReachedAfterEdge(edge);
     return overflown;
@@ -3587,7 +4384,10 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     if (this.vertical) {
       spacer.style.bottom = "0px";
       spacer.style.width = "1px";
-      spacer.style.marginRight = `${margin.right}px`;
+      spacer.style.setProperty(
+        `margin-${CssLogicalUtil.toPhysical("block-start", this.writingMode)}`,
+        `${this.getBoxDir() < 0 ? margin.right : margin.left}px`,
+      );
     } else {
       spacer.style.right = "0px";
       spacer.style.height = "1px";
@@ -3599,7 +4399,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         : LayoutHelper.getElementClientRectAdjusted(
             this.clientLayout,
             spacer,
-            this.vertical,
+            this.writingMode,
           );
     nodeContext.viewNode.parentNode.insertBefore(spacer, nodeContext.viewNode);
     // Use raw spacer geometry for page/column/region clears. Browser
@@ -3608,19 +4408,20 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     let spacerBox = getSpacerBox();
     const edge = this.getBeforeEdge(spacerBox);
     const dir = this.getBoxDir();
-    const clearLR =
+    const clearLR = this.floatSideInGeometry(
       /^(top|bottom|inside|outside|(block|inline)-(start|end))$/.test(clear)
         ? PageFloats.resolveInlineFloatDirection(
             clear,
-            nodeContext.vertical,
+            nodeContext.writingMode,
             nodeContext.direction,
             (this.layoutContext as Vgen.ViewFactory).page.side,
           )
-        : clear;
+        : clear,
+    );
 
     const clearLogical =
       clearLR === "left" || clearLR === "right"
-        ? (nodeContext.direction === "rtl") === (clearLR === "left")
+        ? this.getInlineDir() < 0 === (clearLR === "left")
           ? "inline-end"
           : "inline-start"
         : clearLR;
@@ -3698,12 +4499,16 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       const afterEdge = this.getAfterEdge(spacerBox);
       if (!nodeContext.floatSide) {
         if (this.vertical) {
-          let wAdj = afterEdge - margin.right - clearEdge;
-          if (wAdj > 0 == margin.right >= 0) {
+          const marginBefore = dir < 0 ? margin.right : margin.left;
+          let wAdj = dir * (clearEdge - afterEdge) - marginBefore;
+          if (wAdj > 0 == marginBefore >= 0) {
             // In addition to collapsed portion
-            wAdj += margin.right;
+            wAdj += marginBefore;
           }
-          spacer.style.marginLeft = `${wAdj}px`;
+          spacer.style.setProperty(
+            `margin-${CssLogicalUtil.toPhysical("block-end", this.writingMode)}`,
+            `${wAdj}px`,
+          );
         } else {
           let hAdj = clearEdge - (afterEdge + margin.top);
           if (hAdj > 0 == margin.top >= 0) {
@@ -3867,6 +4672,31 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         breakAtTheEdge,
         nextBreakValue,
       );
+    }
+
+    function allowLayout(nodeContext: Vtree.NodeContext): boolean {
+      if (column.layoutConstraint.allowLayout(nodeContext)) {
+        return true;
+      }
+      if (
+        !leadingEdge ||
+        column.isNonFirstColumn ||
+        forcedBreakValue ||
+        !Break.isPageLevelForcedBreak(breakAtTheEdge)
+      ) {
+        return false;
+      }
+      const allowedAfterPageBreak =
+        column.layoutConstraint.allowLayoutAfterPageBreak?.(nodeContext) ??
+        false;
+      if (allowedAfterPageBreak) {
+        // The page-level break has already been satisfied by entering this
+        // page. Consume it only when it is what allows this exact node to move
+        // earlier; keeping a broader flag here changes later, unrelated break
+        // combinations on the same leading edge.
+        breakAtTheEdge = null;
+      }
+      return allowedAfterPageBreak;
     }
 
     function needForcedBreak(): boolean {
@@ -4078,6 +4908,16 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
               const clearNodeContext =
                 VtreeImpl.asClearNodeContext(nodeContext);
               if (clearNodeContext) {
+                if (
+                  this.pendingFloats.length > 0 &&
+                  !clearNodeContext.floatSide
+                ) {
+                  // A following block with clear resolves the positions of
+                  // the preceding floats (it is placed with clearance from
+                  // them instead of collapsing its margin with the parent of
+                  // the floats), so they do not move. (Issue #1292)
+                  this.clearPendingFloats();
+                }
                 // clear
                 if (
                   this.applyClearance(clearNodeContext) &&
@@ -4100,9 +4940,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
                   ? LayoutHelper.findAncestorSpecialInlineNodeContext(
                       lastAfterNodeContext,
                     )
-                  : this.breakPositions[
-                      this.breakPositions.length - 1
-                    ] instanceof BoxBreakPosition ||
+                  : this.breakPositions.at(-1) instanceof BoxBreakPosition ||
                     // When lastAfterNodeContext is null (no in-flow
                     // trailing edge, e.g. after CSS floats converted to
                     // position:absolute) and no block-level leading edges
@@ -4149,7 +4987,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
                     true,
                     breakAtTheEdge,
                   ) ||
-                  !this.layoutConstraint.allowLayout(nodeContext)
+                  !allowLayout(nodeContext)
                 ) {
                   // overflow
                   nodeContext = (
@@ -4295,7 +5133,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
               if (
                 (nodeContext.pageType != nodeContext.parent?.pageType || // Fix for issue #771
                   !Break.isForcedBreakValue(breakAtTheEdge)) && // Fix for issue #722
-                !this.layoutConstraint.allowLayout(nodeContext)
+                !allowLayout(nodeContext)
               ) {
                 this.checkOverflowAndSaveEdgeAndBreakPosition(
                   lastAfterNodeContext,
@@ -4454,7 +5292,37 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
             const viewElement = nodeContext.viewNode as HTMLElement;
             const style = viewElement.style;
             if (nodeContext.after) {
-              // Trailing edge
+              // Preserve an enclosing box's block-end decoration if it
+              // would be clipped after adding the repeated headers and
+              // footers. The initial box is already placed. When resuming
+              // after it, there is no view node and the scan must advance.
+              if (
+                initialNodeContext.viewNode &&
+                nodeContext !== initialNodeContext &&
+                !onStartEdges &&
+                !nodeContext.inline &&
+                !LayoutHelper.isOutOfFlow(viewElement) &&
+                this.hasNonZeroBlockEndInset(
+                  this.clientLayout.getElementComputedStyle(viewElement),
+                )
+              ) {
+                const edge = LayoutHelper.calculateEdge(
+                  nodeContext,
+                  this.clientLayout,
+                  0,
+                  this.writingMode,
+                );
+                const { current } = BreakPosition.calculateOffset(
+                  nodeContext,
+                  this.collectElementsOffset(),
+                );
+                if (this.isOverflown(edge + this.getBoxDir() * current)) {
+                  loopFrame.breakLoop();
+                  return;
+                }
+              }
+              // A forced break at the end of the flow must not fire while
+              // passing consecutive closing edges (Issue #599).
               if (onStartEdges) {
                 // finished going through all starting edges of the box.
                 // check if a forced break must occur before the block.
@@ -4493,8 +5361,8 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
                 loopFrame.breakLoop();
                 return;
               }
+              onStartEdges = true;
             }
-            onStartEdges = true; // we are now on starting edges.
           } while (false); // End of block of code to use break
 
           const nextResult = this.layoutContext.nextInTree(nodeContext);
@@ -4570,8 +5438,32 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
         ) {
           // finished all content, explicit page break or overflow (automatic
           // page break)
+          this.clearPendingFloats();
+          frame.finish(nodeContext);
+        } else if (
+          !nodeContext.after &&
+          Table.isInstanceOfTableFormattingContext(
+            nodeContext.formattingContext,
+          ) &&
+          this.isZeroBlockSizeRegion()
+        ) {
+          // A table never fits in a zero block-size region. Treat it as
+          // overflow before table layout, whose cell fragmentation does not
+          // handle a zero block size. (Issue #391)
+          nodeContext = nodeContext.modify();
+          nodeContext.overflow = true;
           frame.finish(nodeContext);
         } else {
+          if (
+            this.pendingFloats.length > 0 &&
+            !this.pseudoParent &&
+            (nodeContext.after || !this.asFloatNodeContext(nodeContext))
+          ) {
+            // The leading edges of the in-flow content following the floats
+            // are now in place, so the block parents of the floats are at
+            // their final positions. (Issue #1292)
+            this.resolvePendingFloats();
+          }
           const formattingContext = nodeContext.formattingContext;
           const layoutProcessor =
             new LayoutProcessor.LayoutProcessorResolver().find(
@@ -4640,34 +5532,10 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       offsetX + this.width,
       offsetY + this.height,
     );
-    this.startEdge = columnBBox
-      ? this.vertical
-        ? this.rtl
-          ? columnBBox.bottom
-          : columnBBox.top
-        : this.rtl
-          ? columnBBox.right
-          : columnBBox.left
-      : 0;
-    this.endEdge = columnBBox
-      ? this.vertical
-        ? this.rtl
-          ? columnBBox.top
-          : columnBBox.bottom
-        : this.rtl
-          ? columnBBox.left
-          : columnBBox.right
-      : 0;
-    this.beforeEdge = columnBBox
-      ? this.vertical
-        ? columnBBox.right
-        : columnBBox.top
-      : 0;
-    this.afterEdge = columnBBox
-      ? this.vertical
-        ? columnBBox.left
-        : columnBBox.bottom
-      : 0;
+    this.startEdge = columnBBox ? this.getStartEdge(columnBBox) : 0;
+    this.endEdge = columnBBox ? this.getEndEdge(columnBBox) : 0;
+    this.beforeEdge = columnBBox ? this.getBeforeEdge(columnBBox) : 0;
+    this.afterEdge = columnBBox ? this.getAfterEdge(columnBBox) : 0;
     this.leftFloatEdge = this.beforeEdge;
     this.rightFloatEdge = this.beforeEdge;
     this.bottommostFloatTop = this.beforeEdge;
@@ -4679,6 +5547,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
       8,
       this.snapHeight,
       this.vertical,
+      this.getBoxDir(),
     );
   }
 
@@ -4688,6 +5557,7 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
    */
   private remeasure(): void {
     this.chunkPositions = [];
+    this.clearPendingFloats();
     this.bands = this.measure();
     this.createFloats();
     this.computedBlockSize = 0;
@@ -4761,7 +5631,17 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
     if (this.stopAtOverflow && this.overflown) {
       return Task.newResult(chunkPosition as Vtree.ChunkPosition);
     }
-    if (this.isFullWithPageFloats()) {
+    if (this.isZeroBlockSizeRegion()) {
+      if (Column.isAtOrInsideTable(chunkPosition.primary)) {
+        // A table, or the rest of a fragmented table, never fits here. Leave
+        // the position untouched so that no table fragment is finished.
+        return Task.newResult(chunkPosition as Vtree.ChunkPosition);
+      }
+      // A zero block-size region (e.g., an EAL partition with `height: 0`)
+      // can still hold zero block-size content, such as empty blocks before a
+      // forced break, but must never take non-fitting content. (Issue #391)
+      this.forceNonfitting = false;
+    } else if (this.isFullWithPageFloats()) {
       if (
         chunkPosition.primary.after &&
         chunkPosition.primary.steps.length === 1
@@ -4812,12 +5692,20 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
             cont = Task.newResult(true);
           }
           cont.then(() => {
-            if (LayoutHelper.isUsingBrowserColumnBreaking(this)) {
+            if (
+              LayoutHelper.isUsingBrowserColumnBreaking(this) ||
+              this.element.hasAttribute("data-viv-end-annotations")
+            ) {
+              this.element.removeAttribute("data-viv-end-annotations");
               // Fix multi-column boxes with `column-fill: auto` (Issue #1720, #1758)
               LayoutHelper.fixAutoFillMultiColumnBoxes(this);
 
               // Unset browser's multi-column (Issue #1637, #1747)
               LayoutHelper.unsetBrowserColumnBreaking(this);
+              RubyEmphasis.finishAnnotationLayout(
+                this.element,
+                this.clientLayout,
+              );
             }
             // Restore root column block-size if it was reduced by
             // footnotes/block-end-page-floats and table/multicol issue
@@ -4859,6 +5747,32 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
 
   isFullWithPageFloats(): boolean {
     return this.pageFloatLayoutContext.isColumnFullWithPageFloats(this);
+  }
+
+  /**
+   * Whether the position is at the start of a table or inside a table.
+   */
+  private static isAtOrInsideTable(position: Vtree.NodePosition): boolean {
+    return position.steps.some(
+      (step, i) =>
+        !!step.formattingContext &&
+        Table.isInstanceOfTableFormattingContext(step.formattingContext) &&
+        // The position just after a whole table is outside the table.
+        (i > 0 || !position.after),
+    );
+  }
+
+  /**
+   * Whether this is a page-level region whose own block size is zero, as
+   * opposed to one whose space is used up by page floats.
+   */
+  private isZeroBlockSizeRegion(): boolean {
+    return (
+      (this.vertical ? this.width : this.height) === 0 &&
+      !this.pseudoParent &&
+      !this.isFootnote &&
+      !(this instanceof PageFloatArea)
+    );
   }
 
   getMaxBlockSizeOfPageFloats(): number {
@@ -4947,10 +5861,33 @@ export class Column extends VtreeImpl.Container implements Layout.Column {
                 // overflow (implicit page break): back up and find a
                 // page break
                 overflownNodeContext = nodeContext;
-                const bp = this.findAcceptableBreakPosition();
-                nodeContext = bp && bp.nodeContext;
+                const breakBeforeAtomicInline =
+                  this.findBreakBeforeOverflowingAtomicInline(nodeContext);
+                // Break positions inside atomic inlines cost more than the
+                // break before them, so only a break outside them with a
+                // lower penalty (e.g. before a box with `break-inside:
+                // avoid`) is preferred.
+                const bp = breakBeforeAtomicInline
+                  ? breakBeforeAtomicInline.penalty > 0
+                    ? this.findAcceptableBreakPosition(
+                        breakBeforeAtomicInline.penalty - 1,
+                      )
+                    : null
+                  : this.findAcceptableBreakPosition();
                 if (bp) {
+                  nodeContext = bp.nodeContext;
                   bp.breakPosition.breakPositionChosen(this);
+                } else if (
+                  breakBeforeAtomicInline &&
+                  // As in findAcceptableBreakPosition(), only a zero-penalty
+                  // break is allowed when non-fitting content is not forced.
+                  (breakBeforeAtomicInline.penalty === 0 ||
+                    this.forceNonfitting)
+                ) {
+                  nodeContext = breakBeforeAtomicInline.nodeContext;
+                  this.clearOverflownViewNodes(nodeContext, false);
+                } else {
+                  nodeContext = null;
                 }
                 loopFrame.breakLoop(); // Loop end
               } else {
@@ -5194,7 +6131,11 @@ export class TextNodeBreaker implements Layout.TextNodeBreaker {
     force: boolean,
   ): Vtree.NodeContext {
     if (nodeContext.after) {
-      nodeContext.offsetInNode = textNode.length;
+      // The view text node may start in the middle of the source node (e.g.,
+      // when the text continues from the previous page, or is split by
+      // TextSpacingPolyfill), at offsetInNode of the after check point.
+      nodeContext = nodeContext.modify();
+      nodeContext.offsetInNode += textNode.length;
     } else {
       // Character with index low is the last one that fits.
       let viewIndex = low - nodeContext.boxOffset;
@@ -5241,9 +6182,22 @@ export class TextNodeBreaker implements Layout.TextNodeBreaker {
         : "",
     );
     if (zwj) {
-      const p = nodeContext.preprocessedTextContent[0][1] as string;
-      nodeContext.preprocessedTextContent[0][1] =
-        p.slice(0, viewIndex + 1) + zwj + p.slice(viewIndex + 1);
+      // Insert it after the soft hyphen in the preprocessed text of the whole
+      // source node, from which the text continues. The view text node may
+      // start in the middle of the source node (e.g., when the text continues
+      // from the previous page, or is split by TextSpacingPolyfill).
+      let index = nodeContext.offsetInNode + viewIndex + 1;
+      for (const change of nodeContext.preprocessedTextContent) {
+        const s = change[1] as string;
+        if (change[0] === Diff.DELETE) {
+          continue;
+        }
+        if (index <= s.length) {
+          change[1] = s.slice(0, index) + zwj + s.slice(index);
+          break;
+        }
+        index -= s.length;
+      }
     }
     return viewIndex + 1;
   }
@@ -5484,7 +6438,7 @@ export class PageFloatArea extends Column implements Layout.PageFloatArea {
     function convertPercentageToPx(props: string[], refValue: number) {
       props.forEach((propName) => {
         const valueString = Base.getCSSProperty(target, propName);
-        if (valueString && valueString.charAt(valueString.length - 1) === "%") {
+        if (valueString?.endsWith("%")) {
           const percentageValue = parseFloat(valueString);
           const value = (refValue * percentageValue) / 100;
           Base.setCSSProperty(target, propName, `${value}px`);
@@ -5528,21 +6482,23 @@ export class PageFloatArea extends Column implements Layout.PageFloatArea {
     }
     this.floatMargins.push(this.getComputedMargin(rootViewNode));
     if (this.adjustContentRelativeSize) {
-      const floatSide = this.floatSide;
-      const isVertical = this.parentContainer.vertical;
-      if (isVertical) {
-        if (floatSide === "block-end" || floatSide === "left") {
-          const height = Base.getCSSProperty(rootViewNode, "height");
-          if (height !== "" && height !== "auto") {
-            Base.setCSSProperty(rootViewNode, "margin-top", "auto");
-          }
-        }
-      } else {
-        if (floatSide === "block-end" || floatSide === "bottom") {
-          const width = Base.getCSSProperty(rootViewNode, "width");
-          if (width !== "" && width !== "auto") {
-            Base.setCSSProperty(rootViewNode, "margin-left", "auto");
-          }
+      const container = this.parentContainer;
+      const blockEnd = CssLogicalUtil.toPhysical(
+        "block-end",
+        container.writingMode,
+      );
+      if (this.floatSide === "block-end" || this.floatSide === blockEnd) {
+        const inlineSize = Base.getCSSProperty(
+          rootViewNode,
+          container.vertical ? "height" : "width",
+        );
+        if (inlineSize !== "" && inlineSize !== "auto") {
+          const inlineStart = CssLogicalUtil.toPhysical(
+            "inline-start",
+            container.writingMode,
+            container.rtl ? "rtl" : "ltr",
+          );
+          Base.setCSSProperty(rootViewNode, `margin-${inlineStart}`, "auto");
         }
       }
     }
@@ -5596,13 +6552,12 @@ export class PageFloatArea extends Column implements Layout.PageFloatArea {
   }
 
   getContentInlineSize(): number {
-    return Math.max.apply(
-      null,
-      this.rootViewNodes.map((r, i) => {
+    return Math.max(
+      ...this.rootViewNodes.map((r, i) => {
         const box = LayoutHelper.getElementClientRectAdjusted(
           this.clientLayout,
           r,
-          this.vertical,
+          this.writingMode,
         );
         const margin = this.floatMargins[i];
         return this.vertical
@@ -5616,11 +6571,14 @@ export class PageFloatArea extends Column implements Layout.PageFloatArea {
     if (this.rootViewNodes.length === 0) {
       return 0;
     }
-    return Math.max.apply(
-      null,
-      this.rootViewNodes.map((r, i) => {
+    return Math.max(
+      ...this.rootViewNodes.map((r, i) => {
         const margin = this.floatMargins[i];
-        return this.vertical ? margin.left : margin.bottom;
+        return this.vertical
+          ? this.getBoxDir() < 0
+            ? margin.left
+            : margin.right
+          : margin.bottom;
       }),
     );
   }
@@ -5714,10 +6672,12 @@ export class PageFloatArea extends Column implements Layout.PageFloatArea {
       const areaBox = LayoutHelper.getElementClientRectAdjusted(
         this.clientLayout,
         this.element,
-        this.vertical,
+        this.writingMode,
       );
       const contentInsetBefore = this.vertical
-        ? this.borderRight + this.paddingRight
+        ? dir < 0
+          ? this.borderRight + this.paddingRight
+          : this.borderLeft + this.paddingLeft
         : this.borderTop + this.paddingTop;
       // getBoundingClientRect() gives the border box; adding margins here
       // would shrink computedBlockSize and let footnotes protrude below the
@@ -5731,10 +6691,14 @@ export class PageFloatArea extends Column implements Layout.PageFloatArea {
         const box = LayoutHelper.getElementClientRectAdjusted(
           this.clientLayout,
           node,
-          this.vertical,
+          this.writingMode,
         );
         const margin = this.getComputedMargin(node);
-        const marginAfter = this.vertical ? margin.left : margin.bottom;
+        const marginAfter = this.vertical
+          ? this.getBoxDir() < 0
+            ? margin.left
+            : margin.right
+          : margin.bottom;
         return (
           dir * (this.getAfterEdge(box) - contentBeforeEdge) +
           Math.max(0, marginAfter)

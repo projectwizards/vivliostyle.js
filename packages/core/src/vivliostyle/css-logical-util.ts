@@ -123,23 +123,77 @@ const values: {
     ],
   },
 };
+// Sideways modes have the same block axis as their vertical counterparts,
+// but sideways-lr reverses the inline axis.
+values["sideways-rl"] = values["vertical-rl"];
+values["sideways-lr"] = {
+  ltr: values["vertical-lr"].rtl,
+  rtl: values["vertical-lr"].ltr,
+};
+
+export function isVertical(writingMode: string): boolean {
+  return writingMode !== "horizontal-tb";
+}
+
+export function isBlockReversed(writingMode: string): boolean {
+  return writingMode === "vertical-rl" || writingMode === "sideways-rl";
+}
+
+export function isInlineReversed(writingMode: string, rtl: boolean): boolean {
+  return rtl !== (writingMode === "sideways-lr");
+}
+
+/**
+ * Convert with the maps and cache the result, since the conversions are done
+ * repeatedly during layout (e.g. for every block edge) for the few values of
+ * the sides.
+ */
+function convertCached(
+  value: string,
+  writingMode: string,
+  direction: string | null,
+  maps: { [key: string]: { [key: string]: ConversionMap[] } },
+  cache: Map<string, string>,
+): string {
+  const key = `${value} ${writingMode} ${direction}`;
+  let converted = cache.get(key);
+  if (converted === undefined) {
+    converted = convert(value, writingMode, direction, maps);
+    cache.set(key, converted);
+  }
+  return converted;
+}
 const toPhysicalMaps = createRegExpMap(values, true);
+const toPhysicalCache = new Map<string, string>();
 
 export function toPhysical(
   value: string,
   writingMode: string,
   direction?: string | null,
 ): string {
-  return convert(value, writingMode, direction || null, toPhysicalMaps);
+  return convertCached(
+    value,
+    writingMode,
+    direction || null,
+    toPhysicalMaps,
+    toPhysicalCache,
+  );
 }
 const toLogicalMaps = createRegExpMap(values, false);
+const toLogicalCache = new Map<string, string>();
 
 export function toLogical(
   value: string,
   writingMode: string,
   direction?: string | null,
 ): string {
-  return convert(value, writingMode, direction || null, toLogicalMaps);
+  return convertCached(
+    value,
+    writingMode,
+    direction || null,
+    toLogicalMaps,
+    toLogicalCache,
+  );
 }
 const lineRelativeValues: {
   [key: string]: { logical: string; physical: string }[];
@@ -163,6 +217,14 @@ const lineRelativeValues: {
     { logical: "under", physical: "left" },
   ],
 };
+
+lineRelativeValues["sideways-rl"] = lineRelativeValues["vertical-rl"];
+lineRelativeValues["sideways-lr"] = [
+  { logical: "line-left", physical: "bottom" },
+  { logical: "line-right", physical: "top" },
+  { logical: "over", physical: "left" },
+  { logical: "under", physical: "right" },
+];
 
 export function toLineRelative(value: string, writingMode: string): string {
   const maps = lineRelativeValues[writingMode];

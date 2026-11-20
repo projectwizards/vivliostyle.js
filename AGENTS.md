@@ -45,6 +45,7 @@ yarn test           # Test
 ### Core Unit Testing
 
 - `yarn test:core` or `cd packages/core/test && yarn test` (Karma + Jasmine, headless browser)
+- `TEST_BROWSER=Firefox yarn test:core` / `TEST_BROWSER=WebKit yarn test:core` for the other browsers (WebKit is Playwright's build: `npx playwright install webkit` first)
 - `yarn test:core-local` or `cd packages/core/test && yarn test-local` (Karma + Jasmine, manual browser for debugging)
 - Tests live in `packages/core/test/spec/vivliostyle/*-spec.js`
 
@@ -116,6 +117,16 @@ Use the VS Code integrated browser for routine rendering checks and bug reproduc
 3. Optionally edit `CHANGELOG.md`
 4. `yarn version:push` (amends commit, retags, pushes — CI then publishes to npm and creates GitHub Release)
 
+## Code Review Before Commit
+
+Before every commit of code changes, review the diff you are about to commit and fix the problems you find. Repeat until no new valid findings remain.
+
+- Applies to every commit, including fixes for review comments and CI failures, not only the first one in a branch.
+- Look for correctness bugs, regressions, missing edge cases, and missing tests. Check that the fix itself introduces no new problems.
+- Use your tool's code-review feature if it has one (e.g. `/code-review` in Claude Code); otherwise review the diff carefully yourself.
+- If a finding is intentionally not fixed, note why in the pull request.
+- Also run `yarn lint` and the relevant tests; the review does not replace them.
+
 ## Commit Message Guidelines
 
 Follow [Conventional Commits](https://conventionalcommits.org):
@@ -150,6 +161,19 @@ yarn test:layout-regression --limit 1                     # smoke check
 
 - Results: `artifacts/layout-regression/report.md`, `diff/*.png`
 - Triage: `yarn test:layout-regression:triage --show-pending`
+
+### Layout Performance
+
+Measure, profile, and compare the layout of a document with core builds from git refs, the working tree, or deployed viewers. See the `improve-layout-performance` skill for the workflow.
+
+```bash
+yarn test:layout-perf measure --src <url|path> --runs 5 core:v2.45.2 core:master core:worktree
+yarn test:layout-perf profile --src <url|path> before=core:master after=core:worktree
+yarn test:layout-perf compare --src <url|path> --repeat 2 core:master core:worktree
+```
+
+- Results: `artifacts/layout-perf/` (builds cached by commit, CPU profiles, differing pages)
+- Pass private documents with `--src` only; never commit them or their output
 
 ## Common Pitfalls
 

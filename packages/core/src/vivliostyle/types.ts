@@ -70,6 +70,11 @@ export namespace Layout {
      * current position.
      */
     allowLayout(nodeContext: Vtree.NodeContext): boolean;
+    /**
+     * Returns if this constraint allows the node context immediately after a
+     * page-level break has already been satisfied.
+     */
+    allowLayoutAfterPageBreak?(nodeContext: Vtree.NodeContext): boolean;
   }
   /**
    * Represents constraints on laying out fragments
@@ -614,6 +619,11 @@ export namespace Net {
     status: number;
     statusText: string | null;
     url: string;
+    /**
+     * The URL requested by the resource store, which differs from `url` when
+     * the request was redirected.
+     */
+    requestedURL?: string;
     contentType: string | null;
     responseText: string | null;
     responseXML: Document | null;
@@ -813,8 +823,14 @@ export namespace PageFloats {
       condition: PageFloatPlacementCondition,
     ): string | null;
     getMaxReachedAfterEdge(): number;
-    getBlockEndEdgeOfBlockStartFloats(inlinePos?: number): number;
-    getBlockStartEdgeOfBlockEndFloats(inlinePos?: number): number;
+    getBlockEndEdgeOfBlockStartFloats(
+      inlinePos?: number,
+      writingMode?: string,
+    ): number;
+    getBlockStartEdgeOfBlockEndFloats(
+      inlinePos?: number,
+      writingMode?: string,
+    ): number;
     getPageFloatClearEdge(clear: string, column: Layout.Column): number;
     getPageFloatPlacementCondition(
       float: PageFloat,
@@ -912,7 +928,7 @@ export namespace RepetitiveElement {
     getRootNodeContext(
       nodeContext: Vtree.NodeContext,
     ): Vtree.NodeContext | null;
-    initializeRepetitiveElements(vertical: boolean): void;
+    initializeRepetitiveElements(writingMode: boolean | string): void;
   }
 
   export function isInstanceOfRepetitiveElementsOwnerFormattingContext(
@@ -1045,8 +1061,21 @@ export namespace Vtree {
     pixelRatio: number;
     scaleRatio: number;
     layoutUnitPerPixel: number;
+    /**
+     * @param range range to measure. The caller may share it with later
+     *     measurements and reset it to a collapsed range at the start of its
+     *     document once this call returns.
+     * @return client rects of the range relative to the layout box.
+     */
     getRangeClientRects(range: Range): ClientRect[];
     getElementClientRect(element: Element): ClientRect;
+    /**
+     * @param element element to measure.
+     * @return client rects of the element's own boxes relative to the layout
+     *     box, i.e. its border box fragments (one per line for an inline
+     *     element), without the rects of its contents.
+     */
+    getElementClientRects(element: Element): ClientRect[];
     /**
      * @return element's computed style
      */
@@ -1105,13 +1134,13 @@ export namespace Vtree {
     /**
      * Apply styles to footnote container.
      * @param target element to apply styles to
-     * @return vertical
+     * @return resolved writing mode
      */
     applyFootnoteStyle(
-      vertical: boolean,
+      inheritedWritingMode: string,
       rtl: boolean,
       target: Element,
-    ): Task.Result<boolean>;
+    ): Task.Result<string>;
     /**
      * Peel off innermost first-XXX pseudoelement, create and create view nodes
      * after the end of that pseudoelement.
@@ -1123,7 +1152,10 @@ export namespace Vtree {
     /**
      * Process a block-end edge of a fragmented block.
      */
-    processFragmentedBlockEdge(nodeContext: NodeContext);
+    processFragmentedBlockEdge(
+      nodeContext: NodeContext,
+      column: Layout.Column,
+    ): void;
     convertLengthToPx(
       numeric: Css.Numeric,
       viewNode: Node,
@@ -1222,12 +1254,14 @@ export namespace Vtree {
     originY: number;
     snapWidth: number;
     snapHeight: number;
+    writingMode?: string;
     vertical: boolean; // vertical writing
     rtl: boolean;
     borderBoxSizing: boolean;
   }
 
   export interface Container extends ContainerGeometry {
+    writingMode: string;
     exclusions: GeometryUtil.Shape[] | null;
     innerShape: GeometryUtil.Shape | null;
     computedBlockSize: number;
@@ -1342,6 +1376,7 @@ export namespace Vtree {
     viewNode: Element | Text | null;
     clearSpacer: Element | null;
     inheritedProps: { [key: string]: number | string | Css.Val | undefined };
+    writingMode: string;
     vertical: boolean;
     direction: string;
     firstPseudo: FirstPseudo | null;

@@ -20,8 +20,10 @@
 import * as Asserts from "./asserts";
 import * as Base from "./base";
 import * as Css from "./css";
+import * as CssLogicalUtil from "./css-logical-util";
 import * as LayoutHelper from "./layout-helper";
 import * as PageFloats from "./page-floats";
+import * as RangeClientRects from "./range-client-rects";
 import * as SemanticFootnote from "./semantic-footnote";
 import * as Task from "./task";
 import * as Vtree from "./vtree";
@@ -76,16 +78,36 @@ function getLinePolicyConstraintNode(anchorNode: Node): Node {
 // Layout.Column/clientLayout available, so LayoutHelper.calculateEdge() cannot
 // be reused directly here.
 
-function getBlockDir(vertical: boolean): number {
-  return vertical ? -1 : 1;
+function getBlockDir(writingMode: boolean | string): number {
+  return (
+    typeof writingMode === "boolean"
+      ? writingMode
+      : CssLogicalUtil.isBlockReversed(writingMode)
+  )
+    ? -1
+    : 1;
 }
 
-function getBlockStartEdge(rect: Vtree.ClientRect, vertical: boolean): number {
-  return vertical ? rect.right : rect.top;
+function getBlockStartEdge(
+  rect: Vtree.ClientRect,
+  writingMode: boolean | string,
+): number {
+  return writingMode === false || writingMode === "horizontal-tb"
+    ? rect.top
+    : getBlockDir(writingMode) < 0
+      ? rect.right
+      : rect.left;
 }
 
-function getBlockEndEdge(rect: Vtree.ClientRect, vertical: boolean): number {
-  return vertical ? rect.left : rect.bottom;
+function getBlockEndEdge(
+  rect: Vtree.ClientRect,
+  writingMode: boolean | string,
+): number {
+  return writingMode === false || writingMode === "horizontal-tb"
+    ? rect.bottom
+    : getBlockDir(writingMode) < 0
+      ? rect.left
+      : rect.right;
 }
 
 function toMutableClientRect(rect: {
@@ -108,10 +130,10 @@ function toMutableClientRect(rect: {
 
 function getAdjustedElementRect(
   element: Element,
-  vertical: boolean,
+  writingMode: boolean | string,
 ): Vtree.ClientRect | null {
   const rect = toMutableClientRect(element.getBoundingClientRect());
-  LayoutHelper.adjustRectForColumnBreaking(rect, vertical);
+  LayoutHelper.adjustRectForColumnBreaking(rect, writingMode);
   if (rect.right < rect.left || rect.bottom < rect.top) {
     return null;
   }
@@ -127,10 +149,10 @@ function getAdjustedNonEmptyRects(
     width: number;
     height: number;
   }>,
-  vertical: boolean,
+  writingMode: boolean | string,
 ): Vtree.ClientRect[] {
   const adjustedRects = Array.from(rects, toMutableClientRect);
-  LayoutHelper.adjustRectsForColumnBreaking(adjustedRects, vertical);
+  LayoutHelper.adjustRectsForColumnBreaking(adjustedRects, writingMode);
   return adjustedRects.filter(
     (rect) => rect.right > rect.left && rect.bottom > rect.top,
   );
@@ -138,58 +160,63 @@ function getAdjustedNonEmptyRects(
 
 function getBlockEndEdgeFromRects(
   rects: Vtree.ClientRect[],
-  vertical: boolean,
+  writingMode: boolean | string,
 ): number {
   if (!rects.length) {
     return NaN;
   }
-  return vertical
-    ? Math.min(...rects.map((rect) => rect.left))
-    : Math.max(...rects.map((rect) => rect.bottom));
+  const dir = getBlockDir(writingMode);
+  return (
+    dir *
+    Math.max(...rects.map((rect) => dir * getBlockEndEdge(rect, writingMode)))
+  );
 }
 
 function getFirstBlockEndEdgeFromRects(
   rects: Vtree.ClientRect[],
-  vertical: boolean,
+  writingMode: boolean | string,
 ): number {
   if (!rects.length) {
     return NaN;
   }
-  const blockDir = getBlockDir(vertical);
+  const blockDir = getBlockDir(writingMode);
   const firstRect = rects.reduce((first, rect) =>
-    getBlockStartEdge(rect, vertical) * blockDir <
-    getBlockStartEdge(first, vertical) * blockDir
+    getBlockStartEdge(rect, writingMode) * blockDir <
+    getBlockStartEdge(first, writingMode) * blockDir
       ? rect
       : first,
   );
-  return getBlockEndEdge(firstRect, vertical);
+  return getBlockEndEdge(firstRect, writingMode);
 }
 
 function getBlockEndEdgeFromViewNode(
   viewNode: Element | Text | null,
-  vertical: boolean,
+  writingMode: boolean | string,
 ): number {
   if (!viewNode) {
     return NaN;
   }
   if (viewNode.nodeType === Node.ELEMENT_NODE) {
-    const rect = getAdjustedElementRect(viewNode as Element, vertical);
-    return rect ? getBlockEndEdge(rect, vertical) : NaN;
+    const rect = getAdjustedElementRect(viewNode as Element, writingMode);
+    return rect ? getBlockEndEdge(rect, writingMode) : NaN;
   }
   const text = viewNode.textContent || "";
   if (!text.length) {
     return NaN;
   }
-  const range = viewNode.ownerDocument.createRange();
-  range.setStart(viewNode, 0);
-  range.setEnd(viewNode, text.length);
-  const rects = getAdjustedNonEmptyRects(range.getClientRects(), vertical);
-  return getBlockEndEdgeFromRects(rects, vertical);
+  const rects = getAdjustedNonEmptyRects(
+    RangeClientRects.getClientRectsBetween(
+      RangeClientRects.at(viewNode, 0),
+      RangeClientRects.at(viewNode, text.length),
+    ),
+    writingMode,
+  );
+  return getBlockEndEdgeFromRects(rects, writingMode);
 }
 
 function getNodeContextEdge(
   nodeContext: Vtree.NodeContext,
-  vertical: boolean,
+  writingMode: boolean | string,
 ): number {
   const node = nodeContext.viewNode;
   if (!node) {
@@ -198,19 +225,22 @@ function getNodeContextEdge(
   if (node.nodeType === Node.ELEMENT_NODE) {
     const element = node as Element;
     if (nodeContext.after || !nodeContext.inline) {
-      const rect = getAdjustedElementRect(element, vertical);
+      const rect = getAdjustedElementRect(element, writingMode);
       if (rect) {
         if (nodeContext.after) {
-          return getBlockEndEdge(rect, vertical);
+          return getBlockEndEdge(rect, writingMode);
         }
-        return getBlockStartEdge(rect, vertical);
+        return getBlockStartEdge(rect, writingMode);
       }
     }
-    const rects = getAdjustedNonEmptyRects(element.getClientRects(), vertical);
+    const rects = getAdjustedNonEmptyRects(
+      element.getClientRects(),
+      writingMode,
+    );
     // Leading edges of inline elements need the current line's block-end edge,
     // not the element's union rect, otherwise line-policy geometry never fires
     // for inline content and falls back to node-position equality.
-    return getFirstBlockEndEdgeFromRects(rects, vertical);
+    return getFirstBlockEndEdgeFromRects(rects, writingMode);
   }
   const text = node.textContent || "";
   if (!text.length) {
@@ -221,11 +251,14 @@ function getNodeContextEdge(
     offset += text.length;
   }
   offset = Math.max(0, Math.min(offset, text.length - 1));
-  const range = node.ownerDocument.createRange();
-  range.setStart(node, offset);
-  range.setEnd(node, offset + 1);
-  const rects = getAdjustedNonEmptyRects(range.getClientRects(), vertical);
-  return getBlockEndEdgeFromRects(rects, vertical);
+  const rects = getAdjustedNonEmptyRects(
+    RangeClientRects.getClientRectsBetween(
+      RangeClientRects.at(node, offset),
+      RangeClientRects.at(node, offset + 1),
+    ),
+    writingMode,
+  );
+  return getBlockEndEdgeFromRects(rects, writingMode);
 }
 
 /**
@@ -262,21 +295,38 @@ export class LineFootnotePolicyLayoutConstraint
   constructor(
     public readonly footnote: Footnote,
     anchorViewNode: Element | Text | null,
-    private readonly vertical: boolean,
+    private readonly writingMode: boolean | string = false,
+    private readonly pageFloatLayoutContext?: PageFloats.AttachedPageFloatLayoutContext,
   ) {
     // Capture the rendered anchor line when the footnote becomes constrained.
     // Using live DOM geometry keeps footnote-policy: line tied to the line that
     // owns the call instead of falling back to whole-paragraph ancestry.
-    this.anchorEdge = getBlockEndEdgeFromViewNode(anchorViewNode, vertical);
+    // Detached calls no longer identify a rendered anchor line.
+    this.anchorEdge =
+      anchorViewNode && !anchorViewNode.isConnected
+        ? NaN
+        : getBlockEndEdgeFromViewNode(anchorViewNode, writingMode);
   }
 
   allowLayout(nodeContext: Vtree.NodeContext): boolean {
+    if (
+      nodeContext.floatSide === "footnote" &&
+      this.pageFloatLayoutContext?.findPageFloatByNodePosition({
+        ...nodeContext.toNodePosition(),
+        after: false,
+      }) === this.footnote
+    ) {
+      // Cell pseudo-columns may shorten the source position, and re-layout
+      // may move the call before its previous line. Both edges of the call
+      // remain constrained by the float's registered before position.
+      return false;
+    }
     if (!isNaN(this.anchorEdge)) {
-      const edge = getNodeContextEdge(nodeContext, this.vertical);
+      const edge = getNodeContextEdge(nodeContext, this.writingMode);
       if (!isNaN(edge)) {
         // Normalize both values to block-progression order so vertical-rl uses
         // the same "before the anchor line" comparison as horizontal-tb.
-        const blockDir = getBlockDir(this.vertical);
+        const blockDir = getBlockDir(this.writingMode);
         return (
           edge * blockDir <
           this.anchorEdge * blockDir - LINE_POLICY_EDGE_EPSILON
@@ -410,13 +460,13 @@ export class FootnoteLayoutStrategy
     Asserts.assert(element);
     return column.layoutContext
       .applyFootnoteStyle(
-        floatContainer.vertical,
+        floatContainer.writingMode,
         (column.layoutContext as any).nodeContext &&
           (column.layoutContext as any).nodeContext.direction === "rtl",
         element,
       )
-      .thenAsync((vertical) => {
-        floatArea.vertical = vertical;
+      .thenAsync((writingMode) => {
+        floatArea.writingMode = writingMode;
         floatArea.convertPercentageSizesToPx(element);
         column.setComputedInsets(element, floatArea);
         column.setComputedWidthAndHeight(element, floatArea);
@@ -498,7 +548,8 @@ export class FootnoteLayoutStrategy
           anchorViewNode,
           pageFloatLayoutContext.getPageFloatLayoutContext(
             footnote.floatReference,
-          ).container.vertical,
+          ).container.writingMode,
+          pageFloatLayoutContext,
         );
         pageFloatLayoutContext.addLayoutConstraint(
           constraint,

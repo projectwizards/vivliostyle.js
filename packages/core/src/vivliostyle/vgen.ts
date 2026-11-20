@@ -32,7 +32,9 @@ import * as Diff from "./diff";
 import * as Display from "./display";
 import * as Exprs from "./exprs";
 import * as Font from "./font";
+import { fontMetricProperties, type FontProperties } from "./font-metrics";
 import * as LayoutHelper from "./layout-helper";
+import * as RubyEmphasis from "./ruby-emphasis";
 import * as Logging from "./logging";
 import * as Matchers from "./matchers";
 import * as Net from "./net";
@@ -61,6 +63,104 @@ const xhtmlElementsRenderedAsDiv = new Set([
   "style",
   "title",
 ]);
+
+/**
+ * Whether resolving the font size needs the metrics of the font (and thus its
+ * properties, which are read from the computed style).
+ */
+function usesFontMetrics(fontSize: Css.Numeric): boolean {
+  return /^(ex|cap|ch|ic)$/.test(fontSize.unit);
+}
+
+const currentFontRelativeUnitPattern = /^(em|ex|cap|ch|ic)$/i;
+
+class CurrentFontRelativeLengthVisitor extends Css.Visitor {
+  found = false;
+
+  override visitNumeric(numeric: Css.Numeric): Css.Val | null {
+    this.found ||= currentFontRelativeUnitPattern.test(numeric.unit);
+    return null;
+  }
+}
+
+function hasCurrentFontRelativeLength(value: Css.Val): boolean {
+  // This is checked for every property of every element, and most values are
+  // a single length or keyword. Only lists and functions contain values that
+  // Css.Visitor visits.
+  if (value instanceof Css.Numeric) {
+    return currentFontRelativeUnitPattern.test(value.unit);
+  }
+  if (!(
+    value instanceof Css.SpaceList ||
+    value instanceof Css.CommaList ||
+    value instanceof Css.Func
+  )) {
+    return false;
+  }
+  const visitor = new CurrentFontRelativeLengthVisitor();
+  value.visit(visitor);
+  return visitor.found;
+}
+
+/**
+ * Scales the lengths in units of the current font (em, ex, cap, ch, ic) that
+ * the browser resolves, to undo the font-size adjustment by layoutUnitAdj.
+ * Without this, a box sized with such a unit shrinks with the adjusted font
+ * and loses the room the adjustment makes for the text, e.g. 20 characters in
+ * a `20ic` box wrap. (Issue #1590)
+ *
+ * `em` resolves against the adjusted font size itself, while the other units
+ * resolve against the font metrics, which the browser may take from a smaller
+ * font size, so each unit has its own factor.
+ */
+class FontSizeAdjustmentCompensator extends Css.FilterVisitor {
+  scaledNegative = false;
+
+  constructor(private readonly getFactor: (unit: string) => number) {
+    super();
+  }
+
+  override visitNumeric(numeric: Css.Numeric): Css.Val {
+    const unit = numeric.unit.toLowerCase();
+    const factor = /^(em|ex|cap|ch|ic)$/.test(unit) ? this.getFactor(unit) : 1;
+    if (factor === 1) {
+      return numeric;
+    }
+    this.scaledNegative ||= numeric.num < 0;
+    return new Css.AnyToken(`calc(${numeric.toString()} * ${factor})`);
+  }
+}
+
+/**
+ * Whether a font-size declaration of a view element carries the font-size
+ * adjustment by layoutUnitAdj: true for a generated
+ * `calc(<length> - var(--viv-layoutUnitAdj))`, null for a value that takes
+ * the adjustment of the parent font size along (a percentage, a relative unit
+ * or keyword, or a CSS-wide value that means inheritance), and false for any
+ * other value, e.g. `clamp(16px, 16px, 16px)`, which is not adjusted.
+ * (Issue #1590)
+ */
+function fontSizeCarriesAdjustment(declaration: string): boolean | null {
+  if (/-\s*var\(--viv-layoutUnitAdj\)\s*\)\s*$/.test(declaration)) {
+    return true;
+  }
+  if (
+    /^(inherit|unset)$/i.test(declaration.trim()) ||
+    /%|\d(em|ex|cap|ch|ic|lh)\b|\b(larger|smaller)\b/i.test(declaration)
+  ) {
+    return null;
+  }
+  return false;
+}
+
+/**
+ * The view elements whose font-size declaration looks as if it took the
+ * adjustment of the parent font size along (see fontSizeCarriesAdjustment()),
+ * but resolves to a length that the adjustment does not change, e.g.
+ * `clamp(16px, 1em, 24px)` with a 16px parent, whose 16px minimum wins.
+ * (Issue #1590)
+ */
+const fontSizesWithoutParentAdjustment = new WeakSet<Element>();
 
 function getWebKitMarkerListStyleType(markerContent: Css.Val): Css.Str | null {
   if (markerContent instanceof Css.Str) {
@@ -166,6 +266,34 @@ export function initIFrame(iframe: HTMLIFrameElement): void {
 
 export interface StylerProducer {
   getStylerForDoc(xmldoc: XmlDoc.XMLDocHolder): CssStyler.AbstractStyler;
+}
+
+/**
+ * Returns whether a percentage block size of the element resolves, i.e. the
+ * block sizes of its containing blocks up to the column are definite as
+ * specified lengths or resolving percentages. Other block sizes, e.g. auto
+ * or max-content, are treated as indefinite.
+ */
+function isPercentageBlockSizeDefinite(
+  elem: Element,
+  blockSizeP: string,
+  columnElement: Element,
+): boolean {
+  let parent = elem.parentElement;
+  for (; parent && parent !== columnElement; parent = parent.parentElement) {
+    // Boxless and non-atomic inline ancestors are not containing blocks.
+    const display =
+      parent.ownerDocument.defaultView?.getComputedStyle(parent).display ?? "";
+    if (/^(contents|inline|ruby(-.*)?)$/.test(display)) {
+      continue;
+    }
+    const size = Base.getCSSProperty(parent, blockSizeP);
+    if (!size.includes("%")) {
+      return /\d/.test(size) && !/content/.test(size);
+    }
+  }
+  // The column has a definite block size.
+  return !!parent;
 }
 
 export class ViewFactory
@@ -472,7 +600,7 @@ export class ViewFactory
         ) {
           continue;
         }
-        if (name.match(/^first-/)) {
+        if (name.startsWith("first-")) {
           const display = computedStyle["display"];
           if (!display || display === Css.ident.inline) {
             continue;
@@ -525,7 +653,7 @@ export class ViewFactory
         );
       }
       att.appendChild(elem);
-      if (name.match(/^first-/)) {
+      if (name.startsWith("first-")) {
         att = elem;
       }
     }
@@ -657,7 +785,7 @@ export class ViewFactory
         const url =
           templateURLVal instanceof Css.URL
             ? templateURLVal.url
-            : Base.resolveURL("user-agent.xml#footnote", Base.resourceBaseURL);
+            : `${Base.userAgentXmlURL}#footnote`;
         cont = this.createRefShadow(
           url,
           Vtree.ShadowType.ROOTLESS,
@@ -705,10 +833,7 @@ export class ViewFactory
       let cont2: Task.Result<Vtree.ShadowContext | null> | null = null;
       cont1.then((shadow) => {
         if (computedStyle["display"] === Css.ident.table_cell) {
-          const url = Base.resolveURL(
-            "user-agent.xml#table-cell",
-            Base.resourceBaseURL,
-          );
+          const url = `${Base.userAgentXmlURL}#table-cell`;
           cont2 = this.createRefShadow(
             url,
             Vtree.ShadowType.ROOTLESS,
@@ -745,14 +870,15 @@ export class ViewFactory
   }
 
   /**
-   * @return vertical
+   * @return used writing mode
    */
   computeStyle(
-    vertical: boolean,
+    inheritedWritingMode: string,
     rtl: boolean,
     style: CssCascade.ElementStyle,
     computedStyle: { [key: string]: Css.Val },
-  ): boolean {
+    cascadedMargins?: { [key: string]: CssCascade.CascadeValue },
+  ): string {
     const context = this.context;
     const cascMap = CssCascade.flattenCascadedStyle(
       style,
@@ -789,8 +915,13 @@ export class ViewFactory
         cascMap["direction"] = rootDirection;
       }
     }
-    const verticalParent = vertical;
-    vertical = CssCascade.isVertical(cascMap, context, vertical);
+    const verticalParent = inheritedWritingMode !== "horizontal-tb";
+    const writingMode = CssCascade.resolveWritingMode(
+      cascMap,
+      context,
+      inheritedWritingMode,
+    );
+    const vertical = writingMode !== "horizontal-tb";
     // When writing-mode is propagated from the body element to the root
     // element as a used value (CSS Writing Modes spec), the root element's
     // used writing mode is the propagated one although its computed style is
@@ -798,7 +929,7 @@ export class ViewFactory
     // body element is not treated as a writing-mode change (which would
     // cause the vertical-in-horizontal treatment (Issue #1264), e.g.,
     // `inline-size: auto` becoming `max-content`). (Issue #1122 follow-up)
-    let usedVertical = vertical;
+    let usedWritingMode = writingMode;
     if (isRoot && !vertical) {
       const rootWritingModeCasc = this.styler.rootStyle[
         "writing-mode"
@@ -807,14 +938,135 @@ export class ViewFactory
         rootWritingModeCasc &&
         this.styler.bodyPropagatedStyle["writing-mode"] === rootWritingModeCasc
       ) {
-        usedVertical = CssCascade.isVertical(
+        usedWritingMode = CssCascade.resolveWritingMode(
           { "writing-mode": rootWritingModeCasc },
           context,
-          vertical,
+          writingMode,
         );
       }
     }
     const verticalChanged = !isRoot && vertical !== verticalParent;
+    // Only use the page-area fallback when the containing block does not
+    // supply the orthogonal inline size. A definite size must remain under
+    // browser control, including percentage resolution and available space
+    // after margins. (Issue #1264)
+    let useOrthogonalFallback = false;
+    if (verticalChanged) {
+      const inlineSizeName = vertical ? "height" : "width";
+      const displays = new Map<HTMLElement, string>();
+      const getDisplay = (element: HTMLElement): string => {
+        let display = displays.get(element);
+        if (display === undefined) {
+          display = element.style?.display ?? "";
+          if (
+            /^(inline|ruby|ruby-base|ruby-text|ruby-base-container|ruby-text-container)$/.test(
+              display,
+            )
+          ) {
+            // Orthogonal inline boxes can be inline-blockified even though
+            // their specified view style still says display:inline.
+            display =
+              element.ownerDocument.defaultView?.getComputedStyle(element)
+                .display || display;
+          }
+          displays.set(element, display);
+        }
+        return display;
+      };
+      const findContainingBlock = (
+        element: HTMLElement | null,
+      ): HTMLElement | null => {
+        // Boxless and non-atomic inline ancestors do not establish the
+        // containing block for these block-level orthogonal flow roots.
+        while (
+          element &&
+          element !== this.viewRoot &&
+          /^(contents|inline|ruby|ruby-base|ruby-text|ruby-base-container|ruby-text-container)$/.test(
+            getDisplay(element),
+          )
+        ) {
+          element = element.parentElement;
+        }
+        return element === this.viewRoot ? null : element;
+      };
+      const containingBlock = findContainingBlock(
+        this.nodeContext?.parent?.viewNode as HTMLElement,
+      );
+      const isFlexOrGrid = (element: HTMLElement | null): boolean =>
+        !!element &&
+        element !== this.viewRoot &&
+        /^(inline-)?(grid|flex)$/.test(getDisplay(element));
+      const hasLayoutSizing = (element: HTMLElement): boolean =>
+        isFlexOrGrid(element) ||
+        isFlexOrGrid(findContainingBlock(element.parentElement));
+      // Cache all four states per element for this decision. Percentage and
+      // ratio dependencies otherwise revisit the same ancestors exponentially.
+      const definiteSizes = new Map<HTMLElement, Map<string, boolean>>();
+      const hasDefiniteSize = (
+        element: HTMLElement | null,
+        dimension: "width" | "height",
+        allowAspectRatio = true,
+      ): boolean => {
+        if (!element || element === this.viewRoot) {
+          return false;
+        }
+        const key = `${dimension}:${allowAspectRatio}`;
+        let cached = definiteSizes.get(element);
+        const cachedValue = cached?.get(key);
+        if (cachedValue !== undefined) {
+          return cachedValue;
+        }
+        if (!cached) {
+          cached = new Map();
+          definiteSizes.set(element, cached);
+        }
+        const style = element.style;
+        const size = style?.[dimension] ?? "";
+        let definite = hasLayoutSizing(element);
+        if (!definite && size.includes("%")) {
+          // An unresolved percentage behaves as auto, so a preferred ratio
+          // may still supply this axis from a definite opposite dimension.
+          definite = hasDefiniteSize(
+            findContainingBlock(element.parentElement),
+            dimension,
+          );
+        } else if (
+          !definite &&
+          size &&
+          !/^(auto|min-content|max-content|fit-content|stretch|inherit|initial|unset|revert)/.test(
+            size,
+          )
+        ) {
+          definite = true;
+        }
+        if (!definite && allowAspectRatio) {
+          const components = (style?.aspectRatio ?? "")
+            .replace(/\bauto\b/g, "")
+            .trim()
+            .split("/");
+          const numerator = Number(components[0]);
+          const denominator =
+            components.length === 1 ? 1 : Number(components[1]);
+          // Degenerate ratios behave as auto and supply no preferred size.
+          definite =
+            numerator > 0 &&
+            Number.isFinite(numerator) &&
+            denominator > 0 &&
+            Number.isFinite(denominator) &&
+            hasDefiniteSize(
+              element,
+              dimension === "height" ? "width" : "height",
+              false,
+            );
+        }
+        cached.set(key, definite);
+        return definite;
+      };
+      // Flex/grid sizing only crosses the item/container boundary. An
+      // ordinary auto-sized descendant does not acquire a definite basis
+      // merely because some distant ancestor participates in that layout.
+      useOrthogonalFallback = !hasDefiniteSize(containingBlock, inlineSizeName);
+    }
     rtl = CssCascade.isRtl(cascMap, context, rtl);
 
     const transform = (
@@ -825,7 +1077,7 @@ export class ViewFactory
       // horizontal-in-vertical block needs to be resolved against the
       // page area height or width. (Fix for issue #1264)
       let percentRef: number | undefined;
-      if (verticalChanged) {
+      if (useOrthogonalFallback) {
         if (vertical) {
           if (/^(min-|max-)?(height|inline-size)$/.test(name)) {
             percentRef = context.pageAreaHeight ?? undefined;
@@ -851,27 +1103,39 @@ export class ViewFactory
     CssCascade.convertToPhysical(
       cascMap,
       computedStyle,
-      vertical,
+      writingMode,
       rtl,
       isLeftPage,
       transform,
     );
 
-    if (verticalChanged) {
-      // The auto value of inline-size on vertical-in-horizontal or
-      // horizontal-in-vertical block is changed to max-content.
-      // (Fix for issue #1264)
-      const inlineSize = computedStyle[vertical ? "height" : "width"];
-      if (!inlineSize || inlineSize === Css.ident.auto) {
-        computedStyle[vertical ? "height" : "width"] = Css.ident.max_content;
+    if (
+      cascadedMargins &&
+      computedStyle["display"] === Css.getName("ruby-text")
+    ) {
+      // Keep the winning margin's importance through the same physical/logical
+      // resolution as its value, including shorthand, layers and page sides.
+      const margins: { [key: string]: CssCascade.CascadeValue } = {};
+      for (const name in cascMap) {
+        if (name.startsWith("margin-")) {
+          margins[name] = cascMap[name];
+        }
       }
+      CssCascade.convertToPhysical(
+        margins,
+        cascadedMargins,
+        writingMode,
+        rtl,
+        isLeftPage,
+        (_name, value) => value,
+      );
     }
 
     if (Display.isRunning(computedStyle["position"])) {
       // Running elements
       computedStyle["position"] = Css.ident.fixed;
       computedStyle["visibility"] = Css.ident.hidden;
-      return usedVertical;
+      return usedWritingMode;
     }
 
     // Compute values of display, position and float
@@ -888,13 +1152,27 @@ export class ViewFactory
       position,
       float,
       this.sourceNode === this.xmldoc.root,
+      !isRoot && writingMode !== inheritedWritingMode,
     );
     ["display", "position", "float"].forEach((name) => {
       if (displayValues[name]) {
         computedStyle[name] = displayValues[name];
       }
     });
-    return usedVertical;
+    if (
+      useOrthogonalFallback &&
+      Display.isBlockLevel(computedStyle["display"])
+    ) {
+      // The auto value of inline-size on vertical-in-horizontal or
+      // horizontal-in-vertical block is changed to max-content.
+      // (Fix for issue #1264)
+      const inlineSize = computedStyle[vertical ? "height" : "width"];
+      if (!inlineSize || inlineSize === Css.ident.auto) {
+        computedStyle[vertical ? "height" : "width"] = Css.ident.max_content;
+      }
+    }
+
+    return usedWritingMode;
   }
 
   private inheritFromSourceParent(
@@ -906,6 +1184,7 @@ export class ViewFactory
   } {
     let node: Node | null = nodeContext.sourceNode;
     const styles: CssCascade.ElementStyle[] = [];
+    const styleLanguages: (string | null)[] = [];
     let lang: string | null = null;
     const isFootnoteContentInclude =
       node instanceof Element &&
@@ -972,7 +1251,9 @@ export class ViewFactory
           : this.styler;
         const nodeStyle = styler.getStyle(node as Element, false);
         styles.push(nodeStyle);
-        lang = lang || Base.getLangAttribute(node as Element);
+        const nodeLanguage = Base.getLangAttribute(node as Element);
+        styleLanguages.push(nodeLanguage);
+        lang = lang || nodeLanguage;
       }
       if (shadowRoot && !semanticFootnoteRootInRootedShadow) {
         node = shadow.owner;
@@ -988,14 +1269,50 @@ export class ViewFactory
     // rules such as :footnote-content) authoritative over ancestor-derived
     // inherited values.
     const blockedInheritedByCurrent = new Set<string>();
+    // Whether the current element's font size (including region rules) wins
+    // over the inherited font size.
+    let currentDeclaresFontSize = false;
+    // Whether the current element's own cascaded style declares font-size.
+    const fontSizeFromOwnStyle = !!(
+      styles.length > 0 && CssCascade.getProp(styles[0], "font-size")
+    );
+    // Whether the current element's line height (including region rules) uses
+    // the `lh` unit, which is resolved against the inherited line height.
+    let currentDeclaresLineHeight = false;
+    // Whether the current element's own cascaded style declares line-height.
+    const lineHeightFromOwnStyle = !!(
+      styles.length > 0 && CssCascade.getProp(styles[0], "line-height")
+    );
+    const flattenedCurrentStyle = styles.length
+      ? CssCascade.flattenCascadedStyle(
+          styles[0],
+          this.context,
+          this.regionIds,
+          this.isFootnote,
+        )
+      : {};
+    const sourceFontSize = styles.length
+      ? CssCascade.getProp(styles[0], "font-size")
+      : null;
+    const winningFontSize = flattenedCurrentStyle["font-size"];
+    const hasWinningFontSizeOverride =
+      !!winningFontSize && winningFontSize !== sourceFontSize;
+    const sourceFontWeight = styles.length
+      ? CssCascade.getProp(styles[0], "font-weight")
+      : null;
+    const winningFontWeight = flattenedCurrentStyle["font-weight"];
+    const winningRelativeFontWeight =
+      winningFontWeight &&
+      winningFontWeight !== sourceFontWeight &&
+      (CssCascade.hasKeywordName(winningFontWeight.value, "bolder") ||
+        CssCascade.hasKeywordName(winningFontWeight.value, "lighter"));
     if (styles.length > 0) {
-      const currentStyle = styles[0];
-      const flattenedCurrentStyle = CssCascade.flattenCascadedStyle(
-        currentStyle,
+      const currentFontSize = flattenedCurrentStyle["font-size"]?.evaluate(
         this.context,
-        this.regionIds,
-        this.isFootnote,
+        "font-size",
       );
+      const fontSizeUsesLineHeight =
+        !!currentFontSize && CssCascade.usesLineHeightUnit(currentFontSize);
       for (const name in flattenedCurrentStyle) {
         if (!CssCascade.isInherited(name)) {
           continue;
@@ -1003,12 +1320,42 @@ export class ViewFactory
         const value = flattenedCurrentStyle[name].evaluate(this.context, name);
         if (
           value &&
-          value !== Css.ident.inherit &&
-          value !== Css.ident.unset &&
+          // A value that takes the parent value, e.g. `--x: INHERIT; color:
+          // var(--x)`, must not block the inherited value. (Review)
+          !CssCascade.isInheritingValue(name, value) &&
           value !== Css.empty &&
           !Css.isRollbackValue(value)
         ) {
-          blockedInheritedByCurrent.add(name);
+          if (name === "font-size") {
+            // A relative font size (em/%/lh units, a calc() of them, or the
+            // relative keywords "larger"/"smaller") is resolved against the
+            // inherited value, so the inherited font size must still be
+            // accumulated. It is only the priority of the accumulated value
+            // that must not beat the declaration; see below. (Issue #2174)
+            currentDeclaresFontSize = true;
+          } else if (
+            // An `lh` unit of a line height refers to the line height of the
+            // parent, so the inherited line height must still be accumulated as
+            // well. The declaration replaces the accumulated value, but only
+            // the priority of the accumulated value is lowered below when the
+            // declaration is not in the element's own cascaded style. (Review)
+            name === "line-height" &&
+            // An own line-height must not block the source parent's value
+            // while resolving `font-size: 1lh`. Font size is processed first,
+            // then this element's line-height replaces the inherited value.
+            (fontSizeUsesLineHeight ||
+              CssCascade.usesLineHeightUnit(value) ||
+              // A line height that the browser rejects is inherited as well,
+              // so the inherited line height must still be accumulated for a
+              // descendant that resolves the `lh` unit. (Review)
+              CssCascade.isInvalidLineHeight(this.context, value))
+          ) {
+            currentDeclaresLineHeight = true;
+          } else if (!fontMetricProperties.includes(name)) {
+            // Font traits of the source parent are needed to resolve this
+            // element's font-relative font-size before its own traits apply.
+            blockedInheritedByCurrent.add(name);
+          }
         }
       }
     }
@@ -1020,19 +1367,47 @@ export class ViewFactory
         new Css.Numeric(fontSize, "px"),
         0,
       ),
+      // The initial value that every source ancestor chain starts from, so
+      // that detached content inherits `normal` from a source that declares no
+      // line-height.
+      "line-height": new CssCascade.CascadeValue(Css.ident.normal, 0),
     } as CssCascade.ElementStyle;
-    if (isRoot) {
-      props["line-height"] = new CssCascade.CascadeValue(
-        new Css.Num(this.context.pref.lineHeight),
-        0,
-      );
-    }
     const inheritanceVisitor = new CssCascade.InheritanceVisitor(
       props,
       this.context,
     );
+    let inheritedLanguage = this.context.fontLanguage;
     for (let i = styles.length - 1; i >= 0; --i) {
-      const style = styles[i];
+      let style = styles[i];
+      // Ancestors use their own view conditions, without the detached child's
+      // region rules. Their computed font settings form the child's metrics.
+      // Without view-conditional styles, an ancestor's flattened style is its
+      // own style, so it is not flattened (this runs for every ancestor).
+      const fontStyle =
+        i === 0
+          ? flattenedCurrentStyle
+          : (style["_viewConditionalStyles"] as unknown[] | undefined)?.length
+            ? CssCascade.flattenCascadedStyle(style, this.context, null, false)
+            : null;
+      // The current element's font-size still uses the source-parent basis;
+      // its winning region/view traits apply after font-size is resolved.
+      const fontProperties =
+        i === 0
+          ? fontMetricProperties
+          : ["font-size", "line-height", ...fontMetricProperties];
+      if (fontStyle) {
+        for (const name of fontProperties) {
+          if (fontStyle[name] && fontStyle[name] !== style[name]) {
+            // Copy the style only when a value differs: it is only read below.
+            if (style === styles[i]) {
+              style = { ...styles[i] };
+            }
+            style[name] = fontStyle[name];
+          }
+        }
+      }
+      const currentLanguage = styleLanguages[i] ?? inheritedLanguage;
+      inheritanceVisitor.fontLanguage = inheritedLanguage;
       const propList: string[] = [];
       for (const propName in style) {
         if (CssCascade.isInherited(propName)) {
@@ -1042,6 +1417,20 @@ export class ViewFactory
       propList.sort(Css.processingOrderFn);
       let fontSize: Css.Val | undefined;
       let lineHeight: Css.Val | undefined;
+      // The font size of the level above, which a relative line height that was
+      // accumulated so far is resolved against: the font-relative units of a
+      // line height refer to the parent's metrics, and this level's own font
+      // size has not been applied here yet. (Review)
+      const parentFontSize = inheritanceVisitor.getInheritedFontSize();
+      // Capture normal before this level changes the accumulated font traits.
+      const declaredLineHeight = CssCascade.getProp(
+        style,
+        "line-height",
+      )?.value;
+      const parentLineHeight =
+        declaredLineHeight && CssCascade.usesLineHeightUnit(declaredLineHeight)
+          ? inheritanceVisitor.getInheritedLineHeight(parentFontSize)
+          : null;
 
       for (const name of propList) {
         if (
@@ -1054,25 +1443,84 @@ export class ViewFactory
         if (i > 0 && blockedInheritedByCurrent.has(name)) {
           continue;
         }
+        inheritanceVisitor.fontLanguage =
+          name === "font-size" ? inheritedLanguage : currentLanguage;
         inheritanceVisitor.setPropName(name);
         const prop = CssCascade.getProp(style, name);
         let prop1 = prop;
-        if (prop.value === Css.ident.initial) {
+        if (CssCascade.hasKeywordName(prop.value, "initial")) {
           // `initial` means use the CSS initial value, not inherit from
           // ancestor. This is needed for `all: initial` to work on elements
           // detached from their source parent (e.g. footnotes). (Issue #1696)
-          delete props[name];
+          if (name === "font-size") {
+            // The initial font size is materialized as a length, because it is
+            // the base of the dependent values of the element, e.g. an `em`
+            // unit of another declaration: `font-size: initial` is the (medium)
+            // initial font size. (Issue #2174 follow-up)
+            props[name] = prop.withValue(
+              new Css.Numeric(this.context.initialFontSize, "px"),
+            );
+          } else {
+            // The keyword itself is kept as the accumulated value. Removing it
+            // would make the detached element inherit from the synthetic view
+            // parent instead of using the initial value, e.g.
+            // `color: initial` under a footnote area that inherits the color
+            // of the page would be rendered in that color instead of the
+            // initial one. (Review)
+            props[name] = prop;
+          }
+        } else if (CssCascade.isInheritingValue(name, prop.value)) {
+          const inherited = CssCascade.getProp(props, name);
+          if (inherited) {
+            // `inherit` is the inherited value. Materializing it with the
+            // priority of this declaration lets it compete with a declaration
+            // that is not in the element's own cascaded style, e.g. a region
+            // rule, as any other declaration of the element would. (Issue
+            // #2174)
+            props[name] = prop.withValue(inherited.value);
+          } else {
+            // No source ancestor declares the property, so the value that the
+            // element inherits is the initial one. Materializing `initial`
+            // instead of leaving the declaration out makes the generated node
+            // use that value rather than the one of the synthetic view parent,
+            // e.g. a `color: inherit` footnote under a region rule such as
+            // `:footnote-content { color: red }`. (Review)
+            props[name] = prop.withValue(Css.ident.initial);
+          }
         } else if (!Css.isDefaultingValue(prop.value)) {
           if (
+            i === 0 &&
+            name !== "font-size" &&
+            (hasWinningFontSizeOverride || winningRelativeFontWeight) &&
+            hasCurrentFontRelativeLength(prop.value)
+          ) {
+            // The browser applies the winning region/view font-size or
+            // relative font-weight after this walk. Leave dependent units
+            // intact so they resolve against those final font metrics,
+            // including relative region sizes against the rendering parent.
+            prop1 = prop;
+            if (
+              name === "line-height" &&
+              CssCascade.usesLineHeightUnit(prop.value)
+            ) {
+              const inheritedLineHeight = parentLineHeight;
+              if (inheritedLineHeight != null) {
+                // Only current-font terms are deferred. lh in line-height
+                // still refers to the source parent's line height.
+                prop1 = prop.filterValue(
+                  new CssCascade.LineHeightUnitReplacer(inheritedLineHeight),
+                );
+              }
+            }
+          } else if (
             name === "font-size" &&
             i === styles.length - 1 &&
             this.context.isRelativeRootFontSize &&
-            this.context.rootFontSize
+            this.context.rootFontSize != null
           ) {
             // Fix for issue #608, #549
-            prop1 = new CssCascade.CascadeValue(
+            prop1 = prop.withValue(
               new Css.Numeric(this.context.rootFontSize, "px"),
-              prop.priority,
             );
           } else if (
             name === "line-height" &&
@@ -1082,29 +1530,121 @@ export class ViewFactory
               this.context.isRootLineHeightFromRelativeCalc)
           ) {
             // line-height with lh or rlh unit on root element
-            prop1 = new CssCascade.CascadeValue(
+            prop1 = prop.withValue(
               new Css.Numeric(this.context.rootLineHeight, "px"),
-              prop.priority,
             );
           } else if (
-            i === 0 &&
+            name === "line-height" &&
             prop.value instanceof Css.Numeric &&
             prop.value.unit === "lh"
           ) {
-            // line-height with lh unit on current element
-            const lhUnitSize = this.getLineHeightUnitSize(
-              name,
-              fontSize,
-              lineHeight,
-            );
+            // line-height with an lh unit, which refers to the line height of
+            // the parent. The line height that was accumulated for the parent
+            // is used for the current element and for a source ancestor alike:
+            // on detached content the rendered parent is the synthetic one
+            // (e.g. the footnote area), whose line height is not the one that
+            // the element inherits in the source document. Resolved level by
+            // level, a detached descendant that resolves an lh unit of its own
+            // finds a length instead of falling back to the root line height. A
+            // `font-size` with an lh unit is left to the inheritance visitor,
+            // which resolves it against the line height that was accumulated
+            // for the source parent. (Issue #2174 follow-up, Review)
+            const lhUnitSize = parentLineHeight;
             if (lhUnitSize != null) {
-              prop1 = new CssCascade.CascadeValue(
+              prop1 = prop.withValue(
                 new Css.Numeric(prop.value.num * lhUnitSize, "px"),
-                prop.priority,
               );
+            }
+          } else if (
+            name === "line-height" &&
+            prop.value instanceof Css.Func &&
+            CssCascade.usesLineHeightUnit(prop.value)
+          ) {
+            // A computed line height whose `lh` unit refers to the line height
+            // of the parent, e.g. `line-height: calc(1lh + 10px)`. It is
+            // resolved here, level by level, against the line height that was
+            // accumulated for the parent so far, so that the unit does not
+            // fall back to the preferred line height when a descendant
+            // resolves its own `lh` unit. (Review)
+            const inheritedLineHeight = parentLineHeight;
+            const inheritedFontSize = inheritanceVisitor.getInheritedFontSize();
+            if (inheritedLineHeight != null && inheritedFontSize != null) {
+              const px = CssCascade.resolveLineHeightValueToPx(
+                this.context,
+                prop.value,
+                inheritedFontSize,
+                inheritedLineHeight,
+                {
+                  ...CssCascade.getFontMetricProperties(props, this.context),
+                  lang: currentLanguage || "",
+                },
+              );
+              if (px != null) {
+                prop1 = prop.withValue(new Css.Numeric(px, "px"));
+              }
             }
           } else if (!Css.isCustomPropName(name)) {
             prop1 = prop.filterValue(inheritanceVisitor);
+          }
+
+          if (name === "font-weight") {
+            // A weight that a var() substitution made invalid is rejected by
+            // the browser, which keeps the inherited weight, so the accumulated
+            // weight must not be replaced by it: a relative keyword
+            // (`bolder`/`lighter`) of a detached descendant is resolved against
+            // the inherited weight. (Review)
+            if (CssCascade.isInvalidFontWeight(this.context, prop1.value)) {
+              const inheritedFontWeight = CssCascade.getProp(props, name);
+              if (inheritedFontWeight) {
+                prop1 = prop1.withValue(inheritedFontWeight.value);
+              }
+            }
+          }
+
+          if (name === "line-height") {
+            // A line height that a var() substitution made invalid is rejected
+            // by the browser, which keeps the inherited line height, so the
+            // accumulated value must not be replaced by it: a descendant that
+            // resolves the `lh` unit (`font-size: 1lh`) then uses the line
+            // height it inherits instead of the preferred line height.
+            // (Review)
+            if (CssCascade.isInvalidLineHeight(this.context, prop1.value)) {
+              const inheritedLineHeight = CssCascade.getProp(props, name);
+              if (inheritedLineHeight) {
+                prop1 = prop1.withValue(inheritedLineHeight.value);
+              }
+            }
+          }
+
+          if (name === "font-size") {
+            // `initial`, `inherit` and `unset` are handled above and the
+            // keywords are resolved by the visitor, so every other value is
+            // either a length or invalid. An invalid one, e.g. a unitless
+            // number, an unknown identifier or a negative length that a var()
+            // substitution put into the declaration, is rejected by the
+            // browser, which inherits the parent font size instead; keep the
+            // value that was accumulated for the source parent, so that the
+            // dependent values of the element are not resolved against the
+            // initial font size. (Review)
+            if (prop1.value instanceof Css.Numeric && prop1.value.num < 0) {
+              // `font-size` has a non-negative computed-value range, so a
+              // negative value is clamped to zero. A negative literal length
+              // is invalid instead and is turned into `unset` by the cascade,
+              // which the walk materializes as the inherited font size.
+              prop1 = prop1.withValue(new Css.Numeric(0, "px"));
+            } else if (
+              CssCascade.resolveFontSizeValueToPx(this.context, prop1.value) ==
+                null &&
+              // A valid value that cannot be resolved here, e.g. the `math`
+              // keyword or a unit that only the browser resolves, is preserved
+              // instead of being replaced by the inherited value. (Review)
+              !CssCascade.isValidUnresolvedFontSize(this.context, prop1.value)
+            ) {
+              const inheritedFontSize = CssCascade.getProp(props, name);
+              if (inheritedFontSize) {
+                prop1 = prop1.withValue(inheritedFontSize.value);
+              }
+            }
           }
 
           if (name === "font-size") {
@@ -1115,6 +1655,56 @@ export class ViewFactory
 
           props[name] = prop1;
         }
+      }
+      inheritedLanguage = currentLanguage;
+    }
+    if (currentDeclaresFontSize && !fontSizeFromOwnStyle) {
+      const inheritedFontSize = props["font-size"] as
+        CssCascade.CascadeValue | undefined;
+      // The font size comes from a declaration that is not in the element's
+      // own cascaded style, e.g. a region rule such as
+      // `aside[role="doc-footnote"]:footnote-content { font-size: 0.9em }`.
+      // Such a declaration replaces the inherited value, so the inherited
+      // value is kept only as a low-priority placeholder (the same priority
+      // as the initial value the walk starts with). Only the priority is
+      // affected: a declaration of a region rule resolves in the context that
+      // it is rendered in, as the styles of the `@page` margin boxes do and as
+      // the default `font-size: 0.9em` of Vivliostyle's own footnote styles
+      // relies on; it is not resolved against the source parent, unlike a
+      // declaration of the element itself. (Issue #2174)
+      if (inheritedFontSize) {
+        props["font-size"] = new CssCascade.CascadeValue(
+          inheritedFontSize.value,
+          0,
+        );
+      }
+    }
+    if (currentDeclaresLineHeight && !lineHeightFromOwnStyle) {
+      const inheritedLineHeight = props["line-height"] as
+        CssCascade.CascadeValue | undefined;
+      // A line height that uses the `lh` unit needs the inherited line height to
+      // resolve the unit, but when the declaration comes from outside the
+      // element's own cascaded style, e.g. a region rule such as
+      // `aside[role="doc-footnote"]:footnote-content { line-height: 1lh }`, the
+      // inherited value is kept only as a low-priority placeholder, so that it
+      // cannot beat the declaration of the region rule (an `!important` value
+      // of an ancestor would otherwise win). Only the priority is affected: as
+      // for the font size above, the declaration of the region rule resolves in
+      // the context that it is rendered in. (Review)
+      if (inheritedLineHeight) {
+        props["line-height"] = new CssCascade.CascadeValue(
+          inheritedLineHeight.value,
+          0,
+        );
+      }
+    }
+    // Ancestor traits were needed for source-parent font-size calculations.
+    // Their priorities must not compete with declarations on this element,
+    // including region and view-conditional rules merged after this walk.
+    for (const name of fontMetricProperties) {
+      const inherited = CssCascade.getProp(props, name);
+      if (inherited && !CssCascade.getProp(styles[0], name)) {
+        props[name] = new CssCascade.CascadeValue(inherited.value, 0);
       }
     }
     for (const sname in elementStyle) {
@@ -1218,6 +1808,41 @@ export class ViewFactory
   }
 
   /**
+   * Set the transformed id on the view element and add an anchor element
+   * with it, and register the view element with the id on the page.
+   */
+  private addIdAnchor(
+    element: Element,
+    result: Element,
+    attributeName: string,
+    id: string,
+  ): void {
+    const transformedValue = this.documentURLTransformer.transformFragment(
+      id,
+      this.xmldoc.url,
+    );
+    result.setAttribute("data-vivliostyle-id", transformedValue);
+
+    // Create an anchor element with transformed id, necessary for internal
+    // links in output PDF (issue #877)
+    const anchorElem = result.ownerDocument.createElement("a");
+    anchorElem.setAttribute(attributeName, transformedValue);
+    anchorElem.setAttribute(LayoutHelper.SPECIAL_ATTR, "1");
+    anchorElem.style.position = "absolute";
+    result.appendChild(anchorElem);
+
+    // A fragment resolves to the first matching source element.
+    // Retain every element for navigation and triggers, but do not
+    // let later duplicates supply cross-reference snapshots.
+    const target = this.xmldoc.getElement(`#${id}`);
+    this.page.registerElementWithId(
+      result,
+      transformedValue,
+      !target || target === element,
+    );
+  }
+
+  /**
    * @return holding true if children should be processed
    */
   private createElementView(
@@ -1243,6 +1868,7 @@ export class ViewFactory
       );
     }
     const computedStyle: { [key: string]: Css.Val } = {};
+    const cascadedMargins: { [key: string]: CssCascade.CascadeValue } = {};
     const semanticFootnoteStyleAccess: SemanticFootnote.SemanticFootnoteStyleAccess =
       {
         getStyle: (target) => this.styler.getStyle(target, false),
@@ -1288,11 +1914,33 @@ export class ViewFactory
       !!nodeContext.shadowContext &&
       nodeContext.shadowContext.type === Vtree.ShadowType.ROOTED &&
       SemanticFootnote.isSemanticFootnoteElement(element);
+    // A float in an inline element is moved to the block parent by the layout
+    // (Layout.Column#layoutFloat), so it must not depend on the inheritance
+    // from the inline ancestors either. (Issue #1479) Not in a footnote area,
+    // since the source ancestors would miss its region rules such as
+    // `:footnote-content { font-size: ... }`. Whether it floats is decided by
+    // the winning value, which may come from a view-conditional rule such as
+    // `::nth-fragment()`.
+    const floatInInline =
+      !this.isFootnote && nodeContext.parent?.inline
+        ? CssCascade.flattenCascadedStyle(
+            elementStyle,
+            this.context,
+            this.regionIds,
+            false,
+          )["float"]?.evaluate(this.context, "float")
+        : null;
+    const isFloatInInline =
+      !!floatInInline &&
+      !Css.isDefaultingValue(floatInInline) &&
+      floatInInline !== Css.ident.none &&
+      floatInInline !== Css.ident.footnote;
     if (
       nodeContext.parent &&
       (Display.isRunning(positionCV?.value) ||
         (floatReference && PageFloats.isPageFloat(floatReference)) ||
-        isSemanticFootnoteInRootedShadow)
+        isSemanticFootnoteInRootedShadow ||
+        isFloatInInline)
     ) {
       // Detached or transcluded content should inherit from the source tree,
       // not from the synthetic view parent.
@@ -1319,12 +1967,14 @@ export class ViewFactory
       this.context,
       semanticFootnoteStyleAccess,
     );
-    nodeContext.vertical = this.computeStyle(
-      nodeContext.vertical,
+    nodeContext.writingMode = this.computeStyle(
+      nodeContext.writingMode,
       nodeContext.direction === "rtl",
       elementStyle,
       computedStyle,
+      cascadedMargins,
     );
+    nodeContext.vertical = nodeContext.writingMode !== "horizontal-tb";
     if (
       floatReference &&
       PageFloats.isPageFloat(floatReference) &&
@@ -1410,14 +2060,10 @@ export class ViewFactory
       const position = computedStyle["position"] as Css.Ident;
       let floatSide: Css.Val | null = computedStyle["float"];
       let clearSide: Css.Ident | null = computedStyle["clear"] as Css.Ident;
-      const writingMode = nodeContext.vertical
-        ? Css.ident.vertical_rl
-        : Css.ident.horizontal_tb;
-      const parentWritingMode = nodeContext.parent
-        ? nodeContext.parent.vertical
-          ? Css.ident.vertical_rl
-          : Css.ident.horizontal_tb
-        : writingMode;
+      const writingMode = Css.getName(nodeContext.writingMode);
+      const parentWritingMode = Css.getName(
+        nodeContext.parent?.writingMode ?? nodeContext.writingMode,
+      );
       const isFlowRoot = Display.isFlowRoot(element);
       const columnCount = computedStyle["column-count"];
       const columnWidth = computedStyle["column-width"];
@@ -1600,10 +2246,16 @@ export class ViewFactory
         // Don't break inside ruby, inline-block, etc.
         nodeContext.breakPenalty++;
       }
+      // An absolutely positioned child is out of flow even when its display
+      // is block-level (for example, flex). Keep it in the inline parent's
+      // layout traversal so a page break cannot separate them. (#2162)
+      const isAbsolutelyPositionedInInline =
+        position === Css.ident.absolute && !!nodeContext.parent?.inline;
       nodeContext.inline =
         (!floating && !display) ||
         Display.isInlineLevel(display) ||
-        Display.isRubyInternalDisplay(display);
+        Display.isRubyInternalDisplay(display) ||
+        isAbsolutelyPositionedInInline;
       nodeContext.display = display ? display.toString() : "inline";
       nodeContext.floatSide = floating ? floatSideName : null;
       nodeContext.floatReference =
@@ -1825,6 +2477,17 @@ export class ViewFactory
       let tag = element.localName;
       let originalTag = tag;
       if (ns == Base.NS.XHTML) {
+        // WebKit recognizes these roles only on native HTML ruby elements.
+        // Render CSS ruby spans with those native elements.
+        if (Base.browserType === "webkit" && tag === "span") {
+          if (display === Css.getName("ruby")) {
+            tag = "ruby";
+          } else if (display === Css.getName("ruby-base")) {
+            tag = "rb";
+          } else if (display === Css.getName("ruby-text")) {
+            tag = "rt";
+          }
+        }
         if (xhtmlElementsRenderedAsDiv.has(tag)) {
           tag = "div";
         } else if (tag == "vide_") {
@@ -1907,6 +2570,16 @@ export class ViewFactory
           if (custom) {
             needToProcessChildren =
               result.getAttribute("data-adapt-process-children") == "true";
+            // A custom-rendered subtree (e.g. MathML imported for MathJax)
+            // keeps the source's style attributes instead of being styled
+            // through Base.setCSSProperty(), which registers the documents
+            // with annotation styles (see ruby-emphasis.ts).
+            if (
+              result.matches('[style*="text-emphasis"]') ||
+              result.querySelector('[style*="text-emphasis"]')
+            ) {
+              Base.markAnnotatedDocument(result.ownerDocument);
+            }
           }
         } else if (computedStyle["display"] === Css.ident.none) {
           // No element should be created if display:none is set.
@@ -1997,7 +2670,7 @@ export class ViewFactory
           let attributeName = attribute.localName;
           let attributeValue = attribute.value;
           if (!attributeNS) {
-            if (!Scripts.allowScripts && attributeName.match(/^on/)) {
+            if (!Scripts.allowScripts && attributeName.startsWith("on")) {
               continue; // don't propagate JavaScript code
             }
             if (attributeName == "style") {
@@ -2045,25 +2718,14 @@ export class ViewFactory
               // Propagate transformed ids and collect them on the page
               // (only first time).
               if (firstTime) {
-                const transformedValue =
-                  this.documentURLTransformer.transformFragment(
-                    attributeValue,
-                    this.xmldoc.url,
-                  );
-
                 // Keep original id value so that JavaScript can manipulate it
                 result.setAttribute(attributeName, attributeValue);
-                result.setAttribute("data-vivliostyle-id", transformedValue);
-
-                // Create an anchor element with transformed id, necessary for internal links in output PDF
-                // (issue #877)
-                const anchorElem = result.ownerDocument.createElement("a");
-                anchorElem.setAttribute(attributeName, transformedValue);
-                anchorElem.setAttribute(LayoutHelper.SPECIAL_ATTR, "1");
-                anchorElem.style.position = "absolute";
-                result.appendChild(anchorElem);
-
-                this.page.registerElementWithId(result, transformedValue);
+                this.addIdAnchor(
+                  element,
+                  result,
+                  attributeName,
+                  attributeValue,
+                );
                 continue;
               }
             }
@@ -2141,12 +2803,6 @@ export class ViewFactory
               );
             }
           }
-          if (ns == Base.NS.SVG && /^[A-Z\-]+$/.test(attributeName)) {
-            // Workaround for Edge bug
-            // See
-            // https://developer.microsoft.com/en-us/microsoft-edge/platform/issues/5579311/
-            attributeName = attributeName.toLowerCase();
-          }
           if (this.isSVGUrlAttribute(attributeName)) {
             attributeValue = Urls.transformURIs(
               attributeValue,
@@ -2203,6 +2859,13 @@ export class ViewFactory
                 Logging.logger.warn(err);
               }
             }
+          }
+        }
+        if (firstTime && !element.getAttribute("id")) {
+          // Id generated for an element with a CSS bookmark
+          const generatedId = Base.getGeneratedId(element);
+          if (generatedId) {
+            this.addIdAnchor(element, result, "id", generatedId);
           }
         }
         if (delayedSrc) {
@@ -2327,6 +2990,25 @@ export class ViewFactory
 
         this.preprocessElementStyle(nodeContext, computedStyle);
         this.applyComputedStyles(result, computedStyle);
+        RubyEmphasis.registerViewContext(result, nodeContext, position);
+        if (computedStyle["ruby-position"]) {
+          result.setAttribute(
+            "data-viv-ruby-position",
+            computedStyle["ruby-position"].toString(),
+          );
+        }
+        RubyEmphasis.prepareRubyAnnotation(
+          result,
+          nodeContext.parent?.viewNode as HTMLElement | null,
+          computedStyle,
+          this.viewport.window,
+          nodeContext.parent?.sourceNode as Element | null,
+          (source) =>
+            CssCascade.getProp(styler.getStyle(source, false), "display")
+              ?.evaluate(this.context, "display")
+              .toString(),
+          cascadedMargins,
+        );
 
         if (nodeContext.inline) {
           if (!firstTime) {
@@ -2485,13 +3167,8 @@ export class ViewFactory
       }
       const parentViewNode = parent.viewNode as Element;
       if (parentViewNode) {
-        const style = this.viewport.window.getComputedStyle(parentViewNode);
-        const paddingBlockStart = parseFloat(style.paddingBlockStart);
-        const borderBlockStartWidth = parseFloat(style.borderBlockStartWidth);
-        if (paddingBlockStart || borderBlockStartWidth) {
-          // parent's viewNode has block-start padding or border
-          return null;
-        }
+        // Check the content before the computed style, which forces a style
+        // recalculation.
         let node = parentViewNode?.firstChild;
         while (
           node &&
@@ -2502,6 +3179,13 @@ export class ViewFactory
         }
         if (node && node !== nc.viewNode) {
           // parent's viewNode already has other content
+          return null;
+        }
+        const style = this.viewport.window.getComputedStyle(parentViewNode);
+        const paddingBlockStart = parseFloat(style.paddingBlockStart);
+        const borderBlockStartWidth = parseFloat(style.borderBlockStartWidth);
+        if (paddingBlockStart || borderBlockStartWidth) {
+          // parent's viewNode has block-start padding or border
           return null;
         }
       }
@@ -2744,7 +3428,7 @@ export class ViewFactory
       const computedStyle: { [key: string]: Css.Val } = {};
       const elementStyle = styler.getStyle(child as Element, false);
       this.computeStyle(
-        nodeContext.vertical,
+        nodeContext.writingMode,
         nodeContext.direction === "rtl",
         elementStyle,
         computedStyle,
@@ -2769,7 +3453,7 @@ export class ViewFactory
         );
       (
         nodeContext.formattingContext as RepetitiveElement.RepetitiveElementsOwnerFormattingContext
-      ).initializeRepetitiveElements(nodeContext.vertical);
+      ).initializeRepetitiveElements(nodeContext.writingMode);
       return;
     }
   }
@@ -2802,7 +3486,7 @@ export class ViewFactory
     const frame: Task.Frame<boolean> = Task.newFrame("createTextNodeView");
     this.preprocessTextContent(nodeContext).then((preprocessedTextContent) => {
       const offsetInNode = this.offsetInNode || 0;
-      const textContent = Diff.restoreNewText(preprocessedTextContent).substr(
+      const textContent = Diff.restoreNewText(preprocessedTextContent).slice(
         offsetInNode,
       );
       this.viewNode = document.createTextNode(textContent);
@@ -2902,6 +3586,12 @@ export class ViewFactory
             Break.setBoxBreakFlag(parent, "text-start");
           }
           parent.appendChild(this.viewNode);
+          if (isPseudo(this.viewNode, "first-line")) {
+            this.applyFirstLineMetricsToBlock(
+              this.viewNode as HTMLElement,
+              parent as HTMLElement,
+            );
+          }
 
           // Fix overflow caused by forced column breaks
           LayoutHelper.fixOverflowAtForcedColumnBreak(this.viewNode);
@@ -3287,6 +3977,52 @@ export class ViewFactory
     addImageFetchersToPage(bg, this.page);
   }
 
+  /**
+   * The ::first-line span only affects its own inline box, while the strut of
+   * the first line box (and a forced break ending the line) still uses the
+   * block's font. Copy the span's metrics to the block so that the UA
+   * stylesheet applies them to the block's real ::first-line, and the browser
+   * lays out the first line box as for native ::first-line.
+   */
+  private applyFirstLineMetricsToBlock(
+    span: HTMLElement,
+    block: HTMLElement,
+  ): void {
+    if (!span.style || !block.style) {
+      return;
+    }
+    const window = span.ownerDocument.defaultView;
+    if (!window) {
+      return;
+    }
+    const spanStyle = window.getComputedStyle(span);
+    const blockStyle = window.getComputedStyle(block);
+    // font-family and font-size inherit as computed values, so the resolved
+    // values can be forwarded.
+    for (const [propName, customPropName] of [
+      ["font-family", "--viv-firstLineFontFamily"],
+      ["font-size", "--viv-firstLineFontSize"],
+    ]) {
+      const value = spanStyle.getPropertyValue(propName);
+      if (value && value !== blockStyle.getPropertyValue(propName)) {
+        block.style.setProperty(customPropName, value);
+        if (propName === "font-size") {
+          // The span inherits from the real ::first-line, so a relative
+          // font-size (e.g. `200%`) on the span must be resolved now, or it
+          // would be applied twice.
+          span.style.fontSize = value;
+        }
+      }
+    }
+    // A unitless line-height inherits as a number, so forward the span's
+    // specified value only. A resolved length would be inherited by inline
+    // children with other font sizes instead of the number.
+    const lineHeight = span.style.getPropertyValue("line-height");
+    if (lineHeight) {
+      block.style.setProperty("--viv-firstLineLineHeight", lineHeight);
+    }
+  }
+
   applyComputedStyles(
     target: Element,
     computedStyle: { [key: string]: Css.Val },
@@ -3334,6 +4070,9 @@ export class ViewFactory
     propList.sort(Css.processingOrderFn);
     let fontSize: Css.Val | undefined;
     let lineHeight: Css.Val | undefined;
+    // Whether this element's own font size carries the adjustment by
+    // layoutUnitAdj, or null when it takes that of the parent along.
+    let ownFontSizeAdjusted: boolean | null = null;
 
     for (const propName of propList) {
       if (propertiesNotPassedToDOM[propName]) {
@@ -3370,33 +4109,83 @@ export class ViewFactory
         }
       }
 
-      if (propName === "font-size" || propName === "line-height") {
+      const isFontSizeOrLineHeight =
+        propName === "font-size" || propName === "line-height";
+      if (isFontSizeOrLineHeight) {
         if (propName === "font-size") {
           fontSize = value;
         } else {
           lineHeight = value;
         }
+      }
 
-        // Adjust font-size and line-height to prevent rounding issues
-        // when calculating the size of text and line boxes. (Issue #1590)
-        //
-        // Chromium and Firefox round to the nearest multiple of LayoutUnit
-        // (the smallest unit of length in the browser) when positioning boxes,
-        // which may cause the box size to be slightly larger than specified,
-        // resulting in text not fitting in the specified number of characters/lines.
-        // To prevent this, we adjust the font size and line height to be
-        // 1 LayoutUnit less.
+      // Adjust font-size and line-height to prevent rounding issues
+      // when calculating the size of text and line boxes. (Issue #1590)
+      //
+      // Chromium and Firefox round to the nearest multiple of LayoutUnit
+      // (the smallest unit of length in the browser) when positioning boxes,
+      // which may cause the box size to be slightly larger than specified,
+      // resulting in text not fitting in the specified number of characters/lines.
+      // To prevent this, we adjust the font size and line height to be
+      // 1 LayoutUnit less.
+      const adjustsValue =
+        isFontSizeOrLineHeight &&
+        !!this.viewport.layoutUnitAdj &&
+        value instanceof Css.Numeric &&
+        value.unit !== "%" &&
+        value.unit !== "em" &&
+        value.unit !== "lh";
+
+      if (propName === "font-size" && this.viewport.layoutUnitAdj) {
+        ownFontSizeAdjusted = adjustsValue
+          ? true
+          : fontSizeCarriesAdjustment(value.toString());
         if (
-          this.viewport.layoutUnitAdj &&
-          value instanceof Css.Numeric &&
-          value.unit !== "%" &&
-          value.unit !== "em" &&
-          value.unit !== "lh"
+          ownFontSizeAdjusted == null &&
+          value instanceof Css.Func &&
+          this.resolvesWithoutParentAdjustment(value)
         ) {
-          value = new Css.AnyToken(
-            `calc(${value.toString()} - var(--viv-layoutUnitAdj))`,
-          );
+          ownFontSizeAdjusted = false;
+          fontSizesWithoutParentAdjustment.add(target);
+        } else {
+          fontSizesWithoutParentAdjustment.delete(target);
         }
+      }
+
+      // Font-size and line-height values that are not adjusted, e.g. calc(),
+      // stay smaller by resolving against the adjusted font. Compensating them
+      // would undo the adjustment.
+      if (
+        this.viewport.layoutUnitAdj &&
+        !Css.isCustomPropName(propName) &&
+        (adjustsValue || !isFontSizeOrLineHeight) &&
+        // Letter-spacing and word-spacing are added to the advances of the
+        // text, which shrink with the adjusted font, and stay in proportion
+        // to them, e.g. `letter-spacing: 1ch` to the advance of a space in a
+        // monospace font, which tab-size is measured in. Shrinking them takes
+        // no room away from the text.
+        propName !== "letter-spacing" &&
+        propName !== "word-spacing" &&
+        hasCurrentFontRelativeLength(value) &&
+        // The font that the units resolve against (the parent's one for
+        // font-size) may not be adjusted, e.g. that of a parent with
+        // `font-size: clamp(16px, 16px, 16px)`.
+        ((propName === "font-size" ? null : ownFontSizeAdjusted) ??
+          this.isInheritedFontSizeAdjusted())
+      ) {
+        value = this.compensateFontSizeAdjustment(
+          value,
+          propName,
+          fontSize,
+          computedStyle,
+          target,
+        );
+      }
+
+      if (adjustsValue) {
+        value = new Css.AnyToken(
+          `calc(${value.toString()} - var(--viv-layoutUnitAdj))`,
+        );
       }
 
       if (
@@ -3410,11 +4199,11 @@ export class ViewFactory
         );
         continue;
       }
-      if (
+      const inheritedPropsMovedToPageBox =
         isRoot &&
-        this.page.pageAreaElement &&
-        CssCascade.isInherited(propName)
-      ) {
+        !!this.page.pageAreaElement &&
+        CssCascade.isInherited(propName);
+      if (inheritedPropsMovedToPageBox) {
         // Fix for Issue #568
         Base.setCSSProperty(
           // the page area element is always nested in bleed box and container
@@ -3435,10 +4224,218 @@ export class ViewFactory
             value.toString(),
           );
         }
-      } else {
+      }
+      // The root element's inherited properties are moved to the page box
+      // (the page context inherits from the root element), but properties that
+      // UA stylesheets set with lang/dir attribute rules must also be set on
+      // the root's own view element, which has those attributes copied from
+      // the source root element. Otherwise the UA value matching the root's
+      // view element would win over the author's value and be inherited by
+      // all content. (Fix for issue #2167)
+      if (!inheritedPropsMovedToPageBox || uaLangDirInheritedProps[propName]) {
         Base.setCSSProperty(target, propName, value.toString());
       }
     }
+  }
+
+  /**
+   * Scales the lengths in units of the current font in a value to what the
+   * browser resolves them to without the font-size adjustment: em against the
+   * font size, and the other units against the font metrics of the font size
+   * quantized by the browser. (Issue #1590)
+   */
+  private compensateFontSizeAdjustment(
+    value: Css.Val,
+    propName: string,
+    fontSize: Css.Val | undefined,
+    computedStyle: { [key: string]: Css.Val },
+    target: Element,
+  ): Css.Val {
+    // A CSS-wide value that means inheritance, e.g. `font-size: inherit`,
+    // takes the parent font size, as no declaration does.
+    const emUnitSize = this.getEmUnitSize(
+      propName,
+      fontSize instanceof Css.Ident && /^(inherit|unset)$/i.test(fontSize.name)
+        ? undefined
+        : fontSize,
+    );
+    const adjustedEmUnitSize =
+      emUnitSize != null ? emUnitSize - this.viewport.layoutUnitAdj : 0;
+    if (!(adjustedEmUnitSize > 0)) {
+      return value;
+    }
+    const emFactor = emUnitSize / adjustedEmUnitSize;
+    const fontMetricFactor =
+      this.getFontMetricsSize(emUnitSize) /
+      this.getFontMetricsSize(adjustedEmUnitSize);
+    let fontProperties: FontProperties | undefined;
+    const compensator = new FontSizeAdjustmentCompensator((unit) => {
+      if (unit === "em" || fontMetricFactor === emFactor) {
+        return emFactor;
+      }
+      fontProperties ??= this.getCurrentFontProperties(
+        propName,
+        computedStyle,
+        target,
+      );
+      return this.isFontMetricQuantized(unit, fontProperties)
+        ? fontMetricFactor
+        : emFactor;
+    });
+    const compensated = value.visit(compensator);
+    // A negative length is invalid for a property that accepts only
+    // non-negative lengths, e.g. `max-height: -1ex`, and the browser rejects
+    // the declaration, while it accepts calc() of the length and clamps it to
+    // zero. Such a value is kept as it is, so that it stays invalid. It is
+    // checked under the names that Base.setCSSProperty() sets, e.g.
+    // `-webkit-text-stroke-width` for `text-stroke-width`.
+    if (compensator.scaledNegative) {
+      const text = Css.withoutPageViewportUnits(value.toString());
+      if (
+        !Base.getPrefixedPropertyNames(propName)?.some((name) =>
+          CSS.supports(name, text),
+        )
+      ) {
+        return value;
+      }
+    }
+    return compensated;
+  }
+
+  /**
+   * Whether the font size that an element inherits from its view parent
+   * carries the adjustment by layoutUnitAdj, found from the nearest font-size
+   * declaration of the parent and its ancestors (the font size of the root
+   * element is declared on the page box). (Issue #1590)
+   */
+  private isInheritedFontSizeAdjusted(): boolean {
+    for (
+      let node: Element | null = this.getParentViewNode();
+      node;
+      node = node.parentElement
+    ) {
+      const declaration = getInlineStyle(node)?.fontSize;
+      if (declaration) {
+        const adjusted = fontSizesWithoutParentAdjustment.has(node)
+          ? false
+          : fontSizeCarriesAdjustment(declaration);
+        if (adjusted != null) {
+          return adjusted;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether a font-size function of the parent font size resolves to the same
+   * length with and without the adjustment of the parent font size by
+   * layoutUnitAdj, e.g. `clamp(16px, 1em, 24px)` with a 16px parent, so that
+   * the font size of the element is not adjusted. (Issue #1590)
+   */
+  private resolvesWithoutParentAdjustment(fontSize: Css.Func): boolean {
+    const parentFontSize = this.getParentComputedMetrics(
+      this.getParentViewStyle(),
+    ).fontSize;
+    if (parentFontSize == null) {
+      return false;
+    }
+    const size = CssCascade.resolveFontSizeValueToPx(
+      this.context,
+      fontSize,
+      parentFontSize,
+    );
+    return (
+      size != null &&
+      size ===
+        CssCascade.resolveFontSizeValueToPx(
+          this.context,
+          fontSize,
+          parentFontSize - this.viewport.layoutUnitAdj,
+        )
+    );
+  }
+
+  /**
+   * Returns the properties of the font that the units of the current font in
+   * a value of a property resolve against: the parent's font for font-size,
+   * and for the others the parent's font with the element's own font
+   * properties.
+   */
+  private getCurrentFontProperties(
+    propName: string,
+    computedStyle: { [key: string]: Css.Val },
+    target: Element,
+  ): FontProperties {
+    const properties = this.getFontProperties(this.getParentViewStyle());
+    if (propName !== "font-size") {
+      for (const name of fontMetricProperties) {
+        const value = computedStyle[name];
+        if (!value) {
+          continue;
+        }
+        if (Css.canonicalWideKeyword(value) === Css.ident.initial) {
+          // The probe has the initial value of a property it is not given,
+          // while the other CSS-wide values keep the parent's value: these
+          // properties are inherited.
+          delete properties[name];
+        } else if (!Css.isDefaultingValue(value)) {
+          properties[name] = value.toString();
+        }
+      }
+      const lang = Base.getLangAttribute(target);
+      if (lang != null) {
+        properties.lang = lang;
+      }
+    }
+    return properties;
+  }
+
+  /**
+   * Whether the browser resolves a unit of the font metrics (ex, cap, ch, ic)
+   * of a font against the quantized font size (see getFontMetricsSize()). It
+   * does when it takes the metric from the font, e.g. ic from the advance of
+   * 水, but not when the font lacks it and the unit falls back to em, e.g. ic
+   * for a Latin font, which then resolves against the font size itself. The
+   * quantized size is the same for 100px and 100.002px at device pixel ratios
+   * up to 4, while the font size itself differs. (Issue #1590)
+   */
+  private isFontMetricQuantized(
+    unit: string,
+    fontProperties: FontProperties,
+  ): boolean {
+    const size = this.context.measureFontUnit(unit, 100, fontProperties);
+    const largerSize = this.context.measureFontUnit(
+      unit,
+      100.002,
+      fontProperties,
+    );
+    return (
+      size == null || largerSize == null || Math.abs(largerSize - size) < 5e-4
+    );
+  }
+
+  /**
+   * Returns the size of the font whose metrics (ex, cap, ch, ic) the browser
+   * uses for a font size. Chromium floors the zoomed font size to a multiple
+   * of 1/100 px (FontDescription::EffectiveFontSize()), and on Linux, ChromeOS
+   * and Android, Skia's Fontations backend further truncates it to a multiple
+   * of 1/64 px, like FreeType. So the metrics of a font size adjusted by
+   * layoutUnitAdj can shrink by more than the adjustment. (Issue #1590)
+   * @param fontSize font size in px
+   */
+  private getFontMetricsSize(fontSize: number): number {
+    if (Base.browserType !== "chromium") {
+      return fontSize;
+    }
+    const zoom = this.viewport.layoutUnitPerPixel / 64;
+    // The small epsilons keep a size that is a multiple of the unit from
+    // being floored to the next lower one by floating-point error.
+    let size = Math.floor(fontSize * zoom * 100 + 1e-6) / 100;
+    if (/\b(Linux|CrOS|Android)\b/.test(navigator.userAgent)) {
+      size = Math.floor(size * 64 + 1e-6) / 64;
+    }
+    return size / zoom;
   }
 
   /**
@@ -3448,10 +4445,26 @@ export class ViewFactory
    * @param val CSS value string
    * @returns parsed and adjusted value in px, or null if cannot parse as "px" unit, e.g. "normal"
    */
-  private parsePlusLayoutUnitAdj(val: string): number | null {
+  private parsePlusLayoutUnitAdj(
+    val: string,
+    inlineVal?: () => string | null | undefined,
+  ): number | null {
     if (val.endsWith("px")) {
       const parsedVal = parseFloat(val);
       if (!isNaN(parsedVal)) {
+        if (parsedVal === 0) {
+          // A length is serialized as `calc(<length> - var(--viv-layoutUnitAdj))`,
+          // and when the result is negative the browser clamps it to `0px`.
+          // Adding the adjustment back would then turn an exact zero into
+          // 1/64px (or 1/60px), so the length in front of the adjustment is
+          // used instead. The declaration is only looked up for a zero value:
+          // the lookup may walk the ancestors, and a value that is not zero
+          // does not need it. (Review)
+          const inline = inlineVal?.() ?? null;
+          const base =
+            inline != null ? parseLayoutUnitAdjustedValue(inline) : null;
+          return base != null && base > 0 ? base : 0;
+        }
         return (
           Math.round(
             (parsedVal + this.viewport.layoutUnitAdj) *
@@ -3472,16 +4485,32 @@ export class ViewFactory
     const pageContextStyle = pageContextElement
       ? this.viewport.window.getComputedStyle(pageContextElement)
       : null;
+    const inlineStyle = getInlineStyle(pageContextElement);
     const fontSize =
-      (pageContextStyle &&
-        this.parsePlusLayoutUnitAdj(pageContextStyle.fontSize)) ||
-      this.context.rootFontSize ||
+      // A font size of 0 is valid and must not fall through to the defaults.
+      (pageContextStyle
+        ? this.parsePlusLayoutUnitAdj(
+            pageContextStyle.fontSize,
+            () => inlineStyle?.fontSize,
+          )
+        : null) ??
+      this.context.rootFontSize ??
       this.context.initialFontSize;
     const lineHeight =
-      (pageContextStyle &&
-        this.parsePlusLayoutUnitAdj(pageContextStyle.lineHeight)) ||
-      this.context.rootLineHeight ||
-      fontSize * this.context.pref.lineHeight;
+      // A line height of 0 is valid and must not fall through to the defaults.
+      (pageContextStyle
+        ? this.parsePlusLayoutUnitAdj(
+            pageContextStyle.lineHeight,
+            () => inlineStyle?.lineHeight,
+          )
+        : null) ??
+      this.measureNormalLineHeight(
+        pageContextStyle,
+        fontSize,
+        pageContextElement,
+      ) ??
+      this.context.rootLineHeight ??
+      fontSize * Exprs.fallbackLineHeightRatio;
     return { fontSize, lineHeight };
   }
 
@@ -3490,20 +4519,94 @@ export class ViewFactory
     fallback: { fontSize: number | null; lineHeight: number | null },
   ): { fontSize: number | null; lineHeight: number | null } {
     const style = this.viewport.window.getComputedStyle(element);
+    const inlineStyle = getInlineStyle(element);
     const fontSize =
-      this.parsePlusLayoutUnitAdj(style.fontSize) ?? fallback.fontSize;
+      this.parsePlusLayoutUnitAdj(style.fontSize, () =>
+        this.getLayoutUnitAdjustedBase(
+          element,
+          inlineStyle?.fontSize,
+          "fontSize",
+        ),
+      ) ?? fallback.fontSize;
     const lineHeight =
-      this.parsePlusLayoutUnitAdj(style.lineHeight) ??
+      this.parsePlusLayoutUnitAdj(style.lineHeight, () =>
+        this.getLayoutUnitAdjustedBase(
+          element,
+          inlineStyle?.lineHeight,
+          "lineHeight",
+        ),
+      ) ??
+      this.measureNormalLineHeight(style, fontSize, element) ??
       fallback.lineHeight ??
-      (fontSize != null ? fontSize * this.context.pref.lineHeight : null);
+      (fontSize != null ? fontSize * Exprs.fallbackLineHeightRatio : null);
     return { fontSize, lineHeight };
   }
 
-  private getParentViewStyle(): CSSStyleDeclaration | null {
+  /**
+   * The inline declaration that the given inline value of an element has to be
+   * read with to recover a length that the browser rounded down to zero: the
+   * value of the element itself, or, because an element without a declaration
+   * of its own inherits the length, the one of the nearest ancestor that has a
+   * generated declaration. A declaration that is not an adjusted length, e.g.
+   * `font-size: 0`, is kept, so that it cannot be replaced by an ancestor
+   * value. (Review)
+   */
+  private getLayoutUnitAdjustedBase(
+    element: Element | null,
+    inlineVal: string | null | undefined,
+    propName: "fontSize" | "lineHeight",
+  ): string | null {
+    if (inlineVal) {
+      if (parseLayoutUnitAdjustedValue(inlineVal) != null) {
+        return inlineVal;
+      }
+      // A CSS-wide value that means inheritance, e.g. the `font-size: inherit`
+      // of this element itself, is not a length of its own: the search
+      // continues with the ancestors, as it does for such a value of one of
+      // them. (Review)
+      if (!/^(inherit|unset)$/i.test(inlineVal.trim())) {
+        return null;
+      }
+    }
+    for (
+      let node: Element | null = element?.parentElement ?? null;
+      node;
+      node = node.parentElement
+    ) {
+      // Only a chain in which the length rounded down to zero everywhere can
+      // have inherited it from a generated declaration further up; an ancestor
+      // whose computed value is not zero declares a length of its own.
+      const computed = this.viewport.window.getComputedStyle(node)[propName];
+      if (!(computed === "normal" || parseFloat(computed) === 0)) {
+        return null;
+      }
+      const inline = getInlineStyle(node)?.[propName];
+      if (inline) {
+        if (parseLayoutUnitAdjustedValue(inline) != null) {
+          return inline;
+        }
+        // A CSS-wide value that means inheritance, e.g. the `font-size:
+        // inherit` of an element whose own length is the rounded down one, is
+        // not a length of its own: the search continues with the ancestors,
+        // whose chain rounded down to zero as well. (Review)
+        if (!/^(inherit|unset)$/i.test(inline.trim())) {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  private getParentViewNode(): Element | null {
     return this.nodeContext?.parent?.viewNode?.nodeType === 1
-      ? this.viewport.window.getComputedStyle(
-          this.nodeContext.parent.viewNode as Element,
-        )
+      ? (this.nodeContext.parent.viewNode as Element)
+      : null;
+  }
+
+  private getParentViewStyle(): CSSStyleDeclaration | null {
+    const parentNode = this.getParentViewNode();
+    return parentNode
+      ? this.viewport.window.getComputedStyle(parentNode)
       : null;
   }
 
@@ -3511,18 +4614,67 @@ export class ViewFactory
     fontSize: number | null;
     lineHeight: number | null;
   } {
+    const parentNode = this.getParentViewNode();
+    const inlineStyle = getInlineStyle(parentNode);
+    const fontSize =
+      this.computedStyleParentFontSizeOverride ??
+      (parentStyle
+        ? this.parsePlusLayoutUnitAdj(parentStyle.fontSize, () =>
+            this.getLayoutUnitAdjustedBase(
+              parentNode,
+              inlineStyle?.fontSize,
+              "fontSize",
+            ),
+          )
+        : this.context.rootFontSize);
     return {
-      fontSize:
-        this.computedStyleParentFontSizeOverride ??
-        (parentStyle
-          ? this.parsePlusLayoutUnitAdj(parentStyle.fontSize)
-          : this.context.rootFontSize),
+      fontSize,
       lineHeight:
         this.computedStyleParentLineHeightOverride ??
         (parentStyle
-          ? this.parsePlusLayoutUnitAdj(parentStyle.lineHeight)
+          ? (this.parsePlusLayoutUnitAdj(parentStyle.lineHeight, () =>
+              this.getLayoutUnitAdjustedBase(
+                parentNode,
+                inlineStyle?.lineHeight,
+                "lineHeight",
+              ),
+            ) ??
+            this.measureNormalLineHeight(parentStyle, fontSize, parentNode))
           : this.context.rootLineHeight),
     };
+  }
+
+  private getFontProperties(
+    style: CSSStyleDeclaration | null,
+    element: Element | null = this.getParentViewNode(),
+  ): FontProperties {
+    if (!style) return this.context.rootFontProperties;
+    const properties: FontProperties = {};
+    for (const name of fontMetricProperties)
+      properties[name] = style.getPropertyValue(name);
+    while (element) {
+      const lang = Base.getLangAttribute(element);
+      if (lang != null) {
+        properties.lang = lang;
+        break;
+      }
+      element = element.parentElement;
+    }
+    return properties;
+  }
+
+  private measureNormalLineHeight(
+    style: CSSStyleDeclaration | null,
+    fontSize: number | null,
+    element: Element | null,
+  ): number | null {
+    return style?.lineHeight === "normal" && fontSize != null
+      ? this.context.measureFontUnit(
+          "lh",
+          fontSize,
+          this.getFontProperties(style, element),
+        )
+      : null;
   }
 
   /**
@@ -3559,6 +4711,14 @@ export class ViewFactory
             ? lineHeight.num / 100
             : lineHeight.num;
       } else {
+        if (
+          lineHeight instanceof Css.Numeric &&
+          /^(ex|cap|ch|ic)$/.test(lineHeight.unit)
+        ) {
+          // These units use this element's font, not the root font of the
+          // page context. Let the browser resolve lh from its computed style.
+          return null;
+        }
         if (lineHeight instanceof Css.Numeric && lineHeight.unit !== "lh") {
           const unitSize = this.context.queryUnitSize(lineHeight.unit, false);
           if (unitSize != null) {
@@ -3601,12 +4761,15 @@ export class ViewFactory
           fontSize,
           parentFontSize,
           this.context,
-        ).num;
-        // parentFontSize may be null and the fontSizePx may be NaN
-        if (typeof fontSizePx !== "number" || isNaN(fontSizePx)) {
+          undefined,
+          usesFontMetrics(fontSize)
+            ? this.getFontProperties(parentStyle)
+            : undefined,
+        );
+        if (fontSizePx.unit !== "px" || !Number.isFinite(fontSizePx.num)) {
           return null; // cannot determine
         }
-        return lineHeightNum * fontSizePx;
+        return lineHeightNum * fontSizePx.num;
       } else {
         if (parentFontSize == null) {
           return null;
@@ -3614,6 +4777,9 @@ export class ViewFactory
         return lineHeightNum * parentFontSize;
       }
     }
+    // Inherited normal is re-resolved in this element's font. Let the browser
+    // resolve ordinary lh lengths after all of this element's font traits apply.
+    if (parentStyle?.lineHeight === "normal") return null;
     // parentLineHeight may be null (cannot determine)
     return parentLineHeight;
   }
@@ -3640,9 +4806,13 @@ export class ViewFactory
         fontSize,
         parentFontSize,
         this.context,
-      ).num;
-      if (typeof fontSizePx === "number" && !isNaN(fontSizePx)) {
-        return fontSizePx;
+        undefined,
+        usesFontMetrics(fontSize)
+          ? this.getFontProperties(parentStyle)
+          : undefined,
+      );
+      if (fontSizePx.unit === "px" && Number.isFinite(fontSizePx.num)) {
+        return fontSizePx.num;
       }
     }
     return null; // cannot determine
@@ -3671,12 +4841,13 @@ export class ViewFactory
       return;
     }
     const computedStyle: { [key: string]: Css.Val } = {};
-    nodeContext.vertical = this.computeStyle(
-      nodeContext.vertical,
+    nodeContext.writingMode = this.computeStyle(
+      nodeContext.writingMode,
       nodeContext.direction === "rtl",
       elementStyle,
       computedStyle,
     );
+    nodeContext.vertical = nodeContext.writingMode !== "horizontal-tb";
     const content = computedStyle["content"];
     if (Vtree.nonTrivialContent(content)) {
       content.visit(
@@ -3773,10 +4944,10 @@ export class ViewFactory
 
   /** @override */
   applyFootnoteStyle(
-    vertical: boolean,
+    inheritedWritingMode: string,
     rtl: boolean,
     target: Element,
-  ): Task.Result<boolean> {
+  ): Task.Result<string> {
     const computedStyle: { [key: string]: Css.Val } = {};
     const fetchers: TaskUtil.Fetcher<string>[] = [];
 
@@ -3793,7 +4964,16 @@ export class ViewFactory
     }
 
     const pseudoMap = CssCascade.getStyleMap(footnoteStyle, "_pseudos");
-    vertical = this.computeStyle(vertical, rtl, footnoteStyle, computedStyle);
+    const writingMode = this.computeStyle(
+      inheritedWritingMode,
+      rtl,
+      footnoteStyle,
+      computedStyle,
+    );
+    // The used mode can be propagated from body while the page context's
+    // computed mode stays horizontal. Match the browser's fragmentainer to
+    // the resolved geometry rather than inheriting its unrelated DOM mode.
+    computedStyle["writing-mode"] = Css.getName(writingMode);
     const inheritedMetrics = this.getFootnoteAreaInheritedMetrics();
     if (!computedStyle["font-size"] && inheritedMetrics.fontSize != null) {
       computedStyle["font-size"] = new Css.Numeric(
@@ -3826,7 +5006,7 @@ export class ViewFactory
         const span = this.createElement(Base.NS.XHTML, "span");
         PseudoElement.setPseudoName(span, "before");
         target.appendChild(span);
-        this.computeStyle(vertical, rtl, pseudoStyle, childComputedStyle);
+        this.computeStyle(writingMode, rtl, pseudoStyle, childComputedStyle);
         if (!hasSpecifiedDisplay) {
           childComputedStyle["display"] = Css.ident.block;
         }
@@ -3894,13 +5074,95 @@ export class ViewFactory
       this.computedStyleParentLineHeightOverride = prevLineHeightOverride;
     }
     if (fetchers.length) {
-      return TaskUtil.waitForFetchers(fetchers).thenReturn(vertical);
+      return TaskUtil.waitForFetchers(fetchers).thenReturn(writingMode);
     }
-    return Task.newResult(vertical);
+    return Task.newResult(writingMode);
+  }
+
+  /**
+   * Adjusts the specified block size of a box fragmented at its block-end
+   * edge. A box whose specified block size takes it beyond the fragmentainer
+   * should not keep that block size, so it is unset. (Issue #980)
+   * Note: This is a temporary fix; the total block size of the fragments
+   * should be the same as the original box.
+   * A box that ends within the fragmentainer keeps its block size: unsetting
+   * it would move the content laid out before the break, e.g. children with
+   * percentage block sizes, such as those of `html, body { height: 100% }`.
+   * (Issue #583)
+   */
+  private adjustFragmentedBlockSize(
+    elem: HTMLElement,
+    nodeContext: Vtree.NodeContext,
+    column: Layout.Column,
+  ): void {
+    const blockSizeP = nodeContext.vertical ? "width" : "height";
+    const blockSize = Base.getCSSProperty(elem, blockSizeP);
+    if (!blockSize || blockSize === "auto") {
+      return;
+    }
+    // Boxes of and in tables are still adjusted by the table layout after
+    // this, e.g. rowspans of fragmented cells and the size of their contents,
+    // and the cell paddings and borders follow them, so they may not fit as
+    // measured here. Table cell contents are laid out in pseudo columns.
+    let inTable = !!column.pseudoParent;
+    for (
+      let nc: Vtree.NodeContext | null = nodeContext;
+      nc && !inTable;
+      nc = nc.parent
+    ) {
+      inTable = /^(inline-)?table/.test(nc.display ?? "");
+    }
+    if (!inTable && nodeContext.vertical === column.vertical) {
+      // The browser's column breaking may still put a box going beyond the
+      // fragmentainer into the next browser column, which the adjusted
+      // rectangle counts as overflow in the block direction.
+      const rect = LayoutHelper.getElementClientRectAdjusted(
+        column.clientLayout,
+        elem,
+        column.writingMode,
+      );
+      const blockEndEdge = !column.vertical
+        ? rect.bottom
+        : column.getBoxDir() < 0
+          ? rect.left
+          : rect.right;
+      // Repeated headers and footers are inserted after this, as the overflow
+      // checks in layout take into account.
+      const repetitiveElementsOffset = column
+        .collectElementsOffset()
+        .reduce((sum, offset) => sum + offset.calculateOffset(nodeContext), 0);
+      if (
+        !column.isOverflown(
+          blockEndEdge + column.getBoxDir() * repetitiveElementsOffset,
+        )
+      ) {
+        // Keep the used size of a resolved percentage, which may resolve
+        // differently later, e.g. against the column size reduced for
+        // footnotes until the end of the column layout. Other block sizes
+        // are kept as specified, not to make an indefinite one definite.
+        if (
+          blockSize.includes("%") &&
+          isPercentageBlockSizeDefinite(elem, blockSizeP, column.element)
+        ) {
+          Base.setCSSProperty(
+            elem,
+            blockSizeP,
+            this.viewport.window
+              .getComputedStyle(elem)
+              .getPropertyValue(blockSizeP),
+          );
+        }
+        return;
+      }
+    }
+    Base.setCSSProperty(elem, blockSizeP, "");
   }
 
   /** @override */
-  processFragmentedBlockEdge(nodeContext: Vtree.NodeContext) {
+  processFragmentedBlockEdge(
+    nodeContext: Vtree.NodeContext,
+    column: Layout.Column,
+  ) {
     const nodeContext1 =
       !nodeContext.inline && nodeContext.after
         ? nodeContext.parent
@@ -3947,13 +5209,13 @@ export class ViewFactory
           }
         }
       } else {
-        const blockSizeP = nodeContext.vertical ? "width" : "height";
-        if (Base.getCSSProperty(elem, blockSizeP)) {
-          // When a box with a specified block size is fragmented,
-          // the fragmented box should not have the block size.
-          Base.setCSSProperty(elem, blockSizeP, "");
-        }
         Break.setBoxBreakFlag(elem, "block-end");
+        if (Break.isCloneBoxDecorationBreak(elem)) {
+          // Set before measuring the box in adjustFragmentedBlockSize(), as
+          // the cloned block-end padding and border stay.
+          Break.setBoxBreakFlag(elem, "clone");
+        }
+        this.adjustFragmentedBlockSize(elem, nc, column);
         if (!blockNestCount++) {
           if (nc !== nodeContext1) {
             const { textAlign } = this.viewport.window.getComputedStyle(elem);
@@ -3986,9 +5248,6 @@ export class ViewFactory
               Break.setBoxBreakFlag(elem, "text-end");
             }
           }
-        }
-        if (Break.isCloneBoxDecorationBreak(elem)) {
-          Break.setBoxBreakFlag(elem, "clone");
         }
         Break.setMarginDiscardFlag(elem, "block-end");
       }
@@ -4126,19 +5385,21 @@ export class ViewFactory
   ): number | Css.Numeric {
     const num = numeric.num;
     const unit = numeric.unit;
-    if (Exprs.isFontRelativeLengthUnit(unit)) {
+    if (Exprs.isFontRelativeLengthUnit(unit) || /^(ex|cap|ch|ic)$/.test(unit)) {
       let elem: Node | null = viewNode;
       while (elem && elem.nodeType !== 1) {
         elem = elem.parentNode;
       }
       Asserts.assert(elem);
-      const fontSize = parseFloat(
-        clientLayout.getElementComputedStyle(elem as Element)["font-size"],
-      );
+      const style = clientLayout.getElementComputedStyle(elem as Element);
+      const fontSize = parseFloat(style["font-size"]);
+      const properties: FontProperties = {};
+      for (const name of fontMetricProperties) properties[name] = style[name];
       return CssCascade.convertFontRelativeLengthToPx(
         numeric,
         fontSize,
         this.context,
+        properties,
       ).num;
     } else {
       const unitSize = this.context.queryUnitSize(unit, false);
@@ -4197,6 +5458,9 @@ export class ViewFactory
 }
 
 export const propertiesNotPassedToDOM = {
+  "bookmark-label": true,
+  "bookmark-level": true,
+  "bookmark-state": true,
   "float-min-wrap-block": true,
   "float-reference": true,
   "flow-into": true,
@@ -4207,6 +5471,25 @@ export const propertiesNotPassedToDOM = {
   "footnote-policy": true,
   "margin-break": true,
   page: true,
+};
+
+/**
+ * Inherited properties that UA stylesheets set with rules matching the lang
+ * and dir attributes (e.g. `[lang|=ja] { text-emphasis-position: over right }`
+ * and `[lang|=ja] { text-underline-position: right }` from the css-text-decor-4
+ * default stylesheet, and the dir-attribute-to-direction mapping in HTML
+ * rendering). These attributes are copied from the source root element to its
+ * view element, so these properties must also be set on the root's view
+ * element when the root's inherited properties are moved to the page box
+ * (Issue #568), or the UA value would win over the author's value for all
+ * content (Issue #2167). Other inherited properties must not be set on the
+ * root's view element: parent-relative values (e.g. `font-size: larger`)
+ * declared on both nested elements would be resolved twice and compound.
+ */
+export const uaLangDirInheritedProps: { [key: string]: boolean } = {
+  "text-emphasis-position": true,
+  "text-underline-position": true,
+  direction: true,
 };
 
 export class DefaultClientLayout implements Vtree.ClientLayout {
@@ -4265,6 +5548,20 @@ export class DefaultClientLayout implements Vtree.ClientLayout {
     }
     const layoutBoxRect = this.layoutBox.getBoundingClientRect();
     return this.subtractOffsets(rect, layoutBoxRect);
+  }
+
+  /**
+   * @param element element to measure
+   * @return the client rects of the element's own boxes relative to the layout
+   *     box, i.e. its border box fragments, without the rects of its contents
+   * @override
+   */
+  getElementClientRects(element: Element): Vtree.ClientRect[] {
+    const rects = element.getClientRects();
+    const layoutBoxRect = this.layoutBox.getBoundingClientRect();
+    return Array.from(rects).map((rect) =>
+      this.subtractOffsets(rect, layoutBoxRect),
+    );
   }
 
   /** @override */
@@ -4482,4 +5779,28 @@ export function addImageFetchersToPage(val: Css.Val, page: Vtree.Page): void {
       addImageFetchersToPage(v, page);
     }
   }
+}
+
+/**
+ * The inline style declaration of an element, or null when it has none.
+ */
+function getInlineStyle(element: Element | null): CSSStyleDeclaration | null {
+  return element ? ((element as HTMLElement).style ?? null) : null;
+}
+
+/**
+ * The length in front of the layout unit adjustment of a serialized
+ * `calc(<length>px - var(--viv-layoutUnitAdj))`, or null when the value does
+ * not have that form. (Issue #2174 follow-up)
+ */
+function parseLayoutUnitAdjustedValue(val: string): number | null {
+  const match =
+    /^calc\(\s*(-?\d*\.?\d+(?:e[-+]?\d+)?)px\s*-\s*var\(--viv-layoutUnitAdj\)/i.exec(
+      val.trim(),
+    );
+  if (!match) {
+    return null;
+  }
+  const parsed = parseFloat(match[1]);
+  return isNaN(parsed) ? null : parsed;
 }

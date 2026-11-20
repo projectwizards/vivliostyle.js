@@ -30,6 +30,8 @@ npx playwright install chromium --with-deps
 npx playwright install firefox webkit --with-deps
 ```
 
+Playwrightを更新した後は、そのバージョンに対応するブラウザのバイナリを取得するため、インストールコマンドを再実行してください。
+
 ## 基本的な実行
 
 全エントリを実行（デフォルト: canary vs stable）:
@@ -111,6 +113,14 @@ WPT manifest ベースの実行では、ビューワーのハッシュパラメ�
 fallback ではなく、ブラウザのネイティブな device pixel ratio で比較します。
 この設定は WPT manifest テストのみに適用され、手動の `--test-url` /
 `--ref-url` ペアでは通常の viewer デフォルトが使われます。
+
+WPT manifest ベースの実行では browser context の device pixel ratio (DPR) を
+2 にします。Chromium の起動時 scale factor は 1 に固定し、PR #2187 より前の
+WPT 描画条件を維持します。通常の版間比較と手動 URL ペアでは DPR 1 を使用し、
+Chromium の起動時 scale factor も 1 に固定します。スクリーンショットは引き続き
+`scale: "css"`（1 CSS px あたり出力画像の1画素）で取得するため、DPR は出力画像の
+解像度ではなく、ネイティブのレイアウト・描画条件に影響します。使用 DPR は JSON の
+`options.deviceScaleFactor` に記録します。
 
 このモードのデフォルト:
 
@@ -217,6 +227,18 @@ yarn test:reftest-diff \
 | バージョン | `v2.35.0` | https://vivliostyle.github.io/viewer/v2.35.0/ |
 | レガシーバージョン | `2019.11.100` | https://vivliostyle.github.io/viewer/2019.11.100/vivliostyle-viewer.html |
 | URL | `https://...` | 任意のビューワー URL（レガシーの `vivliostyle-viewer.html` URL も自動判別） |
+
+`git-<branch>` / `git:<branch>` はサニタイズしたブランチ名から URL を組み立てる。
+これが確実に動作するのは、生成されるホスト名
+（`vivliostyle-git-<branch>-vivliostyle`）が63文字以内に収まる場合のみで、
+実質的にブランチ名として使えるのは約35文字である。それを超える場合、Vercel は
+ホスト名を切り詰めた上で一意性のためのハッシュを付加するが、このハッシュは
+本スクリプトからは予測できないため、長いブランチ名では生成した URL が誤った
+ものになる可能性が高い。この場合スクリプトは警告を表示するので、代わりに
+実際のプレビュー URL（PR の Vercel コメントなどから取得）を
+`--actual-viewer <url>` で直接指定すること。CI ワークフローも同じ短いブランチ名
+向けの組み立て方を使うが、長いブランチ名の場合は推測する代わりに Vercel bot の
+PR コメントから実際の URL を取得する。
 
 使用例:
 

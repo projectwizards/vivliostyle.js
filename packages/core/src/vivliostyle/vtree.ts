@@ -22,6 +22,7 @@ import * as Base from "./base";
 import * as Break from "./break";
 import * as Constants from "./constants";
 import * as Css from "./css";
+import * as CssLogicalUtil from "./css-logical-util";
 import * as CssProp from "./css-prop";
 import * as Diff from "./diff";
 import * as Exprs from "./exprs";
@@ -123,6 +124,7 @@ export class Page extends Base.SimpleEventTarget {
   delayedItems: DelayedItem[] = [];
   hrefHandler: (e: Event) => void;
   elementsById: { [key: string]: Element[] } = {};
+  private nonReferenceTargets = new WeakMap<Element, Set<string>>();
   dimensions: { width: number; height: number } = { width: 0, height: 0 };
   isFirstPage: boolean = false;
   isLastPage: boolean = false;
@@ -188,13 +190,35 @@ export class Page extends Base.SimpleEventTarget {
     }
   }
 
-  registerElementWithId(element: Element, id: string) {
+  registerElementWithId(
+    element: Element,
+    id: string,
+    isReferenceTarget = true,
+  ) {
     const arr = this.elementsById[id];
     if (!arr) {
       this.elementsById[id] = [element];
     } else {
       arr.push(element);
     }
+    if (!isReferenceTarget) {
+      let ids = this.nonReferenceTargets.get(element);
+      if (!ids) {
+        ids = new Set();
+        this.nonReferenceTargets.set(element, ids);
+      }
+      ids.add(id);
+    }
+  }
+
+  isReferenceTarget(element: Element, id: string): boolean {
+    return !this.nonReferenceTargets.get(element)?.has(id);
+  }
+
+  getReferenceTargets(id: string): Element[] {
+    return (this.elementsById[id] || []).filter((element) =>
+      this.isReferenceTarget(element, id),
+    );
   }
 
   finish(triggers: Trigger[], clientLayout: ClientLayout): void {
@@ -520,7 +544,7 @@ function applyNodePositionStep(
 export function rootStepOfNodePosition(
   position: Vtree.NodePosition,
 ): RootNodePositionStep {
-  return position.steps[position.steps.length - 1] as RootNodePositionStep;
+  return position.steps.at(-1) as RootNodePositionStep;
 }
 
 export const ShadowType = Vtree.ShadowType;
@@ -622,7 +646,19 @@ export class NodeContext implements Vtree.NodeContext {
   viewNode: Element | Text | null = null;
   clearSpacer: Element | null = null;
   inheritedProps: { [key: string]: number | string | Css.Val | undefined };
-  vertical: boolean;
+  writingMode: string;
+  get vertical(): boolean {
+    return !!this.writingMode && this.writingMode !== "horizontal-tb";
+  }
+
+  set vertical(value: boolean) {
+    // Retain the full mode when only its orientation is assigned. Older
+    // geometry callers can still initialize a horizontal or vertical-rl box.
+    if (!this.writingMode || value !== this.vertical) {
+      this.writingMode = value ? "vertical-rl" : "horizontal-tb";
+    }
+  }
+
   direction: string;
   firstPseudo: FirstPseudo | null;
   lang: string | null = null;
@@ -682,6 +718,7 @@ export class NodeContext implements Vtree.NodeContext {
     this.hyphenateCharacter = parent ? parent.hyphenateCharacter : null;
     this.breakWord = parent ? parent.breakWord : false;
     this.inheritedProps = parent ? parent.inheritedProps : {};
+    this.writingMode = parent ? parent.writingMode : "horizontal-tb";
     this.vertical = parent ? parent.vertical : false;
     this.direction = parent ? parent.direction : "ltr";
     this.firstPseudo = parent ? parent.firstPseudo : null;
@@ -712,6 +749,7 @@ export class NodeContext implements Vtree.NodeContext {
     this.nodeShadow = null;
     this.establishesBFC = false;
     this.containingBlockForAbsolute = false;
+    this.writingMode = this.parent ? this.parent.writingMode : "horizontal-tb";
     this.vertical = this.parent ? this.parent.vertical : false;
     this.nodeShadow = null;
     this.preprocessedTextContent = null;
@@ -761,11 +799,12 @@ export class NodeContext implements Vtree.NodeContext {
     np.viewNode = this.viewNode;
     np.clearSpacer = this.clearSpacer;
     np.firstPseudo = this.firstPseudo;
+    np.writingMode = this.writingMode;
     np.vertical = this.vertical;
     np.overflow = this.overflow;
     np.preprocessedTextContent = this.preprocessedTextContent;
     np.repeatOnBreak = this.repeatOnBreak;
-    np.pluginProps = Object.create(this.pluginProps);
+    np.pluginProps = { ...this.pluginProps };
     np.fragmentIndex = this.fragmentIndex;
     np.afterIfContinues = this.afterIfContinues;
     np.footnotePolicy = this.footnotePolicy;
@@ -1212,6 +1251,8 @@ export function copyGeometry(
   to.originY = from.originY;
   to.snapWidth = from.snapWidth;
   to.snapHeight = from.snapHeight;
+  to.writingMode =
+    from.writingMode ?? (from.vertical ? "vertical-rl" : "horizontal-tb");
   to.vertical = from.vertical;
   to.rtl = from.rtl;
   to.borderBoxSizing = from.borderBoxSizing;
@@ -1243,7 +1284,19 @@ export class Container implements Vtree.Container {
   snapHeight: number = 0;
   snapOffsetX: number = 0;
   snapOffsetY: number = 0;
-  vertical: boolean = false; // vertical writing
+  writingMode: string = "horizontal-tb";
+  get vertical(): boolean {
+    return !!this.writingMode && this.writingMode !== "horizontal-tb";
+  }
+
+  set vertical(value: boolean) {
+    // Retain the full mode when only its orientation is assigned. Older
+    // geometry callers can still initialize a horizontal or vertical-rl box.
+    if (!this.writingMode || value !== this.vertical) {
+      this.writingMode = value ? "vertical-rl" : "horizontal-tb";
+    }
+  }
+
   rtl: boolean = false;
   borderBoxSizing: boolean = false;
 
@@ -1279,7 +1332,7 @@ export class Container implements Vtree.Container {
 
   getInsetBefore() {
     if (this.vertical) {
-      return this.getInsetRight();
+      return this.getBoxDir() < 0 ? this.getInsetRight() : this.getInsetLeft();
     } else {
       return this.getInsetTop();
     }
@@ -1287,7 +1340,7 @@ export class Container implements Vtree.Container {
 
   getInsetAfter() {
     if (this.vertical) {
-      return this.getInsetLeft();
+      return this.getBoxDir() < 0 ? this.getInsetLeft() : this.getInsetRight();
     } else {
       return this.getInsetBottom();
     }
@@ -1295,44 +1348,56 @@ export class Container implements Vtree.Container {
 
   getInsetStart() {
     if (this.vertical) {
-      return this.getInsetTop();
+      return this.getInlineDir() < 0
+        ? this.getInsetBottom()
+        : this.getInsetTop();
     } else {
-      return this.getInsetLeft();
+      return this.rtl ? this.getInsetRight() : this.getInsetLeft();
     }
   }
 
   getInsetEnd() {
     if (this.vertical) {
-      return this.getInsetBottom();
+      return this.getInlineDir() < 0
+        ? this.getInsetTop()
+        : this.getInsetBottom();
     } else {
-      return this.getInsetRight();
+      return this.rtl ? this.getInsetLeft() : this.getInsetRight();
     }
   }
 
   getBeforeEdge(box: ClientRect): number {
-    return this.vertical ? box.right : box.top;
+    return this.vertical
+      ? this.getBoxDir() < 0
+        ? box.right
+        : box.left
+      : box.top;
   }
 
   getAfterEdge(box: ClientRect): number {
-    return this.vertical ? box.left : box.bottom;
+    return this.vertical
+      ? this.getBoxDir() < 0
+        ? box.left
+        : box.right
+      : box.bottom;
   }
 
   getStartEdge(box: ClientRect): number {
     return this.vertical
-      ? this.rtl
+      ? this.getInlineDir() < 0
         ? box.bottom
         : box.top
-      : this.rtl
+      : this.getInlineDir() < 0
         ? box.right
         : box.left;
   }
 
   getEndEdge(box: ClientRect): number {
     return this.vertical
-      ? this.rtl
+      ? this.getInlineDir() < 0
         ? box.top
         : box.bottom
-      : this.rtl
+      : this.getInlineDir() < 0
         ? box.left
         : box.right;
   }
@@ -1346,11 +1411,11 @@ export class Container implements Vtree.Container {
   }
 
   getBoxDir(): number {
-    return this.vertical ? -1 : 1;
+    return CssLogicalUtil.isBlockReversed(this.writingMode) ? -1 : 1;
   }
 
   getInlineDir(): number {
-    return this.rtl ? -1 : 1;
+    return CssLogicalUtil.isInlineReversed(this.writingMode, this.rtl) ? -1 : 1;
   }
 
   copyFrom(other: Container): void {
@@ -1388,7 +1453,7 @@ export class Container implements Vtree.Container {
             this.borderLeft +
             this.borderRight);
       this.setHorizontalPosition(
-        start + outerExtent * this.getBoxDir(),
+        this.getBoxDir() < 0 ? start - outerExtent : start,
         extent,
       );
     } else {
@@ -1398,7 +1463,7 @@ export class Container implements Vtree.Container {
 
   setInlinePosition(start: number, extent: number): void {
     if (this.vertical) {
-      if (this.rtl) {
+      if (this.getInlineDir() < 0) {
         const outerExtent =
           extent +
           this.marginTop +
@@ -1416,7 +1481,7 @@ export class Container implements Vtree.Container {
       } else {
         this.setVerticalPosition(start, extent);
       }
-    } else if (this.rtl) {
+    } else if (this.getInlineDir() < 0) {
       const outerExtent =
         extent +
         this.marginLeft +

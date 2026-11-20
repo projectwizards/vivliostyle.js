@@ -84,12 +84,14 @@ export function isRunning(position: Css.Val | null | undefined): boolean {
  * Get computed values of display, position and float.
  * cf. https://drafts.csswg.org/css-display/#transformations
  *     https://drafts.csswg.org/css2/visuren.html#dis-pos-flo
+ *     https://drafts.csswg.org/css-writing-modes/#block-flow
  */
 export function getComputedDisplayValue(
   display: Css.Ident,
   position: Css.Ident,
   float: Css.Val,
   isRoot: boolean,
+  writingModeChanged = false,
 ): { display: Css.Ident; position: Css.Ident; float: Css.Val } {
   if (display === Css.ident.none) {
     // no need to convert values when 'display' is 'none'
@@ -101,6 +103,13 @@ export function getComputedDisplayValue(
     isRoot
   ) {
     display = blockify(display);
+  } else if (
+    writingModeChanged &&
+    /^(inline|inline flow|flow inline|initial|unset)$/i.test(String(display))
+  ) {
+    // An in-flow inline box with a writing mode different from its parent's
+    // becomes an inline-block
+    display = Css.ident.inline_block;
   }
   return { display, position, float };
 }
@@ -219,7 +228,9 @@ export function establishesBFC(
     display === Css.ident.table_cell ||
     display === Css.ident.table_caption ||
     display == Css.ident.flex ||
+    display == Css.ident.inline_flex ||
     display == Css.ident.grid ||
+    display == Css.ident.inline_grid ||
     display == Css.ident.flow_root ||
     ((display === Css.ident.block || display === Css.ident.list_item) &&
       !!overflow &&

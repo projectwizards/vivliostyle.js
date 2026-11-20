@@ -16,10 +16,12 @@
  * along with Vivliostyle.js.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+import * as CssPage from "../../../src/vivliostyle/css-page";
 import * as adapt_csscasc from "../../../src/vivliostyle/css-cascade";
 import * as adapt_css from "../../../src/vivliostyle/css";
 import * as adapt_exprs from "../../../src/vivliostyle/exprs";
 import * as adapt_cssparse from "../../../src/vivliostyle/css-parser";
+import * as adapt_csstok from "../../../src/vivliostyle/css-tokenizer";
 import * as adapt_cssvalid from "../../../src/vivliostyle/css-validator";
 import * as adapt_task from "../../../src/vivliostyle/task";
 import * as vivliostyle_logging from "../../../src/vivliostyle/logging";
@@ -48,7 +50,7 @@ describe("css-validator", function () {
     handler.owner.startStylesheet(adapt_cssparse.StylesheetFlavor.AUTHOR);
     adapt_task.start(function () {
       adapt_cssparse
-        .parseStylesheetFromText(cssText, handler.owner, null, null, null)
+        .parseStylesheetFromText(cssText, handler.owner, null, null)
         .then(function (result) {
           expect(result).toBe(true);
           callback(handler.finish(), handler);
@@ -58,18 +60,248 @@ describe("css-validator", function () {
     });
   }
 
+  describe("ic length unit (Issue #2197)", function () {
+    it("expands an ic margin into all four longhands", function (done) {
+      parseCascade("span { margin: 0.125ic; }", done, function (cascade) {
+        const style = cascade.tags.get("span").style;
+        for (const side of ["top", "right", "bottom", "left"]) {
+          expect(style[`margin-${side}`]?.value.toString()).toBe("0.125ic");
+        }
+      });
+    });
+
+    it("preserves signed ic margins when expanding mixed units", function (done) {
+      parseCascade(
+        "span { margin: -0.125ic 2px 1ic 0; }",
+        done,
+        function (cascade) {
+          const style = cascade.tags.get("span").style;
+          expect(style["margin-top"]?.value.toString()).toBe("-0.125ic");
+          expect(style["margin-right"]?.value.toString()).toBe("2px");
+          expect(style["margin-bottom"]?.value.toString()).toBe("1ic");
+          expect(style["margin-left"]?.value.toString()).toBe("0");
+        },
+      );
+    });
+
+    it("accepts ic in other length shorthands", function (done) {
+      parseCascade("span { padding: 1ic 2ic; }", done, function (cascade) {
+        const style = cascade.tags.get("span").style;
+        expect(style["padding-top"]?.value.toString()).toBe("1ic");
+        expect(style["padding-right"]?.value.toString()).toBe("2ic");
+        expect(style["padding-bottom"]?.value.toString()).toBe("1ic");
+        expect(style["padding-left"]?.value.toString()).toBe("2ic");
+      });
+    });
+  });
+
+  describe("browser viewport length units", function () {
+    it("rejects browser-only viewport units in float-min-wrap-block and retains the valid cutoff", function (done) {
+      spyOn(vivliostyle_logging.logger, "warn");
+      const units = ["s", "l", "d"].flatMap((prefix) =>
+        ["vw", "vh", "vi", "vb", "vmin", "vmax"].map((unit) => prefix + unit),
+      );
+      parseCascade(
+        units
+          .map(
+            (unit) =>
+              `.${unit} { float-min-wrap-block: 42px; float-min-wrap-block: 10${unit}; float-min-wrap-block: calc(10${unit} + 1px); }`,
+          )
+          .join("\n"),
+        done,
+        (cascade) => {
+          for (const unit of units) {
+            const cutoff =
+              cascade.classes.get(unit).style["float-min-wrap-block"].value;
+            expect(cutoff.unit).withContext(unit).toBe("px");
+            expect(cutoff.num).withContext(unit).toBe(42);
+            expect(Number.isFinite(cutoff.num)).withContext(unit).toBe(true);
+          }
+        },
+      );
+    });
+
+    it("rejects browser-only viewport units in engine-evaluated page descriptors", function (done) {
+      spyOn(vivliostyle_logging.logger, "warn");
+      const units = ["s", "l", "d"].flatMap((prefix) =>
+        ["vw", "vh", "vi", "vb", "vmin", "vmax"].map((unit) => prefix + unit),
+      );
+      parseCascade(
+        units
+          .flatMap((unit) =>
+            [`1${unit}`, `calc(1${unit} + 1px)`].map(
+              (value, index) =>
+                `.${unit}-${index} {size:300px 400px;size:${value} 400px;bleed:3px;bleed:${value};crop-offset:10px;crop-offset:${value};}`,
+            ),
+          )
+          .join("\n"),
+        done,
+        (cascade) => {
+          for (const unit of units)
+            for (const index of [0, 1]) {
+              const style = cascade.classes.get(`${unit}-${index}`).style;
+              expect(style.size.value.toString())
+                .withContext(`${unit}/${index}`)
+                .toBe("300px 400px");
+              const context = new adapt_exprs.Context(
+                new adapt_exprs.LexicalScope(null),
+                800,
+                600,
+                16,
+                20,
+              );
+              const evaluated = CssPage.evaluatePageSizeAndBleed(
+                CssPage.resolvePageSizeAndBleed(style),
+                context,
+              );
+              expect(evaluated).withContext(`${unit}/${index}`).toEqual({
+                pageWidth: 300,
+                pageHeight: 400,
+                bleed: 3,
+                bleedOffset: 7,
+                cropOffset: 10,
+              });
+            }
+        },
+      );
+    });
+
+    it("rejects viewport units in engine-only page length properties", function (done) {
+      spyOn(vivliostyle_logging.logger, "warn");
+      parseCascade(
+        ["svw", "svh", "dvw", "lvh"]
+          .map(
+            (unit) =>
+              `.case-${unit} { -epubx-min-page-width:42px; -epubx-min-page-width:10${unit}; min-page-height:43px; min-page-height:10${unit}; snap-width:44px; snap-width:10${unit}; snap-height:45px; snap-height:10${unit}; }`,
+          )
+          .join("\n"),
+        done,
+        (cascade) => {
+          for (const unit of ["svw", "svh", "dvw", "lvh"]) {
+            const style = cascade.classes.get(`case-${unit}`).style;
+            for (const [name, value] of [
+              ["min-page-width", "42px"],
+              ["min-page-height", "43px"],
+              ["snap-width", "44px"],
+              ["snap-height", "45px"],
+            ]) {
+              expect(style[name]?.value.toString())
+                .withContext(`${unit}: ${name}`)
+                .toBe(value);
+            }
+          }
+        },
+      );
+    });
+
+    it("rejects unsupported page geometry before replacing valid declarations", function () {
+      const scope = new adapt_exprs.LexicalScope(null);
+      const validatorSet = adapt_cssvalid.baseValidatorSet();
+      let style = {};
+      const receiver = {
+        ruleType: "page",
+        simpleProperty(name, value) {
+          style[name] = value;
+        },
+        invalidPropertyValue() {},
+        unknownProperty() {},
+      };
+      const validate = (name, text) =>
+        validatorSet.validatePropertyAndHandleShorthand(
+          name,
+          adapt_cssparse.parseValue(
+            scope,
+            new adapt_csstok.Tokenizer(text, null),
+            "",
+          ),
+          false,
+          scope,
+          receiver,
+        );
+
+      for (const [name, valid, unsupported] of [
+        ["border-top", "5px solid", "1svw solid"],
+        ["border-block-width", "6px", "1svw"],
+        ["border-inline-width", "7px", "1svw"],
+        ["min-width", "8px", "1svw"],
+        ["max-width", "9px", "1svw"],
+        ["min-height", "10px", "1svh"],
+        ["max-height", "11px", "1svh"],
+        ["min-block-size", "12px", "1svh"],
+        ["max-block-size", "13px", "1svh"],
+        ["min-inline-size", "14px", "1svw"],
+        ["max-inline-size", "15px", "1svw"],
+        ["top", "16px", "1svh"],
+        ["inset-inline-start", "17px", "1svw"],
+        ["columns", "18px 2", "1svw 2"],
+        ["column-gap", "19px", "1svw"],
+        ["column-rule", "20px solid", "1svw solid"],
+        ["column-rule-width", "21px", "1svw"],
+        [
+          "shape-inside",
+          "rectangle(0px, 0px, 100px, 100px)",
+          "rectangle(0px, 0px, 10svw, 100px)",
+        ],
+        [
+          "shape-outside",
+          "rectangle(0px, 0px, 100px, 100px)",
+          "rectangle(0px, 0px, 10svw, 100px)",
+        ],
+      ]) {
+        style = {};
+        validate(name, valid);
+        expect(Object.keys(style).length).withContext(name).toBeGreaterThan(0);
+        const expected = { ...style };
+        validate(name, unsupported);
+        expect(style).withContext(name).toEqual(expected);
+      }
+      receiver.ruleType = undefined;
+      validate("shape-outside", "inset(1svw)");
+      expect(style["shape-outside"].toString()).toBe("inset(1svw)");
+    });
+
+    it("expands margin and padding while preserving all small, large and dynamic units", function (done) {
+      const units = ["s", "l", "d"].flatMap((prefix) =>
+        ["vw", "vh", "vi", "vb", "vmin", "vmax"].map((unit) => prefix + unit),
+      );
+      parseCascade(
+        units
+          .map(
+            (unit) =>
+              `.${unit} { margin: -1${unit} 2${unit}; padding: 1${unit}; }`,
+          )
+          .join("\n"),
+        done,
+        function (cascade) {
+          for (const unit of units) {
+            const style = cascade.classes.get(unit).style;
+            for (const side of ["top", "right", "bottom", "left"]) {
+              const margin = side === "top" || side === "bottom" ? -1 : 2;
+              expect(style[`margin-${side}`]?.value.toString())
+                .withContext(`${unit}: margin-${side}`)
+                .toBe(`${margin}${unit}`);
+              expect(style[`padding-${side}`]?.value.toString())
+                .withContext(`${unit}: padding-${side}`)
+                .toBe(`1${unit}`);
+            }
+          }
+        },
+      );
+    });
+  });
+
   describe("background shorthand regression", function () {
     it("keeps color in cascade for a semicolonless declaration", function (done) {
       parseCascade("h1 { color: blue }", done, function (cascade) {
-        expect(cascade.tags.h1).toBeDefined();
-        expect(cascade.tags.h1.style.color).toBeDefined();
+        expect(cascade.tags.get("h1")).toBeDefined();
+        expect(cascade.tags.get("h1").style.color).toBeDefined();
       });
     });
 
     it("keeps background-color in cascade for a semicolonless declaration", function (done) {
       parseCascade("ul { background: green }", done, function (cascade) {
-        expect(cascade.tags.ul).toBeDefined();
-        expect(cascade.tags.ul.style["background-color"]).toBeDefined();
+        expect(cascade.tags.get("ul")).toBeDefined();
+        expect(cascade.tags.get("ul").style["background-color"]).toBeDefined();
       });
     });
 
@@ -78,8 +310,10 @@ describe("css-validator", function () {
         "ul { background: green } li:has(strong) { display: none; :has(> &) { background: red; } }",
         done,
         function (cascade) {
-          expect(cascade.tags.ul).toBeDefined();
-          expect(cascade.tags.ul.style["background-color"]).toBeDefined();
+          expect(cascade.tags.get("ul")).toBeDefined();
+          expect(
+            cascade.tags.get("ul").style["background-color"],
+          ).toBeDefined();
         },
       );
     });
@@ -91,15 +325,15 @@ describe("css-validator", function () {
         "div { place-items: center start; }",
         done,
         function (cascade) {
-          expect(cascade.tags.div).toBeDefined();
-          expect(cascade.tags.div.style["align-items"]).toBeDefined();
-          expect(cascade.tags.div.style["justify-items"]).toBeDefined();
-          expect(cascade.tags.div.style["align-items"].value.toString()).toBe(
-            "center",
-          );
-          expect(cascade.tags.div.style["justify-items"].value.toString()).toBe(
-            "start",
-          );
+          expect(cascade.tags.get("div")).toBeDefined();
+          expect(cascade.tags.get("div").style["align-items"]).toBeDefined();
+          expect(cascade.tags.get("div").style["justify-items"]).toBeDefined();
+          expect(
+            cascade.tags.get("div").style["align-items"].value.toString(),
+          ).toBe("center");
+          expect(
+            cascade.tags.get("div").style["justify-items"].value.toString(),
+          ).toBe("start");
         },
       );
     });
@@ -109,28 +343,28 @@ describe("css-validator", function () {
         "div { place-items: center start; justify-items: stretch; }",
         done,
         function (cascade) {
-          expect(cascade.tags.div).toBeDefined();
-          expect(cascade.tags.div.style["align-items"]).toBeDefined();
-          expect(cascade.tags.div.style["justify-items"]).toBeDefined();
-          expect(cascade.tags.div.style["align-items"].value.toString()).toBe(
-            "center",
-          );
-          expect(cascade.tags.div.style["justify-items"].value.toString()).toBe(
-            "stretch",
-          );
+          expect(cascade.tags.get("div")).toBeDefined();
+          expect(cascade.tags.get("div").style["align-items"]).toBeDefined();
+          expect(cascade.tags.get("div").style["justify-items"]).toBeDefined();
+          expect(
+            cascade.tags.get("div").style["align-items"].value.toString(),
+          ).toBe("center");
+          expect(
+            cascade.tags.get("div").style["justify-items"].value.toString(),
+          ).toBe("stretch");
         },
       );
     });
 
     it("propagates CSS-wide values from browser shorthands to their longhands", function (done) {
       parseCascade("div { place-items: initial; }", done, function (cascade) {
-        expect(cascade.tags.div).toBeDefined();
-        expect(cascade.tags.div.style["align-items"]).toBeDefined();
-        expect(cascade.tags.div.style["justify-items"]).toBeDefined();
-        expect(cascade.tags.div.style["align-items"].value).toBe(
+        expect(cascade.tags.get("div")).toBeDefined();
+        expect(cascade.tags.get("div").style["align-items"]).toBeDefined();
+        expect(cascade.tags.get("div").style["justify-items"]).toBeDefined();
+        expect(cascade.tags.get("div").style["align-items"].value).toBe(
           adapt_css.ident.initial,
         );
-        expect(cascade.tags.div.style["justify-items"].value).toBe(
+        expect(cascade.tags.get("div").style["justify-items"].value).toBe(
           adapt_css.ident.initial,
         );
       });
@@ -184,9 +418,11 @@ describe("css-validator", function () {
         "div { BORDER-SPACING: var(--bs); }",
         done,
         function (cascade) {
-          expect(cascade.tags.div).toBeDefined();
-          expect(cascade.tags.div.style["border-spacing"]).toBeDefined();
-          expect(cascade.tags.div.style["BORDER-SPACING"]).toBeUndefined();
+          expect(cascade.tags.get("div")).toBeDefined();
+          expect(cascade.tags.get("div").style["border-spacing"]).toBeDefined();
+          expect(
+            cascade.tags.get("div").style["BORDER-SPACING"],
+          ).toBeUndefined();
         },
       );
     });
@@ -228,14 +464,22 @@ describe("css-validator", function () {
         "div { transition: opacity 1s ease, transform 2s linear; }",
         done,
         function (cascade) {
-          expect(cascade.tags.div).toBeDefined();
-          expect(cascade.tags.div.style["transition-property"]).toBeDefined();
-          expect(cascade.tags.div.style["transition-duration"]).toBeDefined();
+          expect(cascade.tags.get("div")).toBeDefined();
           expect(
-            cascade.tags.div.style["transition-property"].value.toString(),
+            cascade.tags.get("div").style["transition-property"],
+          ).toBeDefined();
+          expect(
+            cascade.tags.get("div").style["transition-duration"],
+          ).toBeDefined();
+          expect(
+            cascade.tags
+              .get("div")
+              .style["transition-property"].value.toString(),
           ).toBe("opacity,transform");
           expect(
-            cascade.tags.div.style["transition-duration"].value.toString(),
+            cascade.tags
+              .get("div")
+              .style["transition-duration"].value.toString(),
           ).toBe("1s,2s");
         },
       );
@@ -246,15 +490,19 @@ describe("css-validator", function () {
         "div { transition: opacity 1s ease; all: initial; }",
         done,
         function (cascade) {
-          expect(cascade.tags.div).toBeDefined();
-          expect(cascade.tags.div.style["transition-property"]).toBeDefined();
-          expect(cascade.tags.div.style["transition-duration"]).toBeDefined();
-          expect(cascade.tags.div.style["transition-property"].value).toBe(
-            adapt_css.ident.initial,
-          );
-          expect(cascade.tags.div.style["transition-duration"].value).toBe(
-            adapt_css.ident.initial,
-          );
+          expect(cascade.tags.get("div")).toBeDefined();
+          expect(
+            cascade.tags.get("div").style["transition-property"],
+          ).toBeDefined();
+          expect(
+            cascade.tags.get("div").style["transition-duration"],
+          ).toBeDefined();
+          expect(
+            cascade.tags.get("div").style["transition-property"].value,
+          ).toBe(adapt_css.ident.initial);
+          expect(
+            cascade.tags.get("div").style["transition-duration"].value,
+          ).toBe(adapt_css.ident.initial);
         },
       );
     });
@@ -298,26 +546,38 @@ describe("css-validator", function () {
         "div { all: initial; position: absolute; top: 0; right: 0; }",
         done,
         function (cascade) {
-          expect(cascade.tags.div).toBeDefined();
-          expect(cascade.tags.div.style["inset"]).toBeUndefined();
-          expect(cascade.tags.div.style["inset-block-start"]).toBeUndefined();
-          expect(cascade.tags.div.style["inset-block-end"]).toBeUndefined();
-          expect(cascade.tags.div.style["inset-inline-start"]).toBeUndefined();
-          expect(cascade.tags.div.style["inset-inline-end"]).toBeUndefined();
-          expect(cascade.tags.div.style["position"].value.toString()).toBe(
-            "absolute",
+          expect(cascade.tags.get("div")).toBeDefined();
+          expect(cascade.tags.get("div").style["inset"]).toBeUndefined();
+          expect(
+            cascade.tags.get("div").style["inset-block-start"],
+          ).toBeUndefined();
+          expect(
+            cascade.tags.get("div").style["inset-block-end"],
+          ).toBeUndefined();
+          expect(
+            cascade.tags.get("div").style["inset-inline-start"],
+          ).toBeUndefined();
+          expect(
+            cascade.tags.get("div").style["inset-inline-end"],
+          ).toBeUndefined();
+          expect(
+            cascade.tags.get("div").style["position"].value.toString(),
+          ).toBe("absolute");
+          expect(cascade.tags.get("div").style["top"].value.toString()).toBe(
+            "0",
           );
-          expect(cascade.tags.div.style["top"].value.toString()).toBe("0");
-          expect(cascade.tags.div.style["right"].value.toString()).toBe("0");
+          expect(cascade.tags.get("div").style["right"].value.toString()).toBe(
+            "0",
+          );
         },
       );
     });
 
     it("keeps self-referential custom property declarations through the parser path", function (done) {
       parseCascade("div { --a: var(--a, red); }", done, function (cascade) {
-        expect(cascade.tags.div).toBeDefined();
-        expect(cascade.tags.div.style["--a"]).toBeDefined();
-        expect(cascade.tags.div.style["--a"].value.toString()).toBe(
+        expect(cascade.tags.get("div")).toBeDefined();
+        expect(cascade.tags.get("div").style["--a"]).toBeDefined();
+        expect(cascade.tags.get("div").style["--a"].value.toString()).toBe(
           "var(--a,red)",
         );
       });
@@ -330,10 +590,10 @@ describe("css-validator", function () {
         "p { background: lime; } foo % address, p { background: red; }",
         done,
         function (cascade) {
-          expect(cascade.tags.p).toBeDefined();
-          expect(cascade.tags.p.style["background-color"]).toBeDefined();
+          expect(cascade.tags.get("p")).toBeDefined();
+          expect(cascade.tags.get("p").style["background-color"]).toBeDefined();
           expect(
-            cascade.tags.p.style["background-color"].value.toString(),
+            cascade.tags.get("p").style["background-color"].value.toString(),
           ).toBe("lime");
         },
       );
@@ -344,10 +604,10 @@ describe("css-validator", function () {
         "foo % address, p { background: red ! important; } p { background: lime; }",
         done,
         function (cascade) {
-          expect(cascade.tags.p).toBeDefined();
-          expect(cascade.tags.p.style["background-color"]).toBeDefined();
+          expect(cascade.tags.get("p")).toBeDefined();
+          expect(cascade.tags.get("p").style["background-color"]).toBeDefined();
           expect(
-            cascade.tags.p.style["background-color"].value.toString(),
+            cascade.tags.get("p").style["background-color"].value.toString(),
           ).toBe("lime");
         },
       );
@@ -382,8 +642,8 @@ describe("css-validator", function () {
         'div { string-set: chapter attr(data-title type(<string>), "fallback"); }',
         done,
         function (cascade) {
-          expect(cascade.tags.div).toBeDefined();
-          expect(cascade.tags.div.style["string-set"]).toBeDefined();
+          expect(cascade.tags.get("div")).toBeDefined();
+          expect(cascade.tags.get("div").style["string-set"]).toBeDefined();
         },
       );
     });
@@ -394,8 +654,8 @@ describe("css-validator", function () {
         done,
         function (cascade, handler) {
           expect(handler.invalid).toBe(true);
-          expect(cascade.tags.div).toBeDefined();
-          expect(cascade.tags.div.style["string-set"]).toBeUndefined();
+          expect(cascade.tags.get("div")).toBeDefined();
+          expect(cascade.tags.get("div").style["string-set"]).toBeUndefined();
         },
       );
     });
@@ -425,6 +685,37 @@ describe("css-validator", function () {
     });
   });
 
+  describe("page viewport units", function () {
+    it("accepts a math function with an internal page viewport unit", function (done) {
+      // A browser does not know the `pv*` units of this engine, so
+      // `CSS.supports()` rejects a value that uses one although this engine
+      // resolves it, e.g. against the size of the page box: the check is made
+      // with such a unit replaced by a length, so `width: min(2pvw, 50px)` is
+      // a valid width here. (Review)
+      parseCascade("div { width: min(2pvw, 50px); }", done, function (cascade) {
+        expect(cascade.tags.get("div").style["width"]).toBeDefined();
+        expect(cascade.tags.get("div").style["width"].value.toString()).toBe(
+          "min(2pvw,50px)",
+        );
+      });
+    });
+
+    it("rejects a math function that mixes types with the internal unit", function (done) {
+      // The internal unit is replaced by a length, so the rest of the value is
+      // checked as written: `min(2pvw, 1)` mixes a length and a number and is
+      // invalid, as it is for the browser. (Review)
+      parseCascade("div { width: min(2pvw, 1); }", done, function (cascade) {
+        expect(cascade.tags.get("div").style["width"]).toBeUndefined();
+      });
+    });
+
+    it("rejects an unknown function with the internal unit", function (done) {
+      parseCascade("div { width: foo(2pvw); }", done, function (cascade) {
+        expect(cascade.tags.get("div").style["width"]).toBeUndefined();
+      });
+    });
+  });
+
   describe("ValidatorSet", function () {
     it("should parse simple validator and simple rule", function (done) {
       var validatorSet = new adapt_cssvalid.ValidatorSet();
@@ -441,7 +732,6 @@ describe("css-validator", function () {
           .parseStylesheetFromText(
             ".test { foo-or: bar; }\n.test2 { foo-or: baz biz; }",
             handler.owner,
-            null,
             null,
             null,
           )
@@ -461,9 +751,9 @@ describe("css-validator", function () {
         "foo = normal | auto | no-autospace | [[ ideograph-alpha || ideograph-numeric || punctuation ] || [ insert | replace ]];",
       );
 
-      expect(adapt_css.getName("x").visit(validatorSet.validators.foo)).toBe(
-        null,
-      );
+      expect(
+        adapt_css.getName("x").visit(validatorSet.validators.get("foo")),
+      ).toBe(null);
     });
 
     it("accepts valid single values for text-autospace-like nested alternates", function () {
@@ -474,7 +764,9 @@ describe("css-validator", function () {
       );
 
       expect(
-        adapt_css.getName("punctuation").visit(validatorSet.validators.foo),
+        adapt_css
+          .getName("punctuation")
+          .visit(validatorSet.validators.get("foo")),
       ).not.toBe(null);
     });
 
@@ -500,7 +792,6 @@ describe("css-validator", function () {
               ".test6 { foo: biz; }" +
               "",
             handler.owner,
-            null,
             null,
             null,
           )
@@ -529,7 +820,6 @@ describe("css-validator", function () {
             handler.owner,
             null,
             null,
-            null,
           )
           .then(function (result) {
             expect(result).toBe(true);
@@ -553,7 +843,6 @@ describe("css-validator", function () {
           .parseStylesheetFromText(
             '@namespace epub "http://www.idpf.org/2007/ops";\na[epub|type="noteref"]:not(sup > *, :has(> sup)),\na[epub\\:type="noteref"]:not(sup > *, :has(> sup)),\na[role="doc-noteref"]:not(sup > *, :has(> sup)) { font-size: 0.75em; vertical-align: super; line-height: 0; }',
             handler.owner,
-            null,
             null,
             null,
           )
@@ -580,7 +869,6 @@ describe("css-validator", function () {
           .parseStylesheetFromText(
             ".test { foo: bar; }\n.test2 { foo: bar baz boo; }",
             handler.owner,
-            null,
             null,
             null,
           )
@@ -610,7 +898,6 @@ describe("css-validator", function () {
             handler.owner,
             null,
             null,
-            null,
           )
           .then(function (result) {
             expect(result).toBe(true);
@@ -638,7 +925,6 @@ describe("css-validator", function () {
             handler.owner,
             null,
             null,
-            null,
           )
           .then(function (result) {
             expect(result).toBe(true);
@@ -664,7 +950,6 @@ describe("css-validator", function () {
           .parseStylesheetFromText(
             ".test { spacefoo: none; }\n.test2 { spacefoo: bar baz; }\n .test3 { spacefoo: bar; }",
             handler.owner,
-            null,
             null,
             null,
           )
@@ -703,7 +988,6 @@ describe("css-validator", function () {
             handler.owner,
             null,
             null,
-            null,
           )
           .then(function (result) {
             expect(result).toBe(true);
@@ -728,7 +1012,6 @@ describe("css-validator", function () {
           .parseStylesheetFromText(
             ".test { foo: bar( 10 / 10 ) ; }\n" + ".test2 { foo: bar( 10 ) ; }",
             handler.owner,
-            null,
             null,
             null,
           )
@@ -783,7 +1066,6 @@ describe("css-validator", function () {
               '.test6 { font: small-caps wider oblique 12px "Times" ; }\n' +
               ".test7 { font: status-bar ; }",
             handler.owner,
-            null,
             null,
             null,
           )

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<!-- Issue #2174 follow-up: detached content must use the source parent's
+     actual font metrics, rather than a fixed fraction of the font size. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>font-size with a browser resolved unit (Issue #2174 follow-up)</title>
+  <style>
+    @page { size: 800px 700px; margin: 10mm; }
+    body { font-size: 16px; }
+    .dep { font: 32px "Courier New"; }
+    .dep .ref-ch { font-size: 5ch; background: #eee; }
+    .dep .fn-ch { float: footnote; font-size: 5ch; }
+    ::footnote-marker { content: ""; }
+  </style>
+</head>
+<body>
+  <p class="dep">The footnote must have the same font and size as this reference,
+    using the actual width of Courier New's zero at 32px:
+    <span class="ref-ch">ch</span></p>
+  <p class="dep">The footnote of this paragraph is at the page bottom:
+    <span class="fn-ch">ch</span></p>
+</body>
+</html>

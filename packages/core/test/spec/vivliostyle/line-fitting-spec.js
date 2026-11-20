@@ -1,0 +1,186 @@
+/**
+ * Copyright 2026 Vivliostyle Foundation
+ *
+ * Vivliostyle.js is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Vivliostyle.js is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Vivliostyle.js.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+import { Column } from "../../../src/vivliostyle/layout";
+import * as LayoutHelper from "../../../src/vivliostyle/layout-helper";
+import { DefaultClientLayout } from "../../../src/vivliostyle/vgen";
+import * as DomUtil from "../../util/dom";
+
+// Use actual browser rectangles: mocked rectangles do not expose the font
+// extents returned for ordinary inline elements and BR markers (Issue #2163).
+describe("line fitting with inline elements", function () {
+  for (const vertical of [false, true]) {
+    describe(vertical ? "vertical writing" : "horizontal writing", function () {
+      let block, column, clientLayout;
+      beforeEach(function () {
+        const container = DomUtil.getDummyContainer();
+        block = document.createElement("div");
+        block.style.cssText = `font: 20px/16px monospace; margin: 0; word-break: break-all;
+          writing-mode: ${vertical ? "vertical-rl" : "horizontal-tb"};
+          ${vertical ? "height" : "width"}: 121px;`;
+        container.appendChild(block);
+        clientLayout = new DefaultClientLayout({
+          layoutBox: container,
+          window,
+        });
+        column = Object.create(Column.prototype);
+        column.clientLayout = clientLayout;
+        column.vertical = vertical;
+      });
+
+      function positions() {
+        return column.findLinePositions([{ viewNode: block }]);
+      }
+      function edge(node, after = true, inline = true) {
+        let parent = null;
+        const ancestors = [];
+        for (
+          let element = node.parentElement;
+          element;
+          element = element.parentElement
+        ) {
+          ancestors.push(element);
+          if (element === block) break;
+        }
+        for (const element of ancestors.reverse()) {
+          // These source spans remain inline in NodeContext even when an
+          // absolutely positioned annotation is blockified by the browser.
+          parent = {
+            viewNode: element,
+            inline: element.localName === "span",
+            parent,
+          };
+        }
+        return LayoutHelper.calculateEdge(
+          { viewNode: node, inline, after, parent },
+          clientLayout,
+          0,
+          vertical,
+        );
+      }
+      function expectSamePositions(actual, expected) {
+        expect(actual.length).toBe(expected.length);
+        actual.forEach((value, index) =>
+          expect(value).toBeCloseTo(expected[index], 2),
+        );
+      }
+
+      it("keeps line positions when an undecorated span is inserted", function () {
+        block.textContent = "a".repeat(80);
+        const expected = positions();
+        // Default monospace metrics vary by browser and platform. The invariant
+        // is that inserting an undecorated span preserves these wrapped lines.
+        expect(expected.length).toBeGreaterThan(1);
+        block.innerHTML =
+          "a".repeat(10) +
+          "<span>" +
+          "a".repeat(30) +
+          "</span>" +
+          "a".repeat(40);
+        expectSamePositions(positions(), expected);
+        const span = block.querySelector("span");
+        expect(edge(span)).toBeCloseTo(edge(span.firstChild), 2);
+      });
+
+      it("keeps the BR edge with the line it terminates", function () {
+        block.innerHTML = Array(8).fill("a".repeat(10)).join("<br>");
+        for (const br of block.querySelectorAll("br")) {
+          expect(edge(br)).toBeCloseTo(edge(br.previousSibling), 2);
+        }
+      });
+
+      it("ignores absolutely positioned annotations when fitting lines", function () {
+        block.textContent = "a".repeat(80);
+        const expected = positions();
+        block.innerHTML =
+          "a".repeat(10) +
+          '<span style="position: absolute; inset-block-start: -40px; font-size: 40px"><span>annotation</span></span>' +
+          "a".repeat(70);
+        expectSamePositions(positions(), expected);
+        const annotation = block.querySelector("span");
+        expect(edge(annotation)).toBeNaN();
+        expect(edge(annotation.firstChild)).toBeNaN();
+        expect(edge(annotation.firstChild.firstChild)).toBeNaN();
+      });
+
+      it("measures a static-positioned annotation on its source line", function () {
+        block.innerHTML =
+          'first<br><span style="position: absolute; inset-inline-start: -40px; font-size: 40px"><span>02</span></span>second';
+        const annotation = block.querySelector("span");
+        const expected = edge(block.lastChild);
+        expect(edge(annotation)).toBeCloseTo(expected, 2);
+        expect(edge(annotation.firstChild)).toBeCloseTo(expected, 2);
+        expect(edge(annotation.firstChild.firstChild)).toBeCloseTo(expected, 2);
+        expect(Math.abs(expected - edge(block.firstChild))).toBeCloseTo(16, 2);
+      });
+
+      it("measures block-level positioned boxes instead of their inline anchors", function () {
+        block.style.position = "relative";
+        block.innerHTML =
+          '<div style="position:absolute; inset-block-start:20px; width:40px; height:40px">box</div>';
+        const positioned = block.firstChild;
+        const rect = clientLayout.getElementClientRect(positioned);
+        expect(edge(positioned, true, false)).toBe(
+          vertical ? rect.left : rect.bottom,
+        );
+        expect(Number.isFinite(edge(positioned.firstChild))).toBe(true);
+      });
+
+      it("measures block-level floats for page-break selection", function () {
+        block.innerHTML =
+          '<div style="float:left; width:40px; height:40px">float</div>';
+        const floated = block.firstChild;
+        const rect = clientLayout.getElementClientRect(floated);
+        expect(edge(floated, true, false)).toBe(
+          vertical ? rect.left : rect.bottom,
+        );
+        expect(Number.isFinite(edge(floated.firstChild))).toBe(true);
+      });
+
+      it("keeps consecutive BRs on separate lines", function () {
+        block.innerHTML = "aaaaaaaaaa<br><br>aaaaaaaaaa";
+        const breaks = block.querySelectorAll("br");
+        expect(Math.abs(edge(breaks[1]) - edge(breaks[0]))).toBeCloseTo(16, 2);
+        expect(Math.abs(edge(block.lastChild) - edge(breaks[0]))).toBeCloseTo(
+          32,
+          2,
+        );
+      });
+
+      it("preserves the border boxes of decorated inline elements", function () {
+        block.innerHTML =
+          'a<span style="padding-block: 4px 6px; border-block: 2px solid">b</span>c';
+        const span = block.querySelector("span");
+        const expected = clientLayout.getElementClientRects(span)[0];
+        const boxes = column.getRangeBoxes(block, block);
+        expect(boxes).toContain(expected);
+        expect(edge(span)).toBe(vertical ? expected.left : expected.bottom);
+      });
+
+      it("preserves atomic inline and replaced element sizes", function () {
+        block.innerHTML =
+          'a<span style="display: inline-block; width: 40px; height: 40px">b</span><img style="width: 40px; height: 40px">c';
+        for (const element of block.querySelectorAll("span, img")) {
+          const expected = clientLayout.getElementClientRect(element);
+          expect(edge(element)).toBe(
+            vertical ? expected.left : expected.bottom,
+          );
+        }
+      });
+    });
+  }
+});

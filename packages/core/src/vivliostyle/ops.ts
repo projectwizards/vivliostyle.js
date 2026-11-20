@@ -40,6 +40,7 @@ import * as CssValidator from "./css-validator";
 import * as Display from "./display";
 import * as Exprs from "./exprs";
 import * as Font from "./font";
+import { FontMetrics } from "./font-metrics";
 import * as GeometryUtil from "./geometry-util";
 import * as Layout from "./layout";
 import * as LayoutProcessor from "./layout-processor";
@@ -62,6 +63,8 @@ import {
   UserAgentCounterStylesCss,
   UserAgentPageCss,
   UserAgentTocCss,
+  UserAgentXml,
+  UserAgentXmlCss,
 } from "./assets";
 
 /**
@@ -194,7 +197,7 @@ export class Style {
         viewportWidth,
         viewportHeight,
         fontSize,
-        fontSize * Exprs.defaultPreferencesInstance.lineHeight,
+        fontSize * Exprs.fallbackLineHeightRatio,
       );
       const viewportProps = CssCascade.mergeAll(context, this.viewportProps);
       const width = viewportProps["width"] as CssCascade.CascadeValue;
@@ -288,6 +291,24 @@ function restoreFormattingContextStates(
   }
 }
 
+function releaseBreakPositions(
+  context: PageFloats.AttachedPageFloatLayoutContext,
+): void {
+  if ("breakPositions" in context.container) {
+    const column = context.container as LayoutType.Column;
+    column.breakPositions = [];
+    column.nodeContextOverflowingDueToRepetitiveElements = null;
+  }
+  for (const child of context.children) {
+    releaseBreakPositions(child);
+  }
+  for (const fragment of context.floatFragments) {
+    releaseBreakPositions(
+      (fragment.area as Layout.PageFloatArea).pageFloatLayoutContext,
+    );
+  }
+}
+
 type OpenedPageBox = {
   readonly boxContainer: HTMLElement;
   /** Replaced by the column when this box holds the flow itself. */
@@ -315,6 +336,12 @@ export class StyleInstance
   stylerMap: { [key: string]: CssStyler.Styler };
   currentLayoutPosition: Vtree.LayoutPosition | null = null;
   layoutPositionAtPageStart: Vtree.LayoutPosition | null = null;
+  /**
+   * Flow chunks encountered during the layout of the current page, in the
+   * order they were encountered. See restoreLayoutPosition().
+   */
+  private encounteredFlowChunks: Vtree.FlowChunkPosition[] = [];
+  private encounteredFlowChunkCountAtPageStart = 0;
   currentCascadedPageStyle: CssCascade.ElementStyle | null = null;
   lookupOffset: number = 0;
   faces: Font.DocumentFaces;
@@ -363,9 +390,10 @@ export class StyleInstance
       viewport.width,
       viewport.height,
       viewport.fontSize,
-      viewport.fontSize * pref.lineHeight,
+      viewport.fontSize * Exprs.fallbackLineHeightRatio,
     );
     this.lang = xmldoc.lang || defaultLang;
+    this.fontLanguage = this.lang;
     this.faces = new Font.DocumentFaces(this.style.fontDeobfuscator);
     this.rootPageFloatLayoutContext =
       PageFloats.RootPageFloatLayoutContext.createRoot();
@@ -391,6 +419,23 @@ export class StyleInstance
     this.pubTitle = pubTitle;
     this.docTitle = docTitle;
 
+    this.fontMetrics = new FontMetrics(
+      viewport.document,
+      (family) =>
+        this.faces
+          .filterFontFamily(
+            CssParser.parseValue(
+              style.rootScope,
+              new CssTokenizer.Tokenizer(family, null),
+              "",
+            ),
+          )
+          .toString(),
+      viewport.scaleRatio,
+    );
+  }
+
+  private initializeLayout(): void {
     const counterListener = this.counterStore.createCounterListener(
       this.xmldoc.url,
     );
@@ -423,7 +468,7 @@ export class StyleInstance
 
     // Check the spread break at beginning of a document that may cause
     // the first page verso side or cause a blank page (issue #666)
-    if (!this.matchStartPageSide(this.styler.breakBeforeValues[0])) {
+    if (!this.matchStartPageSide(this.styler.breakBeforeValues.get(0))) {
       if (this.pageNumberOffset === 0) {
         this.isVersoFirstPage = true;
       } else {
@@ -536,16 +581,36 @@ export class StyleInstance
     const frame: Task.Frame<StyleInstance> = Task.newFrame(
       "StyleInstance.create",
     );
-    instance.loadFontsAndScripts().then(() => {
-      frame.finish(instance);
+    // Root font metrics determine rem/rex/rcap/rch/ric and page geometry.
+    // Embedded faces must be usable before the styler computes those values.
+    instance.loadFonts().then(() => {
+      instance.initializeLayout();
+      Scripts.loadScriptsInHead(
+        instance.xmldoc.document,
+        instance.viewport.window,
+        instance.styler,
+      ).then((scriptsLoaded) => {
+        if (scriptsLoaded) {
+          // Head scripts may load a font used by root metrics and page
+          // geometry. Refresh only scripted documents after their loaders end.
+          instance.fontMetrics.clearCache();
+          instance.rootFontSize = null;
+          instance.rootFontMetricsReady = false;
+          instance.isRelativeRootFontSize = null;
+          instance.rootLineHeight =
+            instance.initialFontSize * Exprs.fallbackLineHeightRatio;
+          instance.isRootLineHeightFromRelativeCalc = false;
+          instance.pageSheetSize = {};
+          instance.initializeLayout();
+        }
+        frame.finish(instance);
+      });
     });
     return frame.result();
   }
 
-  private loadFontsAndScripts(): Task.Result<boolean> {
-    const frame: Task.Frame<boolean> = Task.newFrame(
-      "StyleInstance.loadFontsAndScripts",
-    );
+  private loadFonts(): Task.Result<boolean> {
+    const frame: Task.Frame<boolean> = Task.newFrame("StyleInstance.loadFonts");
     const srcFaces = [] as Font.Face[];
     for (const fontFace of this.style.fontFaces) {
       if (fontFace.condition && !fontFace.condition.evaluate(this)) {
@@ -555,14 +620,7 @@ export class StyleInstance
       const srcFace = new Font.Face(properties);
       srcFaces.push(srcFace);
     }
-    this.fontMapper.findOrLoadFonts(srcFaces, this.faces).then(() => {
-      // JavaScript in HTML documents support
-      Scripts.loadScriptsInHead(
-        this.xmldoc.document,
-        this.viewport.window,
-        this.styler,
-      ).thenFinish(frame);
-    });
+    this.fontMapper.findOrLoadFonts(srcFaces, this.faces).thenFinish(frame);
     return frame.result();
   }
 
@@ -597,7 +655,7 @@ export class StyleInstance
         this.pageWidth(),
         this.pageHeight(),
         this.initialFontSize,
-        this.initialFontSize * Exprs.defaultPreferencesInstance.lineHeight,
+        this.initialFontSize * Exprs.fallbackLineHeightRatio,
       );
       const counterListener = this.counterStore.createCounterListener(
         xmldoc.url,
@@ -656,7 +714,46 @@ export class StyleInstance
         flowChunk,
       );
       flowPosition.positions.push(flowChunkPosition);
+      this.encounteredFlowChunks.push(flowChunkPosition.clone());
     }
+  }
+
+  /**
+   * Returns a copy of a layout position snapshot to retry the layout from,
+   * with the flow chunks encountered after the snapshot was taken added.
+   *
+   * The styler reports each flow chunk only once, when it styles the element,
+   * and it may style elements far ahead of the current layout position (e.g.
+   * all children of the body when checking repeat-on-break). Without this, a
+   * flow chunk encountered in a layout attempt that is retried from an earlier
+   * snapshot would be lost, and its content would never be laid out.
+   * (Issue #2269)
+   * @param snapshot The layout position to retry the layout from
+   * @param encounteredFlowChunkCount The length of encounteredFlowChunks when
+   *     the snapshot was taken
+   */
+  private restoreLayoutPosition(
+    snapshot: Vtree.LayoutPosition,
+    encounteredFlowChunkCount: number,
+  ): Vtree.LayoutPosition {
+    const cp = snapshot.clone();
+    for (
+      let i = encounteredFlowChunkCount;
+      i < this.encounteredFlowChunks.length;
+      i++
+    ) {
+      const flowChunkPosition = this.encounteredFlowChunks[i];
+      const flowChunk = flowChunkPosition.flowChunk;
+      let flowPosition = cp.flowPositions[flowChunk.flowName];
+      if (!flowPosition) {
+        flowPosition = new Vtree.FlowPosition();
+        cp.flowPositions[flowChunk.flowName] = flowPosition;
+      }
+      if (!flowPosition.positions.some((p) => p.flowChunk === flowChunk)) {
+        flowPosition.positions.push(flowChunkPosition.clone());
+      }
+    }
+    return cp;
   }
 
   override evalSupportsTest(
@@ -718,9 +815,7 @@ export class StyleInstance
     // Issue #2013: target-counter() rerender can evaluate page-number after
     // currentLayoutPosition has been cleared, so fall back to the active
     // render-slot page number captured by OPFView.renderSinglePage().
-    return (
-      this.pageNumberContextStack[this.pageNumberContextStack.length - 1] ?? 0
-    );
+    return this.pageNumberContextStack.at(-1) ?? 0;
   }
 
   getPageNumberContextDepth(): number {
@@ -918,7 +1013,9 @@ export class StyleInstance
       // new in-flow element begins, so recover the containing normal-flow
       // element from the raw offset instead of jumping to the next element.
       const nodeAtOffset = this.xmldoc.getNodeByOffset(pageStartOffset);
-      if (!Vtree.canIgnore(nodeAtOffset)) {
+      // Issue #2172: an offset in whitespace between blocks resolves to the
+      // following start element itself; there is no deferred text to recover.
+      if (nodeAtOffset !== startElement && !Vtree.canIgnore(nodeAtOffset)) {
         let currentElement =
           nodeAtOffset.nodeType === Node.ELEMENT_NODE
             ? (nodeAtOffset as Element)
@@ -1293,6 +1390,17 @@ export class StyleInstance
       {
         acceptNode: (node) => {
           const element = node as Element;
+          // Skip a whole subtree that ends before the offset, so that each
+          // page does not walk all the preceding elements of the document.
+          // Use only an already computed offset of the next sibling:
+          // getElementOffset() would index all the content up to it. A
+          // sibling before the offset has already been styled and indexed.
+          const nextOffset = element.nextElementSibling?.getAttribute(
+            Base.ELEMENT_OFFSET_ATTR,
+          );
+          if (nextOffset && parseInt(nextOffset, 10) <= offset) {
+            return NodeFilter.FILTER_REJECT;
+          }
           if (!this.isNormalFlowElement(element)) {
             return NodeFilter.FILTER_REJECT;
           }
@@ -1558,6 +1666,8 @@ export class StyleInstance
       // update layoutPositionAtPageStart since startSide of FlowChunks may be
       // updated
       this.layoutPositionAtPageStart = cp.clone();
+      this.encounteredFlowChunkCountAtPageStart =
+        this.encounteredFlowChunks.length;
       this.initLingering();
       this.clearScope(this.style.pageScope);
 
@@ -2104,6 +2214,8 @@ export class StyleInstance
         null,
       );
     const positionAtColumnStart = this.currentLayoutPosition.clone();
+    const encounteredFlowChunkCountAtColumnStart =
+      this.encounteredFlowChunks.length;
     const frame: Task.Frame<LayoutType.Column> = Task.newFrame(
       "createAndLayoutColumn",
     );
@@ -2123,20 +2235,23 @@ export class StyleInstance
           let columnBoxHeight: number;
           if (layoutContainer.vertical) {
             const columnY =
-              (layoutContainer.rtl
+              (layoutContainer.getInlineDir() < 0
                 ? columnCount - currentColumnIndex - 1
                 : currentColumnIndex) *
                 (columnWidth + columnGap) +
               layoutContainer.paddingTop;
             const outerWidth = parseFloat(boxContainer.style.width);
             columnLeft =
-              layoutContainer.paddingLeft + outerWidth - layoutContainer.width;
+              layoutContainer.paddingLeft +
+              (layoutContainer.getBoxDir() < 0
+                ? outerWidth - layoutContainer.width
+                : 0);
             columnBoxWidth = layoutContainer.width;
             columnTop = columnY;
             columnBoxHeight = columnWidth;
           } else {
             const columnX =
-              (layoutContainer.rtl
+              (layoutContainer.getInlineDir() < 0
                 ? columnCount - currentColumnIndex - 1
                 : currentColumnIndex) *
                 (columnWidth + columnGap) +
@@ -2156,6 +2271,7 @@ export class StyleInstance
             layoutConstraint,
             columnPageFloatLayoutContext,
             {
+              writingMode: layoutContainer.writingMode,
               vertical: layoutContainer.vertical,
               rtl: layoutContainer.rtl,
               snapWidth: layoutContainer.snapWidth,
@@ -2181,7 +2297,7 @@ export class StyleInstance
               borderBoxSizing: false,
             },
             innerShape,
-            dontApplyExclusions ? [] : exclusions.concat(),
+            dontApplyExclusions ? [] : [...exclusions],
             this.flowRootFormattingContextFor(flowNameStr),
           );
           // Issue #1842: columns after the first treat already-satisfied leading
@@ -2197,7 +2313,7 @@ export class StyleInstance
             columnPageFloatLayoutContext,
             layoutContainer,
             innerShape,
-            dontApplyExclusions ? [] : exclusions.concat(),
+            dontApplyExclusions ? [] : [...exclusions],
             this.flowRootFormattingContextFor(flowNameStr),
           );
           // Single-column layout always behaves like the first column on a page.
@@ -2215,7 +2331,10 @@ export class StyleInstance
               !regionPageFloatLayoutContext.isInvalidated()
             ) {
               column.pageFloatLayoutContext.validate();
-              this.currentLayoutPosition = positionAtColumnStart.clone();
+              this.currentLayoutPosition = this.restoreLayoutPosition(
+                positionAtColumnStart,
+                encounteredFlowChunkCountAtColumnStart,
+              );
               if (column.element !== boxContainer) {
                 boxContainer.removeChild(column.element);
               }
@@ -2235,6 +2354,35 @@ export class StyleInstance
     return frame.result();
   }
 
+  getPagePageFloatLayoutContext(
+    pageMaster: PageMaster.PageMasterInstance,
+    isTocBox: boolean,
+    pageSide: Constants.PageSide,
+  ): PageFloats.UnattachedPageFloatLayoutContext {
+    // Page floats use the page area's resolved axes, including propagation
+    // from body. Keep the page context unchanged for margin box inheritance.
+    let pageAreaBox: PageMaster.PageBoxInstance &
+      PageMaster.PageAreaEstablishing = pageMaster;
+    while (pageAreaBox.pageAreaEstablishingChild) {
+      pageAreaBox = pageAreaBox.pageAreaEstablishingChild;
+    }
+    const direction = isTocBox
+      ? pageMaster.getProp(this, "direction") || Css.ident.ltr
+      : pageAreaBox.rtl
+        ? Css.ident.rtl
+        : Css.ident.ltr;
+    return PageFloats.PageFloatLayoutContext.create(
+      this.rootPageFloatLayoutContext,
+      PageFloats.FloatReference.PAGE,
+      null,
+      null,
+      Css.getName(isTocBox ? "horizontal-tb" : pageAreaBox.writingMode),
+      direction,
+      null,
+      pageSide,
+    );
+  }
+
   getRegionPageFloatLayoutContext(
     pagePageFloatLayoutContext: PageFloats.AttachedPageFloatLayoutContext,
     boxInstance: PageMaster.PageBoxInstance,
@@ -2242,7 +2390,7 @@ export class StyleInstance
     flowName: string,
   ): PageFloats.AttachedPageFloatLayoutContext {
     Asserts.assert(boxInstance instanceof PageMaster.PartitionInstance);
-    const writingMode = boxInstance.getProp(this, "writing-mode") || null;
+    const writingMode = Css.getName(boxInstance.writingMode);
     const direction = boxInstance.getProp(this, "direction") || null;
     return PageFloats.PageFloatLayoutContext.createWithContainer(
       layoutContainer,
@@ -2267,6 +2415,8 @@ export class StyleInstance
     columnCount: number,
   ): Task.Result<LayoutType.Column[] | null> {
     const positionAtContainerStart = this.currentLayoutPosition.clone();
+    const encounteredFlowChunkCountAtContainerStart =
+      this.encounteredFlowChunks.length;
     const regionPageFloatLayoutContext = this.getRegionPageFloatLayoutContext(
       pagePageFloatLayoutContext,
       boxInstance,
@@ -2276,7 +2426,10 @@ export class StyleInstance
     let isFirstTime = true;
 
     const layoutColumns = () => {
-      this.currentLayoutPosition = positionAtContainerStart.clone();
+      this.currentLayoutPosition = this.restoreLayoutPosition(
+        positionAtContainerStart,
+        encounteredFlowChunkCountAtContainerStart,
+      );
       return this.layoutFlowColumns(
         page,
         boxInstance,
@@ -2357,6 +2510,8 @@ export class StyleInstance
     const frame: Task.Frame<LayoutType.Column[] | null> =
       Task.newFrame("layoutFlowColumns");
     const positionAtContainerStart = this.currentLayoutPosition.clone();
+    const encounteredFlowChunkCountAtContainerStart =
+      this.encounteredFlowChunks.length;
     // Save formatting context states so they can be restored on region-level
     // retry (e.g., when footnotes invalidate the page float context).
     // LayoutPosition.clone() shares formatting context objects by reference
@@ -2441,7 +2596,10 @@ export class StyleInstance
           }
           if (regionPageFloatLayoutContext.isInvalidated()) {
             columnIndex = 0;
-            this.currentLayoutPosition = positionAtContainerStart.clone();
+            this.currentLayoutPosition = this.restoreLayoutPosition(
+              positionAtContainerStart,
+              encounteredFlowChunkCountAtContainerStart,
+            );
             // Restore formatting context states on region-level retry
             // (Issue #1663)
             restoreFormattingContextStates(savedRegionFCStates);
@@ -2518,6 +2676,7 @@ export class StyleInstance
     }
 
     const container = new Vtree.Container(boxContainer);
+    container.writingMode = boxInstance.writingMode;
     container.vertical = boxInstance.vertical;
     container.rtl = boxInstance.rtl;
     container.borderBoxSizing = boxInstance.borderBoxSizing;
@@ -2706,9 +2865,8 @@ export class StyleInstance
           if (column.element === boxContainer) {
             opened.container = column;
           }
-          opened.container.computedBlockSize = Math.max.apply(
-            null,
-            columns.map((c) => c.computedBlockSize),
+          opened.container.computedBlockSize = Math.max(
+            ...columns.map((c) => c.computedBlockSize),
           );
           boxInstance.finishContainer(
             this,
@@ -3017,14 +3175,51 @@ export class StyleInstance
     }
   }
 
-  noMorePrimaryFlows(cp: Vtree.LayoutPosition): boolean {
-    for (const flowName in this.primaryFlows) {
-      const flowPosition = cp.flowPositions[flowName];
-      if (flowPosition && flowPosition.positions.length > 0) {
+  /**
+   * Returns if the primary flows have no more content to lay out.
+   * @param checkRootFlowChunk If true, the flow chunk of the root element is
+   *     not counted when it has no content of its own, which may style the
+   *     rest of the document to find out. Otherwise it is always counted.
+   */
+  noMorePrimaryFlows(
+    cp: Vtree.LayoutPosition,
+    checkRootFlowChunk?: boolean,
+  ): boolean {
+    let remaining = this.remainingPrimaryFlowChunks(cp);
+    if (remaining === "root") {
+      // A root element whose content was all moved into other flows has
+      // nothing left to lay out, so it must not generate a page of its own.
+      // (Issue #434)
+      if (!checkRootFlowChunk || this.styler.rootFlowChunkHasContent()) {
         return false;
       }
+      // Styling ahead to find that out may have encountered more flow chunks.
+      remaining = this.remainingPrimaryFlowChunks(cp);
     }
-    return true;
+    return remaining !== "other";
+  }
+
+  /**
+   * Returns what remains in the primary flows: nothing ("none"), only the flow
+   * chunk of the root element ("root"), or another flow chunk ("other").
+   */
+  private remainingPrimaryFlowChunks(
+    cp: Vtree.LayoutPosition,
+  ): "none" | "root" | "other" {
+    let remaining: "none" | "root" = "none";
+    for (const flowName in this.primaryFlows) {
+      const flowPosition = cp.flowPositions[flowName];
+      if (!flowPosition) {
+        continue;
+      }
+      for (const position of flowPosition.positions) {
+        if (position.flowChunk.element !== this.styler.root) {
+          return "other";
+        }
+        remaining = "root";
+      }
+    }
+    return remaining;
   }
 
   private hasSameFlowPositions(
@@ -3153,6 +3348,8 @@ export class StyleInstance
 
     this.clearScope(this.style.pageScope);
     this.layoutPositionAtPageStart = cp.clone();
+    this.encounteredFlowChunks = [];
+    this.encounteredFlowChunkCountAtPageStart = 0;
     // Save formatting context states at the beginning of page layout for
     // restoration when page-level retry occurs (Issue #1663).
     // Formatting contexts (e.g., TableFormattingContext with cellBreakPositions)
@@ -3259,23 +3456,15 @@ export class StyleInstance
         evaluatedPageSizeAndBleed.bleedOffset + evaluatedPageSizeAndBleed.bleed;
     }
 
-    const writingMode =
-      (!isTocBox && pageMaster.getProp(this, "writing-mode")) ||
-      Css.ident.horizontal_tb;
-
-    this.pageVertical = writingMode != Css.ident.horizontal_tb;
-
-    const direction = pageMaster.getProp(this, "direction") || Css.ident.ltr;
-    const pageFloatLayoutContext = PageFloats.PageFloatLayoutContext.create(
-      this.rootPageFloatLayoutContext,
-      PageFloats.FloatReference.PAGE,
-      null,
-      null,
-      writingMode,
-      direction,
-      null,
+    const pageFloatLayoutContext = this.getPagePageFloatLayoutContext(
+      pageMaster,
+      isTocBox,
       page.side,
     );
+    // Logical viewport units follow the used page-area mode, including body
+    // propagation. The page master's computed mode still governs inheritance.
+    this.pageVertical =
+      pageFloatLayoutContext.writingMode !== Css.ident.horizontal_tb;
     const frame: Task.Frame<Vtree.LayoutPosition | null> =
       Task.newFrame("layoutNextPage");
     let attachedPageFloatLayoutContext: PageFloats.AttachedPageFloatLayoutContext | null =
@@ -3297,7 +3486,10 @@ export class StyleInstance
             attached.finish();
           }
           if (pageFloatLayoutContext.isInvalidated()) {
-            this.currentLayoutPosition = this.layoutPositionAtPageStart.clone();
+            this.currentLayoutPosition = this.restoreLayoutPosition(
+              this.layoutPositionAtPageStart,
+              this.encounteredFlowChunkCountAtPageStart,
+            );
             // Restore formatting context states on page-level retry
             // (Issue #1663)
             restoreFormattingContextStates(savedPageFCStates);
@@ -3330,14 +3522,19 @@ export class StyleInstance
             }
           });
         }
+        // Check this while cp is still the current layout position: the check
+        // may style the rest of the document, and the flow chunks found there
+        // must be added to cp.
+        const noMorePrimaryFlows = this.noMorePrimaryFlows(cp, true);
         this.currentLayoutPosition = this.layoutPositionAtPageStart = null;
+        this.encounteredFlowChunks = [];
         cp.highestSeenOffset = this.styler.getReachedOffset();
         const triggers = this.style.store.getTriggersForDoc(this.xmldoc);
         page.finish(triggers, this.clientLayout);
-        if (
-          this.noMorePrimaryFlows(cp) &&
-          !this.hasActiveRootPageFloatLayoutContext()
-        ) {
+        if (attachedPageFloatLayoutContext) {
+          releaseBreakPositions(attachedPageFloatLayoutContext);
+        }
+        if (noMorePrimaryFlows && !this.hasActiveRootPageFloatLayoutContext()) {
           cp = null;
         }
         frame.finish(cp);
@@ -3652,7 +3849,6 @@ export type StyleSheetParam =
 
 export type StyleSource = StyleSheetParam & {
   flavor: CssParser.StylesheetFlavor;
-  classes: string | null;
   media: string | null;
 };
 
@@ -3664,12 +3860,12 @@ function toStyleSource(
     const url = stylesheet.url
       ? Base.resolveURL(Base.convertSpecialURL(stylesheet.url), Base.baseURL)
       : stylesheet.url;
-    return { url, text: stylesheet.text, flavor, classes: null, media: null };
+    return { url, text: stylesheet.text, flavor, media: null };
   }
   const url = stylesheet.url
     ? Base.resolveURL(Base.convertSpecialURL(stylesheet.url), Base.baseURL)
     : stylesheet.url;
-  return { url, flavor, classes: null, media: null };
+  return { url, flavor, media: null };
 }
 
 export function parseOPSResource(
@@ -3686,6 +3882,10 @@ export class OPSDocStore extends Net.ResourceStore<XmlDoc.XMLDocHolder> {
   triggersByDocURL: { [key: string]: Vtree.Trigger[] } = {};
   validatorSet: CssValidator.ValidatorSet = CssValidator.baseValidatorSet();
   private styleSheets: StyleSource[] = [];
+  private publicationStyleSheets: StyleSource[] = [];
+  private publicationStyleSheetDocURLs: Set<string> = new Set();
+  private docByURL: { [url: string]: XmlDoc.XMLDocHolder } = {};
+  private requestedURLByDocURL: { [url: string]: string } = {};
   protected triggerSingleDocumentPreprocessing: boolean = false;
 
   protected constructor(
@@ -3700,6 +3900,45 @@ export class OPSDocStore extends Net.ResourceStore<XmlDoc.XMLDocHolder> {
 
   getStyleForDoc(xmldoc: XmlDoc.XMLDocHolder): Style {
     return this.styleByDocURL[xmldoc.url];
+  }
+
+  /**
+   * The built-in user-agent.xml is created from the embedded source instead
+   * of being fetched and processed as a document.
+   */
+  protected override fetchInner(
+    url: string,
+    opt_required?: boolean,
+    opt_message?: string,
+  ): Task.Result<XmlDoc.XMLDocHolder | null> {
+    if (url !== Base.userAgentXmlURL) {
+      return super.fetchInner(url, opt_required, opt_message);
+    }
+    const frame: Task.Frame<XmlDoc.XMLDocHolder | null> =
+      Task.newFrame("loadUserAgentXml");
+    // Only the style sheet for the templates applies to user-agent.xml.
+    this.loadStyle(
+      [
+        {
+          url,
+          text: UserAgentXmlCss,
+          flavor: CssParser.StylesheetFlavor.USER_AGENT,
+          media: null,
+        },
+      ],
+      url,
+    ).then((style) => {
+      const document = new DOMParser().parseFromString(
+        UserAgentXml,
+        "application/xml",
+      );
+      const xmldoc = new XmlDoc.XMLDocHolder(this, url, document);
+      this.styleByDocURL[url] = style;
+      delete this.fetchers[url];
+      this.resources[url] = xmldoc;
+      frame.finish(xmldoc);
+    });
+    return frame.result();
   }
 
   getTriggersForDoc(xmldoc: XmlDoc.XMLDocHolder): Vtree.Trigger[] {
@@ -3739,15 +3978,65 @@ export class OPSDocStore extends Net.ResourceStore<XmlDoc.XMLDocHolder> {
     );
   }
 
+  /**
+   * Set the stylesheets that apply to the documents of a publication, such as
+   * the resources with `"rel": "stylesheet"` in a publication manifest.
+   * They are applied to the documents at `docURLs` as if `<link
+   * rel="stylesheet">` elements were appended after the author style sheets
+   * of each document, so that they can customize the documents. The styles
+   * of the documents already loaded are recomputed.
+   */
+  setPublicationStyleSheets(
+    styleSheets: StyleSheetParam[],
+    docURLs: string[],
+  ): Task.Result<boolean> {
+    this.publicationStyleSheets = styleSheets.map((stylesheet) =>
+      toStyleSource(stylesheet, CssParser.StylesheetFlavor.AUTHOR),
+    );
+    this.publicationStyleSheetDocURLs = new Set(
+      docURLs.map((url) => Base.stripFragment(url)),
+    );
+    const loadedDocURLs = Object.keys(this.docByURL).filter((url) =>
+      this.isPublicationStyleSheetDoc(url),
+    );
+    const frame: Task.Frame<boolean> = Task.newFrame(
+      "setPublicationStyleSheets",
+    );
+    let index = 0;
+    frame
+      .loop(() => {
+        if (index >= loadedDocURLs.length) {
+          return Task.newResult(false);
+        }
+        const url = loadedDocURLs[index++];
+        return this.loadStyleForDoc(this.docByURL[url], url).thenReturn(true);
+      })
+      .then(() => {
+        frame.finish(true);
+      });
+    return frame.result();
+  }
+
+  /**
+   * Whether the publication style sheets apply to the document at `url`. A
+   * document loaded through a redirect is matched by its requested URL too.
+   */
+  private isPublicationStyleSheetDoc(url: string): boolean {
+    const docURL = Base.stripFragment(url);
+    const requestedURL = this.requestedURLByDocURL[docURL];
+    return (
+      this.publicationStyleSheetDocURLs.has(docURL) ||
+      (!!requestedURL &&
+        this.publicationStyleSheetDocURLs.has(Base.stripFragment(requestedURL)))
+    );
+  }
+
   parseOPSResource(
     response: Net.FetchResponse,
   ): Task.Result<XmlDoc.XMLDocHolder | null> {
     const frame: Task.Frame<XmlDoc.XMLDocHolder | null> =
       Task.newFrame("OPSDocStore.load");
     const url = response.url;
-
-    // Hack for TOCView.showTOC()
-    const isTocBox = Base.isTocBoxURL(url);
 
     XmlDoc.parseXMLResource(response, this).then(
       (xmldoc: XmlDoc.XMLDocHolder | null) => {
@@ -3785,172 +4074,220 @@ export class OPSDocStore extends Net.ResourceStore<XmlDoc.XMLDocHolder> {
           }
         }
         this.triggersByDocURL[url] = triggers;
-        const sources = [] as StyleSource[];
-        sources.push({
-          url: Base.resolveURL("user-agent-base.css", Base.resourceBaseURL),
-          text: UserAgentBaseCss,
-          flavor: CssParser.StylesheetFlavor.USER_AGENT,
-          classes: null,
-          media: null,
-        });
-        sources.push({
-          url: Base.resolveURL("user-agent-page.css", Base.resourceBaseURL),
-          text: UserAgentPageCss,
-          flavor: CssParser.StylesheetFlavor.USER_AGENT,
-          classes: null,
-          media: null,
-        });
-        sources.push({
-          url: Base.resolveURL(
-            "user-agent-counter-styles.css",
-            Base.resourceBaseURL,
-          ),
-          text: UserAgentCounterStylesCss,
-          flavor: CssParser.StylesheetFlavor.USER_AGENT,
-          classes: null,
-          media: null,
-        });
-        if (isTocBox) {
-          sources.push({
-            url: Base.resolveURL("user-agent-toc.css", Base.resourceBaseURL),
-            text: UserAgentTocCss,
-            flavor: CssParser.StylesheetFlavor.USER_AGENT,
-            classes: null,
-            media: null,
-          });
-        } else {
-          const elemList =
-            xmldoc.document.querySelectorAll("style, link, meta");
-          for (const elem of elemList) {
-            const ns = elem.namespaceURI;
-            const localName = elem.localName;
-            if (ns == Base.NS.XHTML) {
-              if (localName == "style") {
-                const classes = elem.getAttribute("class");
-                const media = elem.getAttribute("media");
-                const title = elem.getAttribute("title");
-                sources.push({
-                  url,
-                  text: elem.textContent,
-                  flavor: CssParser.StylesheetFlavor.AUTHOR,
-                  classes: title ? classes : null,
-                  media,
-                });
-              } else if (localName == "link") {
-                const href = elem.getAttribute("href");
-                const rel = elem.getAttribute("rel")?.split(/\s+/);
-                const classes = elem.getAttribute("class");
-                const media = elem.getAttribute("media");
-                if (
-                  href &&
-                  rel?.includes("stylesheet") &&
-                  (!rel.includes("alternate") || classes)
-                ) {
-                  const src = Base.resolveURL(href, url);
-                  const title = elem.getAttribute("title");
-                  sources.push({
-                    url: src,
-                    text: null,
-                    classes: title ? classes : null,
-                    media,
-                    flavor: CssParser.StylesheetFlavor.AUTHOR,
-                  });
-                }
-              } else if (
-                localName == "meta" &&
-                elem.getAttribute("name") == "viewport"
-              ) {
-                sources.push({
-                  url,
-                  text: this.processViewportMeta(elem),
-                  flavor: CssParser.StylesheetFlavor.AUTHOR,
-                  classes: null,
-                  media: null,
-                });
-              }
-            }
-          }
-          for (let i = 0; i < this.styleSheets.length; i++) {
-            sources.push(this.styleSheets[i]);
+        if (!Base.isTocBoxURL(url)) {
+          this.docByURL[url] = xmldoc;
+          if (response.requestedURL && response.requestedURL !== url) {
+            this.requestedURLByDocURL[url] = response.requestedURL;
           }
         }
-        let key = "";
-        for (let i = 0; i < sources.length; i++) {
-          key += sources[i].url;
-          key += "^";
-          if (sources[i].text) {
-            key += sources[i].text;
-          }
-          key += "^";
-        }
-        let style = this.styleByKey[key];
-        if (style) {
-          this.styleByDocURL[url] = style;
-          frame.finish(xmldoc);
-          return;
-        }
-        let fetcher = this.styleFetcherByKey[key];
-        if (!fetcher) {
-          fetcher = new TaskUtil.Fetcher(() => {
-            const innerFrame: Task.Frame<Style> =
-              Task.newFrame("fetchStylesheet");
-            let index = 0;
-            const sph = new StyleParserHandler(this.validatorSet);
-            innerFrame
-              .loop(() => {
-                if (index < sources.length) {
-                  const source = sources[index++];
-                  sph.startStylesheet(source.flavor);
-                  if (source.text != null) {
-                    return CssParser.parseStylesheetFromText(
-                      source.text,
-                      sph,
-                      source.url,
-                      source.classes,
-                      source.media,
-                    ).thenReturn(true);
-                  } else {
-                    return CssParser.parseStylesheetFromURL(
-                      source.url,
-                      sph,
-                      source.classes,
-                      source.media,
-                    );
-                  }
-                }
-                return Task.newResult(false);
-              })
-              .then(() => {
-                const cascade = sph.cascadeParserHandler.finish();
-                style = new Style(
-                  this,
-                  sph.rootScope,
-                  sph.pageScope,
-                  cascade,
-                  sph.rootBox,
-                  sortFontFaces(sph.fontFaces),
-                  sph.footnoteProps,
-                  sph.flowProps,
-                  sph.viewportProps,
-                  sph.pageProps,
-                  sph.counterStyles,
-                );
-                this.styleByKey[key] = style;
-                delete this.styleFetcherByKey[key];
-                innerFrame.finish(style);
-              });
-            return innerFrame.result();
-          }, `FetchStylesheet ${url}`);
-          this.styleFetcherByKey[key] = fetcher;
-          fetcher.start();
-        }
-        fetcher.get().then((style) => {
-          this.styleByDocURL[url] = style;
+        this.loadStyleForDoc(xmldoc, url).then(() => {
           frame.finish(xmldoc);
         });
       },
     );
     return frame.result();
+  }
+
+  /**
+   * Compute the style of the document from the user agent style sheets, the
+   * author style sheets referenced from the document, the publication style
+   * sheets, and the author and user style sheets given to the store.
+   */
+  private loadStyleForDoc(
+    xmldoc: XmlDoc.XMLDocHolder,
+    url: string,
+  ): Task.Result<boolean> {
+    const frame: Task.Frame<boolean> = Task.newFrame("loadStyleForDoc");
+
+    // Hack for TOCView.showTOC()
+    const isTocBox = Base.isTocBoxURL(url);
+
+    const sources = [] as StyleSource[];
+    sources.push({
+      url: `${Base.builtinResourceBaseURL}user-agent-base.css`,
+      text: UserAgentBaseCss,
+      flavor: CssParser.StylesheetFlavor.USER_AGENT,
+      media: null,
+    });
+    sources.push({
+      url: `${Base.builtinResourceBaseURL}user-agent-page.css`,
+      text: UserAgentPageCss,
+      flavor: CssParser.StylesheetFlavor.USER_AGENT,
+      media: null,
+    });
+    sources.push({
+      url: `${Base.builtinResourceBaseURL}user-agent-counter-styles.css`,
+      text: UserAgentCounterStylesCss,
+      flavor: CssParser.StylesheetFlavor.USER_AGENT,
+      media: null,
+    });
+    if (isTocBox) {
+      sources.push({
+        url: `${Base.builtinResourceBaseURL}user-agent-toc.css`,
+        text: UserAgentTocCss,
+        flavor: CssParser.StylesheetFlavor.USER_AGENT,
+        media: null,
+      });
+    } else {
+      // Author style sheets referenced from the document
+      const docSources = [] as StyleSource[];
+      // URLs of the style sheets linked from the document, including
+      // alternate style sheets
+      const linkedStyleSheetURLs = new Set<string>();
+      const elemList = xmldoc.document.querySelectorAll("style, link, meta");
+      for (const elem of elemList) {
+        const ns = elem.namespaceURI;
+        const localName = elem.localName;
+        if (ns == Base.NS.XHTML) {
+          if (localName == "style") {
+            const media = elem.getAttribute("media");
+            docSources.push({
+              url,
+              text: elem.textContent,
+              flavor: CssParser.StylesheetFlavor.AUTHOR,
+              media,
+            });
+          } else if (localName == "link") {
+            const href = elem.getAttribute("href");
+            // Link types are ASCII case-insensitive
+            const rel = elem
+              .getAttribute("rel")
+              ?.trim()
+              .toLowerCase()
+              .split(/\s+/);
+            const media = elem.getAttribute("media");
+            if (href && rel?.includes("stylesheet")) {
+              linkedStyleSheetURLs.add(Base.resolveURL(href, url));
+            }
+            if (
+              href &&
+              rel?.includes("stylesheet") &&
+              !rel.includes("alternate")
+            ) {
+              const src = Base.resolveURL(href, url);
+              docSources.push({
+                url: src,
+                text: null,
+                media,
+                flavor: CssParser.StylesheetFlavor.AUTHOR,
+              });
+            }
+          } else if (
+            localName == "meta" &&
+            elem.getAttribute("name") == "viewport"
+          ) {
+            docSources.push({
+              url,
+              text: this.processViewportMeta(elem),
+              flavor: CssParser.StylesheetFlavor.AUTHOR,
+              media: null,
+            });
+          }
+        }
+      }
+      sources.push(...docSources);
+      // Publication style sheets come after the author style sheets of the
+      // document so that they can customize it. A style sheet that the
+      // document itself links (even as an alternate style sheet) is skipped:
+      // the manifest then just lists the resources of the publication, and
+      // the document's link is kept as is.
+      if (this.isPublicationStyleSheetDoc(url)) {
+        for (const styleSheet of this.publicationStyleSheets) {
+          if (!linkedStyleSheetURLs.has(styleSheet.url)) {
+            sources.push(styleSheet);
+          }
+        }
+      }
+      for (let i = 0; i < this.styleSheets.length; i++) {
+        sources.push(this.styleSheets[i]);
+      }
+    }
+    this.loadStyle(sources, url).then((style) => {
+      this.styleByDocURL[url] = style;
+      frame.finish(true);
+    });
+    return frame.result();
+  }
+
+  /**
+   * Compute the style from the style sheets. Styles are cached by their
+   * sources.
+   */
+  private loadStyle(sources: StyleSource[], name: string): Task.Result<Style> {
+    let key = "";
+    for (let i = 0; i < sources.length; i++) {
+      key += sources[i].url;
+      key += "^";
+      // The text of a built-in style sheet is identified by its URL.
+      if (
+        sources[i].text &&
+        !sources[i].url?.startsWith(Base.builtinResourceBaseURL)
+      ) {
+        key += sources[i].text;
+      }
+      key += "^";
+      if (sources[i].media) {
+        key += sources[i].media;
+      }
+      key += "^";
+    }
+    const style = this.styleByKey[key];
+    if (style) {
+      return Task.newResult(style);
+    }
+    let fetcher = this.styleFetcherByKey[key];
+    if (!fetcher) {
+      fetcher = new TaskUtil.Fetcher(() => {
+        const innerFrame: Task.Frame<Style> = Task.newFrame("fetchStylesheet");
+        let index = 0;
+        const sph = new StyleParserHandler(this.validatorSet);
+        innerFrame
+          .loop(() => {
+            if (index < sources.length) {
+              const source = sources[index++];
+              sph.startStylesheet(source.flavor);
+              if (source.text != null) {
+                return CssParser.parseStylesheetFromText(
+                  source.text,
+                  sph,
+                  source.url,
+                  source.media,
+                ).thenReturn(true);
+              } else {
+                return CssParser.parseStylesheetFromURL(
+                  source.url,
+                  sph,
+                  source.media,
+                );
+              }
+            }
+            return Task.newResult(false);
+          })
+          .then(() => {
+            const cascade = sph.cascadeParserHandler.finish();
+            const style = new Style(
+              this,
+              sph.rootScope,
+              sph.pageScope,
+              cascade,
+              sph.rootBox,
+              sortFontFaces(sph.fontFaces),
+              sph.footnoteProps,
+              sph.flowProps,
+              sph.viewportProps,
+              sph.pageProps,
+              sph.counterStyles,
+            );
+            this.styleByKey[key] = style;
+            delete this.styleFetcherByKey[key];
+            innerFrame.finish(style);
+          });
+        return innerFrame.result();
+      }, `FetchStylesheet ${name}`);
+      this.styleFetcherByKey[key] = fetcher;
+      fetcher.start();
+    }
+    return fetcher.get();
   }
 
   processViewportMeta(meta: Element): string {

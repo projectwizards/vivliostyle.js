@@ -42,6 +42,50 @@ describe("css-page", function () {
       expect(resolved).toEqual(expected);
     });
 
+    it("uses default dimensions when a second size component remains unevaluated", function () {
+      var resolved = module.resolvePageSizeAndBleed({
+        size: new adapt_csscasc.CascadeValue(
+          new adapt_css.SpaceList([
+            new adapt_css.Numeric(300, "px"),
+            new adapt_css.Func("max", [new adapt_css.Numeric(500, "px")]),
+          ]),
+          0,
+        ),
+      });
+      expect(resolved).toEqual(expected);
+    });
+
+    it("discards browser-only viewport units introduced after variable substitution", function () {
+      for (const unit of ["svw", "lvh", "dvi", "dvmax"]) {
+        const declaration = new adapt_csscasc.CascadeValue(
+          new adapt_css.Numeric(1, unit),
+          0,
+        );
+        const resolved = module.resolvePageSizeAndBleed({
+          size: declaration,
+          bleed: declaration,
+          "crop-offset": declaration,
+        });
+        expect(resolved).withContext(unit).toEqual(expected);
+        const context = new adapt_exprs.Context(
+          new adapt_exprs.LexicalScope(null),
+          800,
+          600,
+          16,
+          20,
+        );
+        expect(module.evaluatePageSizeAndBleed(resolved, context))
+          .withContext(unit)
+          .toEqual({
+            pageWidth: 800,
+            pageHeight: 600,
+            bleed: 0,
+            bleedOffset: 0,
+            cropOffset: 0,
+          });
+      }
+    });
+
     it("has fullWidth and fullHeight when size=auto", function () {
       var resolved = module.resolvePageSizeAndBleed({
         size: new adapt_csscasc.CascadeValue(adapt_css.ident.auto, 0),

@@ -26,7 +26,7 @@ In addition, essentially all CSS properties and values supported by the browser 
   - Supports `string`, `raw-string`, `url`, `number`, and unit types, as well as `type(<...>)` syntax for supported CSS value types. See [PR #1975](https://github.com/vivliostyle/vivliostyle.js/pull/1975)
   - Type and unit values are validated against the property where `attr()` is used.
 - [Cross references: `target-counter()`, `target-counters()` and `target-text()`](https://www.w3.org/TR/css-content-3/#cross-references)
-  - Only supported in values of `content` property.
+  - Only supported in values of `content` and `bookmark-label` properties.
 - [`string()` function (Named Strings)](https://www.w3.org/TR/css-content-3/#string-function)
 - [`content()` function](https://www.w3.org/TR/css-content-3/#content-function)
 - [`running()` function (Running Elements)](https://www.w3.org/TR/css-gcpm-3/#running-syntax)
@@ -361,6 +361,14 @@ See also:
 - [At-rules in CSS Generated Content for Paged Media (GCPM) 3](#css-generated-content-for-paged-media-gcpm-3)
 - [Values - Cross references, string(), content(), running(), element(), and leader() functions](#values)
 
+### [CSS Generated Content 3](https://www.w3.org/TR/css-content-3/)
+
+- [bookmark-level, bookmark-label, bookmark-state (Bookmarks)](https://www.w3.org/TR/css-content-3/#bookmark-generation)
+  - The bookmarks generate the table of contents shown in the TOC box of the viewer and returned by `getTOC()`, which Vivliostyle CLI uses for PDF bookmarks. See [PR #2258](https://github.com/vivliostyle/vivliostyle.js/pull/2258)
+  - A navigation document specified in the EPUB package document or in the publication manifest takes precedence over the CSS bookmarks.
+  - `bookmark-state` sets whether the entry is initially expanded in the TOC box, and is returned as the `state` of the entry by `getTOC()`.
+  - Note: Bookmarks on `::before` and `::after` pseudo-elements are not supported. In `bookmark-label`, a cross reference to a target that has not been laid out yet is shown as `??`.
+
 ### [CSS Fragmentation 3](https://www.w3.org/TR/css-break-3/)
 
 - [break-after](https://www.w3.org/TR/css-break-3/#propdef-break-after)
@@ -379,12 +387,12 @@ See also:
 ### [CSS Page Floats](https://drafts.csswg.org/css-page-floats/)
 
 - [clear](https://drafts.csswg.org/css-page-floats/#propdef-clear)
-  - Supports [`none`, `inline-start`, `inline-end`, `block-start`, `block-end`, `left`, `right`, `top`, `bottom`, `both`, `all`, `same`](https://drafts.csswg.org/css-page-floats/#propdef-clear) values.
+  - Supports `none`, `inline-start`, `inline-end`, `block-start`, `block-end`, `left`, `right`, `top`, `bottom`, `both`, `all`, `same`, `page`, `column`, and `region` values.
   - When `all` is specified on a block-level box (not a page float), the block-start edge of the box gets pushed down so that the edge comes after any block-start/block-end page float of which anchors are before the box in the document order.
   - When a `clear` value is specified on a page float, it is placed so that it comes after any of preceding page floats.
   - `same` value means the same direction as one which the page float is floated to.
   - If a page float with `float: snap-block` would be placed at the block-start end but a `clear` value on it forbidden such placement, the float is instead placed at the block-end side (unless the `clear` value also forbidden such placement).
-  - The `page`, `column`, and `region` values ensure that preceding page floats are placed before the page/column/region containing the element that has the `clear` property, which can be a page float, a normal float, or a block-level box.
+  - The `page`, `column`, and `region` values ensure that preceding page floats are placed before the page/column/region containing the element that has the `clear` property, which can be a page float, a normal float, or a block-level box. These values are supported as extensions to the current CSS Page Floats draft. See [Issue #1551](https://github.com/vivliostyle/vivliostyle.js/issues/1551).
 - [float](https://drafts.csswg.org/css-page-floats/#propdef-float)
   - Supports [`block-start`, `block-end`, `inline-start`, `inline-end`, `snap-block`, `left`, `right`, `top`, `bottom` and `none`](https://drafts.csswg.org/css-page-floats/#propdef-float) values.
   - Supports values combining keywords. For example,
@@ -499,8 +507,13 @@ See also: [At-rules in CSS Fonts 3](#css-fonts-3)
 
 - [text-autospace](https://www.w3.org/TR/css-text-4/#text-autospace-property)
   - Supported values: `normal | no-autospace | [ ideograph-alpha || ideograph-numeric ] | auto`
+  - The browser's native `text-autospace` is used for the text within an element where the browser supports the value. Otherwise, and at element boundaries, where browsers behave differently, Vivliostyle's own implementation is used. At element boundaries, the spacing is determined by the innermost element containing the boundary, as defined in CSS Text 4. See [Issue #2151](https://github.com/vivliostyle/vivliostyle.js/issues/2151).
+  - In SVG, the browser's default values of `text-autospace` and `text-spacing-trim` apply.
 - [text-spacing-trim](https://www.w3.org/TR/css-text-4/#text-spacing-trim-property)
-  - Values: `space-all | normal | space-first | trim-start | trim-both | auto`
+  - Values: `space-all | normal | space-first | trim-start | trim-both | trim-all | auto`
+  - The browser's native `text-spacing-trim` is used where the browser supports it (currently Chromium) and the fonts used can trim all the punctuation in the inline formatting context. Vivliostyle's own implementation is used together with it for the behavior the browser does not provide, such as setting fullwidth closing punctuation half-width at the end of a line for `trim-both`, and `hanging-punctuation`. Otherwise, Vivliostyle's own implementation is used throughout the inline formatting context. See [Issue #2151](https://github.com/vivliostyle/vivliostyle.js/issues/2151).
+  - `trim-all` is always processed by Vivliostyle's own implementation, since browsers do not support it. Fullwidth colon punctuation (`：；`) is treated as fullwidth middle dot punctuation except in Simplified Chinese, and fullwidth dot punctuation (`、。，．`) only in Traditional Chinese. See [Issue #2214](https://github.com/vivliostyle/vivliostyle.js/issues/2214).
+  - In vertical text, Vivliostyle's own implementation does not trim the fullwidth colon punctuation other than the fullwidth colon (`：`) in Japanese, since it is usually not rotated, unless the text is set sideways (e.g., `text-orientation: sideways`).
 - [text-spacing](https://www.w3.org/TR/css-text-4/#text-spacing-property)
   - Values: `normal | none | auto | [<autospace> || <spacing-trim>]`
   - Note: This is a shorthand property that sets the `text-autospace` and `text-spacing-trim` properties. See [PR #1142](https://github.com/vivliostyle/vivliostyle.js/pull/1142)
@@ -511,6 +524,7 @@ See also: [At-rules in CSS Fonts 3](#css-fonts-3)
 - [text-decoration-line](https://www.w3.org/TR/css-text-decor-3/#text-decoration-line-property)
 - [text-decoration-style](https://www.w3.org/TR/css-text-decor-3/#text-decoration-style-property)
 - [text-emphasis](https://www.w3.org/TR/css-text-decor-3/#text-emphasis-property)
+  - In Chromium, excess block-start leading can be reduced on the first line of a page or root column, under the same first-line, border and formatting-context conditions as [ruby](#css-ruby-layout-1). The target block must also have zero block-start margin and padding, and the emphasized text must have a numeric computed `line-height` rather than `normal`. Firefox and WebKit retain their native emphasis layout. In WebKit, emphasis can increase line spacing within a paragraph; this remains a limitation. End-side emphasis can also leave fewer lines in a page or column. See [Issue #1604](https://github.com/vivliostyle/vivliostyle.js/issues/1604).
 - [text-emphasis-color](https://www.w3.org/TR/css-text-decor-3/#text-emphasis-color-property)
 - [text-emphasis-position](https://www.w3.org/TR/css-text-decor-3/#text-emphasis-position-property)
 - [text-emphasis-style](https://www.w3.org/TR/css-text-decor-3/#text-emphasis-style-property)
@@ -564,7 +578,8 @@ Vivliostyle supports CSS multi-column layout, but the behavior differs depending
 - [text-combine-upright](https://www.w3.org/TR/css-writing-modes-3/#propdef-text-combine-upright)
 - [text-orientation](https://www.w3.org/TR/css-writing-modes-3/#propdef-text-orientation)
 - [unicode-bidi](https://www.w3.org/TR/css-writing-modes-3/#propdef-unicode-bidi)
-- [writing-mode](https://www.w3.org/TR/css-writing-modes-3/#propdef-writing-mode)
+- [writing-mode](https://www.w3.org/TR/css-writing-modes-4/#propdef-writing-mode)
+  - Supports `horizontal-tb`, `vertical-rl`, `vertical-lr`, `sideways-rl`, and `sideways-lr`.
 
 ### [CSS Flexible Box 1](https://www.w3.org/TR/css-flexbox-1/)
 
@@ -588,14 +603,17 @@ Vivliostyle supports CSS multi-column layout, but the behavior differs depending
 - [transform-origin](https://www.w3.org/TR/css-transforms-1/#propdef-transform-origin)
 - [backface-visibility](https://www.w3.org/TR/css-transforms-2/#propdef-backface-visibility)
 
-<!--
 ### [CSS Ruby Layout 1](https://www.w3.org/TR/css-ruby-1/)
 
-- [display](https://www.w3.org/TR/css-ruby-1/#propdef-display)
-  - Values: `ruby | ruby-base | ruby-text | ruby-base-container | ruby-text-container`
-- [ruby-align](https://www.w3.org/TR/css-ruby-1/#propdef-ruby-align)
-- [ruby-position](https://www.w3.org/TR/css-ruby-1/#propdef-ruby-position)
--->
+As with other CSS features, all ruby-related properties and values supported by the browser are available. Ruby positioning and ordinary line spacing follow the browser's layout.
+
+The line-spacing adjustment below applies to HTML ruby and simple CSS ruby using `display: ruby`, `ruby-base` and `ruby-text`, when the ruby has a numeric computed `line-height` rather than `normal`. In WebKit, eligible CSS ruby is limited to `span` elements with these display values.
+
+Line-spacing adjustment ([Issue #1604](https://github.com/vivliostyle/vivliostyle.js/issues/1604)):
+
+- Chromium and WebKit can reduce excess block-start leading only on the first line of a page or root column, within the document's root block formatting context and without a block-start border on the target block or its enclosing content boxes. Page-box borders do not affect this adjustment. Firefox retains its native ruby margins.
+- Separate formatting contexts, including non-root columns, are outside this adjustment's scope. WebKit ruby and Chromium horizontal under ruby can still add paragraph-boundary spacing; end-side annotations can also leave fewer lines in a page or column. Spacing needed to prevent opposing over/under annotations from overlapping is preserved.
+- Normal zero margins, including universal resets, do not disable the adjustment. To keep native leading, specify `margin-block-start: 0 !important` on `rt` or an element with `display: ruby-text`. Nonzero author margins are respected.
 
 <!--
 ### [CSS Mobile Text Size Adjustment 1](https://drafts.csswg.org/css-size-adjust-1/)

@@ -5,6 +5,9 @@
     <meta charset="UTF-8" />
     <title>Content leader()</title>
     <style>
+      html {
+        line-height: 1.25;
+      }
       .dotted-leader::after {
         content: leader(dotted) "end";
       }
@@ -17,6 +20,9 @@
       .string-leader::after {
         content: leader("x") "end";
       }
+      .no-advance-leader::after {
+        content: leader("\0301") "end";
+      }
     </style>
   </head>
   <body>
@@ -25,6 +31,7 @@
       <p class="solid-leader">solid</p>
       <p class="space-leader">space</p>
       <p class="string-leader">string</p>
+      <p class="no-advance-leader">a pattern with no advance</p>
     </section>
   </body>
 </html>

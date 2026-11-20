@@ -30,6 +30,9 @@ npx playwright install chromium --with-deps
 npx playwright install firefox webkit --with-deps
 ```
 
+After updating Playwright, run the install command again to obtain its matching
+browser binaries.
+
 ## Basic run
 
 Run all entries (default: canary vs stable):
@@ -112,6 +115,14 @@ Manifest-driven WPT runs also add `&pixelRatio=0` to the viewer hash params by
 default so Vivliostyle renders at the browser's native device pixel ratio rather
 than the viewer's high-resolution fallback. This only applies to WPT manifest
 tests; manual `--test-url` / `--ref-url` pairs keep the normal viewer defaults.
+
+Manifest-driven WPT runs use browser contexts with device pixel ratio (DPR) 2.
+Chromium's startup scale factor is fixed at 1, preserving the WPT rendering
+conditions used before PR #2187. Ordinary version comparisons and manual URL
+pairs use DPR 1, with Chromium's startup scale also fixed at 1.
+Screenshots still use `scale: "css"` (one output pixel per CSS pixel); DPR changes
+native layout and rasterization rather than the output image resolution. The
+selected DPR is recorded as `options.deviceScaleFactor` in the JSON report.
 
 Defaults in this mode:
 
@@ -219,6 +230,17 @@ yarn test:reftest-diff \
 | version | `v2.35.0` | https://vivliostyle.github.io/viewer/v2.35.0/ |
 | legacy version | `2019.11.100` | https://vivliostyle.github.io/viewer/2019.11.100/vivliostyle-viewer.html |
 | URL | `https://...` | Any viewer URL (legacy `vivliostyle-viewer.html` URLs are auto-detected) |
+
+`git-<branch>`/`git:<branch>` derives the preview URL from the sanitized branch
+name. This is reliable only while the resulting hostname
+(`vivliostyle-git-<branch>-vivliostyle`) stays at most 63 characters — about 35
+characters of actual branch name. Beyond that, Vercel truncates the hostname
+and appends a short content hash to keep it unique, and that hash cannot be
+predicted here, so the derived URL is likely wrong for long branch names. The
+script prints a warning in that case; pass the real preview URL directly with
+`--actual-viewer <url>` instead (e.g. from the PR's Vercel comment). The CI
+workflow uses the same short-name derivation, but for long branch names it
+looks up the real URL from the Vercel bot's PR comment instead of guessing.
 
 Examples:
 

@@ -357,6 +357,7 @@ export class TableFormattingContext
   implements Table.TableFormattingContext
 {
   formattingContextType: FormattingContextType = "Table";
+  writingMode: string = "horizontal-tb";
   vertical: boolean = false;
   columnCount: number = -1;
   tableWidth: number = 0;
@@ -512,7 +513,7 @@ export class TableFormattingContext
   getCellsFallingOnRow(rowIndex: number): TableCell[] {
     const rowSlots = this.getRowSlots(rowIndex);
     return rowSlots.reduce((uniqueCells, slot) => {
-      if (slot.cell !== uniqueCells[uniqueCells.length - 1]) {
+      if (slot.cell !== uniqueCells.at(-1)) {
         return uniqueCells.concat(slot.cell);
       } else {
         return uniqueCells;
@@ -535,9 +536,8 @@ export class TableFormattingContext
 
   getColumnCount(): number {
     if (this.columnCount < 0) {
-      this.columnCount = Math.max.apply(
-        null,
-        this.rows.map((row) =>
+      this.columnCount = Math.max(
+        ...this.rows.map((row) =>
           row.cells.reduce((sum, c) => sum + c.colSpan, 0),
         ),
       );
@@ -662,15 +662,13 @@ export class TableFormattingContext
   }
 
   override saveState(): any {
-    return ([] as BrokenTableCellPosition[]).concat(this.cellBreakPositions);
+    return [...this.cellBreakPositions];
   }
 
   override restoreState(state: any) {
     // Create a fresh copy to prevent the saved state from being mutated
     // during subsequent layout attempts (issue #1667).
-    this.cellBreakPositions = ([] as BrokenTableCellPosition[]).concat(
-      state as BrokenTableCellPosition[],
-    );
+    this.cellBreakPositions = [...(state as BrokenTableCellPosition[])];
   }
 }
 
@@ -807,6 +805,7 @@ export class EntireTableLayoutStrategy extends LayoutUtil.EdgeSkipper {
   inRow: boolean = false;
   checkPoints: Vtree.RenderedNodeContext[] = [];
   inHeaderOrFooter: boolean = false;
+  violatesLayoutConstraint: boolean = false;
 
   constructor(
     public readonly formattingContext: TableFormattingContext,
@@ -824,11 +823,12 @@ export class EntireTableLayoutStrategy extends LayoutUtil.EdgeSkipper {
       return r;
     }
     this.postLayoutBlockContents(state);
+    const nodeContext = state.nodeContext;
+    this.checkLayoutConstraint(nodeContext);
     const floatResult = layoutFloatOrFootnoteIfNeeded(this.column, state);
     if (floatResult) {
       return floatResult;
     }
-    const nodeContext = state.nodeContext;
     const display = nodeContext.display;
     const repetitiveElements = formattingContext.getRepetitiveElements();
     switch (display) {
@@ -887,6 +887,7 @@ export class EntireTableLayoutStrategy extends LayoutUtil.EdgeSkipper {
     const display = nodeContext.display;
     const clientLayout = this.column.clientLayout;
     this.postLayoutBlockContents(state);
+    this.checkLayoutConstraint(nodeContext);
     if (nodeContext.sourceNode === formattingContext.tableSourceNode) {
       const computedStyle = clientLayout.getElementComputedStyle(
         formattingContext.getRootViewNode(nodeContext) as Element,
@@ -989,8 +990,19 @@ export class EntireTableLayoutStrategy extends LayoutUtil.EdgeSkipper {
   postLayoutBlockContents(state: LayoutUtil.RenderedActiveLayoutIteratorState) {
     if (this.checkPoints.length > 0) {
       this.column.postLayoutBlock(state.nodeContext, this.checkPoints);
+      this.checkPoints.forEach((checkPoint) => {
+        this.checkLayoutConstraint(checkPoint);
+      });
     }
     this.checkPoints = [];
+  }
+
+  private checkLayoutConstraint(nodeContext: Vtree.NodeContext): void {
+    if (!this.column.layoutConstraint.allowLayout(nodeContext)) {
+      // Finish collecting the table structure, then use fragmented layout to
+      // enforce constraints such as a forbidden line-policy footnote anchor.
+      this.violatesLayoutConstraint = true;
+    }
   }
 }
 
@@ -1293,6 +1305,7 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
           if (state.lastAfterNodeContext) {
             this.column.layoutContext.processFragmentedBlockEdge(
               state.lastAfterNodeContext,
+              this.column,
             );
           }
           this.column.pageBreakType = breakAtEdge;
@@ -1526,6 +1539,24 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
             nodeContext,
             null,
           );
+          // Pseudo-columns render beyond denied checkpoints to collect cell
+          // breaks. Propagate those constraints even when the row fits.
+          const overflownInsideCell = this.formattingContext
+            .getCellsFallingOnRow(this.currentRowIndex)
+            .some((cell) => {
+              const fragment =
+                this.formattingContext.getCellFragmentOfCell(cell);
+              const pseudoColumn = fragment?.pseudoColumn.getColumn();
+              return pseudoColumn?.breakPositions.some(
+                (position) =>
+                  position instanceof Layout.BoxBreakPosition &&
+                  position.checkPoints.some(
+                    (point) =>
+                      point.overflow &&
+                      !pseudoColumn.layoutConstraint.allowLayout(point),
+                  ),
+              );
+            });
           const repetitiveElements =
             this.formattingContext.getRepetitiveElements();
           const overflownDueToRepetitiveElements =
@@ -1537,17 +1568,23 @@ export class TableLayoutStrategy extends LayoutUtil.EdgeSkipper {
           // overflow for this table fragment.
           const canResolveByDroppingFooter =
             !overflown &&
+            !overflownInsideCell &&
             overflownDueToRepetitiveElements &&
             !!repetitiveElements?.isFooterRegistered();
-          if (overflown || overflownDueToRepetitiveElements) {
+          if (
+            overflown ||
+            overflownInsideCell ||
+            overflownDueToRepetitiveElements
+          ) {
             // Catch row overflow as soon as the row finishes; otherwise the
             // next row start detects it one row too late and content can drift
             // into the page margin before the break is taken. (Issue #1902)
             if (
               !canResolveByDroppingFooter &&
-              this.formattingContext.getRowSpanningCellsOverflowingTheRow(
-                this.currentRowIndex,
-              ).length === 0
+              (overflownInsideCell ||
+                this.formattingContext.getRowSpanningCellsOverflowingTheRow(
+                  this.currentRowIndex,
+                ).length === 0)
             ) {
               this.resetColumn();
               nodeContext.overflow = true;
@@ -1595,7 +1632,10 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
   private layoutEntireTable(
     nodeContext: Vtree.NodeContext,
     column: Layout.Column,
-  ): Task.Result<Vtree.NodeContext | null> {
+  ): Task.Result<{
+    nodeContext: Vtree.NodeContext | null;
+    violatesLayoutConstraint: boolean;
+  }> {
     const formattingContext = getTableFormattingContext(
       nodeContext.formattingContext,
     );
@@ -1604,15 +1644,21 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
       strategy,
       column.layoutContext,
     );
-    return iterator.iterate(nodeContext);
+    return iterator.iterate(nodeContext).thenAsync((nodeContextAfter) =>
+      Task.newResult({
+        nodeContext: nodeContextAfter,
+        violatesLayoutConstraint: strategy.violatesLayoutConstraint,
+      }),
+    );
   }
 
   private getColumnWidths(
     lastRow: Element,
     columnCount: number,
-    vertical: boolean,
+    writingMode: string,
     clientLayout: Vtree.ClientLayout,
   ): number[] {
+    const vertical = writingMode !== "horizontal-tb";
     const doc = lastRow.ownerDocument;
     const dummyRow = doc.createElement("tr");
     const dummyCells: HTMLTableCellElement[] = [];
@@ -1626,7 +1672,7 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
       const rect = LayoutHelper.getElementClientRectAdjusted(
         clientLayout,
         cell,
-        vertical,
+        writingMode,
       );
       const width = vertical ? rect["height"] : rect["width"];
       // Workaround for issue #958
@@ -1726,7 +1772,7 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
     const colWidths = (formattingContext.colWidths = this.getColumnWidths(
       lastRow,
       columnCount,
-      vertical,
+      formattingContext.writingMode,
       column.clientLayout,
     ));
 
@@ -1758,15 +1804,17 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
     const formattingContext = getTableFormattingContext(
       nodeContext.formattingContext,
     );
+    formattingContext.writingMode = nodeContext.writingMode;
     formattingContext.vertical = nodeContext.vertical;
-    formattingContext.initializeRepetitiveElements(nodeContext.vertical);
+    formattingContext.initializeRepetitiveElements(nodeContext.writingMode);
     const tableLayoutOption = getTableLayoutOption(nodeContext.sourceNode);
     clearTableLayoutOptionCache(nodeContext.sourceNode);
     const frame = Task.newFrame<Vtree.NodeContext | null>(
       "TableLayoutProcessor.doInitialLayout",
     );
     const initialNodeContext = nodeContext.copy();
-    this.layoutEntireTable(nodeContext, column).then((nodeContextAfter) => {
+    this.layoutEntireTable(nodeContext, column).then((result) => {
+      const nodeContextAfter = result.nodeContext;
       const tableElement = nodeContextAfter.viewNode as Element;
 
       // CSS 2.1 §13.3.3: The first row's break-before propagates to the
@@ -1788,17 +1836,18 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
       const tableBBox = LayoutHelper.getElementClientRectAdjusted(
         column.clientLayout,
         tableElement,
-        column.vertical,
+        column.writingMode,
       );
-      let edge = column.vertical ? tableBBox.left : tableBBox.bottom;
+      let edge = column.getAfterEdge(tableBBox);
       edge +=
-        (column.vertical ? -1 : 1) *
+        column.getBoxDir() *
         BreakPosition.calculateOffset(
           nodeContext,
           column.collectElementsOffset(),
         ).current;
       if (
         !column.isOverflown(edge) &&
+        !result.violatesLayoutConstraint &&
         (!tableLayoutOption ||
           !tableLayoutOption.calculateBreakPositionsInside) &&
         !this.hasForcedBreakInRows(formattingContext)
@@ -2074,6 +2123,7 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
               cellNodeContext.viewNode as HTMLTableCellElement;
             cellFragment.column.layoutContext.processFragmentedBlockEdge(
               cellFragment.cellNodeContext,
+              cellFragment.column,
             );
             if (rowIndex < cell.rowIndex + cell.rowSpan - 1) {
               cellViewNode.rowSpan = rowIndex - cell.rowIndex + 1;
@@ -2095,7 +2145,10 @@ export class TableLayoutProcessor implements LayoutProcessor.LayoutProcessor {
           })
           .then(() => {
             column.clearOverflownViewNodes(nodeContext, false);
-            column.layoutContext.processFragmentedBlockEdge(nodeContext);
+            column.layoutContext.processFragmentedBlockEdge(
+              nodeContext,
+              column,
+            );
             adjustRowHeight(nodeContext);
             formattingContext.finishFragment();
             frame.finish(true);
@@ -2151,15 +2204,15 @@ function adjustCellHeight(
   const cellElementRect = LayoutHelper.getElementClientRectAdjusted(
     column.clientLayout,
     cellElement,
-    vertical,
+    formattingContext.writingMode,
   );
   const padding = column.getComputedPaddingBorder(cellElement);
   if (vertical) {
     const width =
-      cellElementRect.right -
-      column.footnoteEdge -
+      column.getBoxDir() *
+        (column.footnoteEdge - column.getBeforeEdge(cellElementRect)) -
       repetitiveElements.calculateOffset(breakNodeContext) -
-      padding.right;
+      (column.getBoxDir() < 0 ? padding.right : padding.left);
     Base.setCSSProperty(cellContentElement, "max-width", `${width}px`);
   } else {
     const height =
@@ -2582,18 +2635,11 @@ export class TableRowLayoutConstraint
   ): Task.Result<boolean> {
     getTableFormattingContext(this.nodeContext.formattingContext);
     const frame: Task.Frame<boolean> = Task.newFrame("finishBreak");
-    const constraints = this.cellFragmentLayoutConstraints.reduce(
-      (array, entry) =>
-        array.concat(
-          entry.constraints.map((constraint) => ({
-            constraint,
-            breakPosition: entry.breakPosition,
-          })),
-        ),
-      [] as {
-        constraint: Layout.FragmentLayoutConstraint;
-        breakPosition: Vtree.NodeContext | null;
-      }[],
+    const constraints = this.cellFragmentLayoutConstraints.flatMap((entry) =>
+      entry.constraints.map((constraint) => ({
+        constraint,
+        breakPosition: entry.breakPosition,
+      })),
     );
     let i = 0;
     frame

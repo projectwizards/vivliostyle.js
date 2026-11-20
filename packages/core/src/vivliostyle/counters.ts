@@ -226,7 +226,7 @@ class CounterResolver implements CssCascade.CounterResolver {
       Base.resolveURL(url, this.baseURL),
       this.baseURL,
     );
-    if (transformedId.charAt(0) === "#") {
+    if (transformedId.startsWith("#")) {
       transformedId = transformedId.substring(1);
     }
     return transformedId;
@@ -239,7 +239,7 @@ class CounterResolver implements CssCascade.CounterResolver {
   ): Exprs.Val {
     const getCounterNumber = () => {
       const values = this.counterStore.currentPageCounters[name];
-      return values && values.length ? values[values.length - 1] : null;
+      return values && values.length ? values.at(-1) : null;
     };
 
     const expr = new Exprs.Native(
@@ -249,7 +249,7 @@ class CounterResolver implements CssCascade.CounterResolver {
     );
 
     const arrayFormat = (arr: number[]) => {
-      return format(arr[arr.length - 1]);
+      return format(arr.at(-1));
     };
 
     this.counterStore.registerPageCounterExpr(name, arrayFormat, expr);
@@ -310,7 +310,9 @@ class CounterResolver implements CssCascade.CounterResolver {
   private getTargetPageCounters(
     transformedId: string,
   ): CssCascade.CounterValues | null {
-    if (this.counterStore.currentPage.elementsById[transformedId]) {
+    if (
+      this.counterStore.currentPage?.getReferenceTargets(transformedId).length
+    ) {
       return this.counterStore.currentPageCounters;
     } else {
       return this.counterStore.pageCountersById[transformedId] || null;
@@ -325,7 +327,9 @@ class CounterResolver implements CssCascade.CounterResolver {
   private getTargetPageDocCounters(
     transformedId: string,
   ): CssCascade.CounterValues | null {
-    if (this.counterStore.currentPage.elementsById[transformedId]) {
+    if (
+      this.counterStore.currentPage?.getReferenceTargets(transformedId).length
+    ) {
       return this.counterStore.currentPageDocCounters;
     } else {
       return this.counterStore.pageDocCountersById[transformedId] || null;
@@ -347,7 +351,7 @@ class CounterResolver implements CssCascade.CounterResolver {
       return elementCounters;
     }
     const pageVals = pageCounters[name] || [];
-    const pageVal = pageVals.length ? pageVals[pageVals.length - 1] : 0;
+    const pageVal = pageVals.length ? pageVals.at(-1) : 0;
     const docStartVals = docStartCounters?.[name] || [];
     const docStartVal = docStartVals.length ? docStartVals[0] : 0;
     if (!elementCounters.length) {
@@ -368,10 +372,10 @@ class CounterResolver implements CssCascade.CounterResolver {
     transformedId: string,
     pseudoElement: string,
   ): string | null {
-    if (this.counterStore.currentPage.elementsById[transformedId]) {
+    const elements =
+      this.counterStore.currentPage?.getReferenceTargets(transformedId) ?? [];
+    if (elements.length) {
       // Element is on current page - extract text for specific pseudo-element
-      const elements =
-        this.counterStore.currentPage.elementsById[transformedId];
       if (elements && elements.length > 0) {
         const element = elements[0];
 
@@ -434,7 +438,7 @@ class CounterResolver implements CssCascade.CounterResolver {
             if (pageCounters) {
               this.counterStore.resolveReference(transformedId);
             }
-            return format(adjusted[adjusted.length - 1] || null);
+            return format(adjusted.at(-1) || null);
           } else {
             const pageCounters = this.getTargetPageCounters(transformedId);
             if (pageCounters) {
@@ -443,9 +447,7 @@ class CounterResolver implements CssCascade.CounterResolver {
 
               if (pageCounters[name]) {
                 const pageCountersOfName = pageCounters[name];
-                return format(
-                  pageCountersOfName[pageCountersOfName.length - 1] || null,
-                );
+                return format(pageCountersOfName.at(-1) || null);
               } else {
                 // No corresponding counter with the name.
                 return format(0);
@@ -680,10 +682,12 @@ class CounterResolver implements CssCascade.CounterResolver {
           const counterName = m[1];
           const format =
             store.getPageCounterFormat(ex) ||
-            ((arr: number[]) =>
-              arr.length ? String(arr[arr.length - 1]) : "");
+            ((arr: number[]) => (arr.length ? String(arr.at(-1)) : ""));
+          // The assignment element is in the same spine item as the current
+          // page, whose margin boxes use this named string.
           const patchExpr = store.getOrCreateNamedStringPageCounterExpr(
             this.pageScope,
+            store.currentPage.spineIndex,
             offset,
             counterName,
             format,
@@ -884,9 +888,80 @@ class CounterResolver implements CssCascade.CounterResolver {
       (this.runningElements[name] = Object.create(null));
     values[elementOffset] = String(elementOffset);
   }
+
+  /** @override */
+  setBookmark(
+    element: Element,
+    elementOffset: number,
+    level: number,
+    label: string,
+    closed: boolean,
+  ): void {
+    if (Base.isTocBoxURL(this.baseURL)) {
+      return;
+    }
+    let id = element.getAttribute("id");
+    if (!id) {
+      // The bookmark needs a link target. Generate an id before the view of
+      // the element is created, so that the view gets the transformed id
+      // anchor used for navigation and for PDF destinations. The id is not
+      // set on the source element, so that it does not affect selector
+      // matching.
+      id = Base.getGeneratedId(element);
+      if (!id) {
+        // Avoid an id or name already used in the document.
+        const doc = element.ownerDocument;
+        const baseId = `${Base.bookmarkIdPrefix}${elementOffset}`;
+        id = baseId;
+        for (
+          let i = 1;
+          doc.querySelector(`[id="${id}"], [name="${id}"]`);
+          i++
+        ) {
+          id = `${baseId}-${i}`;
+        }
+        Base.setGeneratedId(element, id);
+      }
+    }
+    this.counterStore.setBookmark(this.baseURL, {
+      offset: elementOffset,
+      level,
+      label,
+      closed,
+      id,
+    });
+  }
 }
 
+/**
+ * A bookmark generated by the CSS bookmark-level, bookmark-label and
+ * bookmark-state properties.
+ * https://drafts.csswg.org/css-content-3/#bookmark-generation
+ */
+export type Bookmark = {
+  /** Offset of the element in its document */
+  offset: number;
+  /** bookmark-level value (1 or greater) */
+  level: number;
+  /** bookmark-label value as plain text */
+  label: string;
+  /** true if bookmark-state is closed */
+  closed: boolean;
+  /** id of the element */
+  id: string;
+};
+
 export class CounterStore {
+  /**
+   * Bookmarks of each document (keyed by document URL), in document order.
+   */
+  bookmarksByDocURL: { [docURL: string]: Bookmark[] } = Object.create(null);
+
+  /**
+   * Incremented whenever a bookmark is added or changed.
+   */
+  bookmarksVersion: number = 0;
+
   countersById: { [key: string]: CssCascade.CounterValues } =
     Object.create(null);
   pageCountersById: { [key: string]: CssCascade.CounterValues } =
@@ -904,6 +979,12 @@ export class CounterStore {
   } = Object.create(null);
   currentPageCounters: CssCascade.CounterValues = Object.create(null);
   previousPageCounters: CssCascade.CounterValues = Object.create(null);
+  // Finished-page values include @page counter resets, sets, and increments.
+  // Keep them independently of IDs so every page can be patched after a shift.
+  private pageCountersByPage = new WeakMap<
+    Vtree.Page,
+    CssCascade.CounterValues
+  >();
   // Issue #1999: remember the page-counter base from before a page-local
   // override so later pages can resume the inherited sequence.
   pageCountersBeforeOverride: CssCascade.CounterValues = Object.create(null);
@@ -911,13 +992,15 @@ export class CounterStore {
   // start element offset, recorded when each page is finished. Used to resolve
   // page-based counters in named strings (string-set) against the page that
   // actually contains the assignment element, regardless of which page first
-  // uses the named string.
+  // uses the named string. Element offsets are numbered per source document,
+  // so the snapshots are kept per spine index (Issue #2232).
   hasDeferredNamedStrings = false;
   namedStringPageSnapshots: {
-    [startOffset: number]: {
-      lastOffset: number;
-      spineIndex: number;
-      counters: CssCascade.CounterValues;
+    [spineIndex: number]: {
+      [startOffset: number]: {
+        lastOffset: number;
+        counters: CssCascade.CounterValues;
+      };
     };
   } = Object.create(null);
   // Issue #1997: patchable counter(page) expressions used inside named strings,
@@ -927,6 +1010,7 @@ export class CounterStore {
   namedStringPageCounterExprMap: {
     [exprKey: string]: {
       expr: Exprs.Val;
+      spineIndex: number;
       offset: number;
       counterName: string;
       format: (p1: number[]) => string;
@@ -944,6 +1028,11 @@ export class CounterStore {
     Object.create(null);
   resolvedReferences: { [key: string]: TargetCounterReference[] } =
     Object.create(null);
+  private referenceTargetIdsBySourcePage = new Map<
+    number,
+    Map<number, Set<string>>
+  >();
+  private targetsMovedEarlierAfterPageBreak = new Set<string>();
   pageControlledCounterNames: { [key: string]: boolean } = Object.assign(
     Object.create(null),
     { page: true },
@@ -974,6 +1063,40 @@ export class CounterStore {
     public readonly documentURLTransformer: Base.DocumentURLTransformer,
   ) {
     this.currentPageCounters["page"] = [0];
+  }
+
+  /**
+   * Add or update the bookmark of the element at `bookmark.offset` in the
+   * document `docURL`.
+   */
+  setBookmark(docURL: string, bookmark: Bookmark): void {
+    const bookmarks =
+      this.bookmarksByDocURL[docURL] || (this.bookmarksByDocURL[docURL] = []);
+    let i = bookmarks.length;
+    while (i > 0 && bookmarks[i - 1].offset > bookmark.offset) {
+      i--;
+    }
+    const prev = i > 0 ? bookmarks[i - 1] : null;
+    if (prev && prev.offset === bookmark.offset) {
+      if (
+        prev.level === bookmark.level &&
+        prev.label === bookmark.label &&
+        prev.closed === bookmark.closed &&
+        prev.id === bookmark.id
+      ) {
+        return;
+      }
+      bookmarks[i - 1] = bookmark;
+    } else {
+      bookmarks.splice(i, 0, bookmark);
+    }
+    this.bookmarksVersion++;
+  }
+
+  hasBookmarks(): boolean {
+    return Object.keys(this.bookmarksByDocURL).some(
+      (url) => this.bookmarksByDocURL[url].length > 0,
+    );
   }
 
   createCounterListener(baseURL: string): CssCascade.CounterListener {
@@ -1073,12 +1196,10 @@ export class CounterStore {
           continue;
         }
         const docCounters = this.currentPageDocCounters[counterName];
-        const docVal = docCounters.length
-          ? docCounters[docCounters.length - 1]
-          : 0;
+        const docVal = docCounters.length ? docCounters.at(-1) : 0;
         const prevDocCountersOfName = prevDocCounters[counterName] || [];
         const prevDocVal = prevDocCountersOfName.length
-          ? prevDocCountersOfName[prevDocCountersOfName.length - 1]
+          ? prevDocCountersOfName.at(-1)
           : 0;
         const delta = docVal - prevDocVal;
         const changeType = docChangeTypes[counterName];
@@ -1208,12 +1329,7 @@ export class CounterStore {
     const countersBeforeOverride: CssCascade.CounterValues =
       Object.create(null);
     const rememberCounterBase = (counterName: string): void => {
-      if (
-        !Object.prototype.hasOwnProperty.call(
-          countersBeforeOverride,
-          counterName,
-        )
-      ) {
+      if (!Object.hasOwn(countersBeforeOverride, counterName)) {
         const counterValues = baseCounters[counterName];
         if (counterValues) {
           countersBeforeOverride[counterName] = Array.from(counterValues);
@@ -1282,7 +1398,6 @@ export class CounterStore {
     if (!resolvedRefs) {
       resolvedRefs = this.resolvedReferences[id] = [];
     }
-    let pushed = false;
     for (let i = 0; i < this.referencesToSolve.length;) {
       const ref = this.referencesToSolve[i];
       if (ref.targetId === id) {
@@ -1295,14 +1410,15 @@ export class CounterStore {
           }
         }
         resolvedRefs.push(ref);
-        pushed = true;
       } else {
         i++;
       }
     }
-    if (!pushed) {
-      this.saveReferenceOfCurrentPage(id, true);
-    }
+    // Record the reference at its current source page as well as resolving
+    // the old record. A rerender can move generated target-counter()/
+    // target-text() content to another page; finishPage replaces the old
+    // page's records with these newly observed references.
+    this.saveReferenceOfCurrentPage(id, true);
   }
 
   /**
@@ -1323,7 +1439,13 @@ export class CounterStore {
    * @param pageIndex Index of the currently laid out page in its spine item
    */
   finishPage(spineIndex: number, pageIndex: number) {
-    const ids = Object.keys(this.currentPage.elementsById);
+    this.pageCountersByPage.set(
+      this.currentPage,
+      cloneCounterValues(this.currentPageCounters),
+    );
+    const ids = Object.keys(this.currentPage.elementsById).filter(
+      (id) => this.currentPage.getReferenceTargets(id).length > 0,
+    );
     if (ids.length > 0) {
       const currentPageCounters = cloneCounterValues(this.currentPageCounters);
       const currentPageDocCounters = this.currentPageDocCounters
@@ -1336,7 +1458,7 @@ export class CounterStore {
         }
 
         // Capture text content for target-text()
-        const elements = this.currentPage.elementsById[id];
+        const elements = this.currentPage.getReferenceTargets(id);
         if (elements && elements.length > 0) {
           const element = elements[0];
           this.pageTextById[id] = {
@@ -1349,22 +1471,12 @@ export class CounterStore {
 
         const oldPageIndex = this.pageIndicesById[id];
         if (oldPageIndex && oldPageIndex.pageIndex < pageIndex) {
-          const resolvedRefs = this.resolvedReferences[id];
-          if (resolvedRefs) {
-            let unresolvedRefs = this.unresolvedReferences[id];
-            if (!unresolvedRefs) {
-              unresolvedRefs = this.unresolvedReferences[id] = [];
-            }
-            let ref: TargetCounterReference | undefined;
-            while ((ref = resolvedRefs.shift())) {
-              ref.unresolve();
-              unresolvedRefs.push(ref);
-            }
-          }
+          this.unresolveReferences(id);
         }
         this.pageIndicesById[id] = { spineIndex, pageIndex };
       });
     }
+    this.discardReferencesFromPage(spineIndex, pageIndex);
     const prevPageCounters = this.previousPageCounters;
     let ref: TargetCounterReference | undefined;
     while ((ref = this.newReferencesOfCurrentPage.shift())) {
@@ -1386,6 +1498,17 @@ export class CounterStore {
       if (arr.every((r) => !ref.equals(r))) {
         arr.push(ref);
       }
+      let targetIdsByPage = this.referenceTargetIdsBySourcePage.get(spineIndex);
+      if (!targetIdsByPage) {
+        targetIdsByPage = new Map();
+        this.referenceTargetIdsBySourcePage.set(spineIndex, targetIdsByPage);
+      }
+      let targetIds = targetIdsByPage.get(pageIndex);
+      if (!targetIds) {
+        targetIds = new Set();
+        targetIdsByPage.set(pageIndex, targetIds);
+      }
+      targetIds.add(ref.targetId);
     }
     if (this.hasDeferredNamedStrings && this.currentPage) {
       this.recordNamedStringPageSnapshot(spineIndex);
@@ -1393,13 +1516,64 @@ export class CounterStore {
     this.currentPage = null;
   }
 
+  discardReferencesFromPage(spineIndex: number, pageIndex: number): void {
+    const targetIdsByPage = this.referenceTargetIdsBySourcePage.get(spineIndex);
+    const targetIds = targetIdsByPage?.get(pageIndex);
+    if (!targetIds) {
+      return;
+    }
+    const keepOtherPage = (ref: TargetCounterReference) =>
+      ref.spineIndex !== spineIndex || ref.pageIndex !== pageIndex;
+    for (const id of targetIds) {
+      this.retainReferences(id, keepOtherPage);
+    }
+    this.referencesToSolve = this.referencesToSolve.filter(keepOtherPage);
+    this.referencesToSolveStack = this.referencesToSolveStack.map((refs) =>
+      refs.filter(keepOtherPage),
+    );
+    targetIdsByPage.delete(pageIndex);
+    if (targetIdsByPage.size === 0) {
+      this.referenceTargetIdsBySourcePage.delete(spineIndex);
+    }
+  }
+
+  /**
+   * Keep only the resolved/unresolved references of the target that satisfy
+   * the given predicate, removing the arrays entirely when they become empty.
+   */
+  private retainReferences(
+    id: string,
+    keep: (ref: TargetCounterReference) => boolean,
+  ): void {
+    const resolved = (this.resolvedReferences[id] || []).filter(keep);
+    const unresolved = (this.unresolvedReferences[id] || []).filter(keep);
+    if (resolved.length) {
+      this.resolvedReferences[id] = resolved;
+    } else {
+      delete this.resolvedReferences[id];
+    }
+    if (unresolved.length) {
+      this.unresolvedReferences[id] = unresolved;
+    } else {
+      delete this.unresolvedReferences[id];
+    }
+  }
+
+  isReferenceTracked(ref: TargetCounterReference): boolean {
+    return (
+      (this.resolvedReferences[ref.targetId] || []).includes(ref) ||
+      (this.unresolvedReferences[ref.targetId] || []).includes(ref)
+    );
+  }
+
   /**
    * Record a snapshot of the current page counters keyed by the page's element
    * offset range, so page-based counters in named strings (string-set) can be
    * resolved against the page that contains the assignment element (Issue
    * #1997). Re-finishing a page (relayout) overwrites the previous snapshot.
-   * The spine index is stored so the snapshot can be shifted together with
-   * pageCountersById when a preceding spine's page count changes (see
+   * The snapshots are kept per spine index, since element offsets are numbered
+   * per source document (Issue #2232), and so they can be shifted together
+   * with pageCountersById when a preceding spine's page count changes (see
    * adjustPageCountersOfLaterSpines).
    */
   private recordNamedStringPageSnapshot(spineIndex: number) {
@@ -1422,36 +1596,45 @@ export class CounterStore {
     // (a fragmented element, or a blank page using offset-1), and in that case
     // the earlier page's snapshot must remain the one returned so counter(page)
     // freezes to the assignment page (Issue #1997).
-    for (const key of Object.keys(this.namedStringPageSnapshots)) {
+    const snapshots =
+      this.namedStringPageSnapshots[spineIndex] ||
+      (this.namedStringPageSnapshots[spineIndex] = Object.create(null));
+    for (const key of Object.keys(snapshots)) {
       const existingStart = parseInt(key, 10);
       if (existingStart <= startOffset) continue;
-      const existing = this.namedStringPageSnapshots[existingStart];
+      const existing = snapshots[existingStart];
       if (existingStart <= lastOffset && startOffset <= existing.lastOffset) {
-        delete this.namedStringPageSnapshots[existingStart];
+        delete snapshots[existingStart];
       }
     }
-    this.namedStringPageSnapshots[startOffset] = {
+    snapshots[startOffset] = {
       lastOffset,
-      spineIndex,
       counters: cloneCounterValues(this.currentPageCounters),
     };
   }
 
   /**
-   * Return the page counters captured for the finished page whose element
-   * offset range contains the given offset, or null when no such page has been
-   * finished yet (Issue #1997).
+   * Return the page counters captured for the finished page of the given spine
+   * item whose element offset range contains the given offset, or null when no
+   * such page has been finished yet (Issue #1997).
    */
-  getPageCountersForOffset(offset: number): CssCascade.CounterValues | null {
+  getPageCountersForOffset(
+    spineIndex: number,
+    offset: number,
+  ): CssCascade.CounterValues | null {
+    const snapshots = this.namedStringPageSnapshots[spineIndex];
+    if (!snapshots) {
+      return null;
+    }
     // Snapshot keys are numeric page start offsets; Object.keys returns them in
     // ascending order, so once a page starts after the target offset no later
     // page can contain it.
-    for (const key of Object.keys(this.namedStringPageSnapshots)) {
+    for (const key of Object.keys(snapshots)) {
       const startOffset = parseInt(key, 10);
       if (startOffset > offset) {
         break;
       }
-      const snap = this.namedStringPageSnapshots[startOffset];
+      const snap = snapshots[startOffset];
       if (offset <= snap.lastOffset) {
         return snap.counters;
       }
@@ -1487,61 +1670,174 @@ export class CounterStore {
     // counter(page) for deferred named strings) in sync with the shifted page
     // numbers so running headers assigned in later spines stay correct.
     for (const key of Object.keys(this.namedStringPageSnapshots)) {
-      const snap = this.namedStringPageSnapshots[parseInt(key, 10)];
-      if (
-        snap.spineIndex > expandedSpineIndex &&
-        snap.counters["page"] &&
-        !adjusted.has(snap.counters)
-      ) {
-        adjusted.add(snap.counters);
-        snap.counters["page"] = snap.counters["page"].map((v) => v + pageDelta);
-      }
-    }
-  }
-
-  /**
-   * Walk through target-counter DOM nodes in the given page containers and
-   * update their text content from the current pageCountersById snapshots.
-   */
-  updateTargetCounterNodesInPages(pages: Vtree.Page[]): void {
-    for (const page of pages) {
-      if (!page || !page.container) continue;
-      const nodes = page.container.querySelectorAll(`[${TARGET_COUNTER_ATTR}]`);
-      for (const node of nodes) {
-        const key = node.getAttribute(TARGET_COUNTER_ATTR);
-        const expr = this.targetCounterExprs.find((o) => o.expr.key === key);
-        if (expr && expr.transformedId) {
-          const counterValue = this.pageCountersById[expr.transformedId];
-          if (counterValue) {
-            const arr: number[] = counterValue[expr.name];
-            if (arr) {
-              node.textContent = expr.format(arr[arr.length - 1]);
-            }
-          }
+      const spineIndex = parseInt(key, 10);
+      if (spineIndex <= expandedSpineIndex) continue;
+      const snapshots = this.namedStringPageSnapshots[spineIndex];
+      for (const startKey of Object.keys(snapshots)) {
+        const snap = snapshots[parseInt(startKey, 10)];
+        if (snap.counters["page"] && !adjusted.has(snap.counters)) {
+          adjusted.add(snap.counters);
+          snap.counters["page"] = snap.counters["page"].map(
+            (v) => v + pageDelta,
+          );
         }
       }
     }
   }
 
   /**
+   * Drop references whose source page belongs to spine items that are about to
+   * be rebuilt, and invalidate target snapshots owned by that suffix. Retain
+   * pageIndicesById so unresolved forward references can still locate and
+   * render their targets while the suffix is reconstructed.
+   */
+  discardReferencesFromSpine(firstSpineIndex: number): void {
+    const targetIds = new Set([
+      ...Object.keys(this.resolvedReferences),
+      ...Object.keys(this.unresolvedReferences),
+    ]);
+
+    const keepEarlierSource = (ref: TargetCounterReference) =>
+      ref.spineIndex < firstSpineIndex;
+    for (const id of targetIds) {
+      this.retainReferences(id, keepEarlierSource);
+    }
+
+    for (const id of Object.keys(this.pageIndicesById)) {
+      if (this.pageIndicesById[id].spineIndex >= firstSpineIndex) {
+        delete this.pageCountersById[id];
+        delete this.pageDocCountersById[id];
+        delete this.pageTextById[id];
+      }
+    }
+
+    for (const key of Object.keys(this.namedStringPageSnapshots)) {
+      const spineIndex = parseInt(key, 10);
+      if (spineIndex >= firstSpineIndex) {
+        delete this.namedStringPageSnapshots[spineIndex];
+      }
+    }
+
+    for (const spineIndex of this.referenceTargetIdsBySourcePage.keys()) {
+      if (spineIndex >= firstSpineIndex) {
+        this.referenceTargetIdsBySourcePage.delete(spineIndex);
+      }
+    }
+
+    this.newReferencesOfCurrentPage =
+      this.newReferencesOfCurrentPage.filter(keepEarlierSource);
+    this.referencesToSolve = this.referencesToSolve.filter(keepEarlierSource);
+    this.referencesToSolveStack = this.referencesToSolveStack.map((refs) =>
+      refs.filter(keepEarlierSource),
+    );
+  }
+
+  /**
+   * Walk through target-counter DOM nodes in the given page containers and
+   * update their text content from the current pageCountersById snapshots.
+   */
+  updateTargetCounterNodesInPages(
+    pages: Vtree.Page[],
+    changedTargetIds?: Set<string>,
+  ): Set<Vtree.Page> {
+    return this.updateGeneratedContentNodesInPages(
+      pages,
+      TARGET_COUNTER_ATTR,
+      (key) => {
+        const expr = this.targetCounterExprs.find((o) => o.expr.key === key);
+        if (!expr || !expr.transformedId) {
+          return null;
+        }
+        const arr: number[] | undefined =
+          this.pageCountersById[expr.transformedId]?.[expr.name];
+        if (!arr) {
+          return null;
+        }
+        return {
+          id: expr.transformedId,
+          value: expr.format(arr.at(-1)),
+        };
+      },
+      changedTargetIds,
+    );
+  }
+
+  /**
+   * Update target-text() nodes retained outside a rebuilt spine suffix.
+   */
+  updateTargetTextNodesInPages(
+    pages: Vtree.Page[],
+    changedTargetIds?: Set<string>,
+  ): Set<Vtree.Page> {
+    return this.updateGeneratedContentNodesInPages(
+      pages,
+      TARGET_TEXT_ATTR,
+      (key) => {
+        const expr = this.targetTextExprs.find((o) => o.expr.key === key);
+        if (!expr || !expr.transformedId) {
+          return null;
+        }
+        const text = this.pageTextById[expr.transformedId];
+        if (!text) {
+          return null;
+        }
+        let value: string;
+        if (expr.pseudoElement === "first-letter") {
+          const fullText =
+            (text.before ?? "") + (text.content ?? "") + (text.after ?? "");
+          value = fullText.match(Base.firstLetterPattern)?.[0] ?? "";
+        } else {
+          value = text[expr.pseudoElement] ?? "";
+        }
+        return { id: expr.transformedId, value };
+      },
+      changedTargetIds,
+    );
+  }
+
+  /**
+   * Shared walker for patching generated-content nodes (target-counter/
+   * target-text) in retained pages from the current target snapshots.
+   */
+  private updateGeneratedContentNodesInPages(
+    pages: Vtree.Page[],
+    attrName: string,
+    resolveValue: (key: string | null) => { id: string; value: string } | null,
+    changedTargetIds?: Set<string>,
+  ): Set<Vtree.Page> {
+    const changedPages = new Set<Vtree.Page>();
+    for (const page of pages) {
+      if (!page || !page.container) continue;
+      const nodes = page.container.querySelectorAll(`[${attrName}]`);
+      for (const node of nodes) {
+        const resolved = resolveValue(node.getAttribute(attrName));
+        if (resolved && node.textContent !== resolved.value) {
+          node.textContent = resolved.value;
+          changedPages.add(page);
+          changedTargetIds?.add(resolved.id);
+        }
+      }
+    }
+    return changedPages;
+  }
+
+  /**
    * Resolve page-level counter values for a page.
    *
-   * Prefer an explicit per-page snapshot when one is supplied. Otherwise fall
-   * back to looking up tracked element IDs on the page via pageCountersById.
-   *
-   * Note: explicitCounters are pageCounterStarts (pre-increment snapshots),
-   * while pageCountersById stores post-increment values. When using
-   * explicitCounters as a fallback, the caller should be aware of this
-   * distinction. For the "page" counter the difference is +1, but this
-   * method returns whichever snapshot it finds without adjustment.
+   * Prefer the finished page's own post-increment snapshot. For pages without
+   * one, use a canonical target's snapshot or the supplied starting counters.
    */
   private getPageCountersForPage(
     page: Vtree.Page,
     explicitCounters?: CssCascade.CounterValues | null,
   ): CssCascade.CounterValues | null {
-    // First try pageCountersById (post-render values) via any tracked element
+    const pageCounters = this.pageCountersByPage.get(page);
+    if (pageCounters) {
+      return pageCounters;
+    }
     const elementIds = Object.keys(page.elementsById);
     for (const elementId of elementIds) {
+      if (!page.getReferenceTargets(elementId).length) continue;
       const counters = this.pageCountersById[elementId];
       if (counters) {
         return counters;
@@ -1556,19 +1852,25 @@ export class CounterStore {
 
   /**
    * Walk through page-counter DOM nodes in the given page containers and
-   * update their text content from the adjusted pageCountersById snapshots.
-   * Called after adjustPageCountersOfLaterSpines has shifted the counters.
+   * update their text content from their finished-page counter snapshots.
+   * Called after adjustPageCountersOfLaterSpines has shifted target snapshots.
    *
-   * When available, pass explicit per-page counter snapshots aligned with the
-   * given pages so pages without tracked element IDs are also updated.
+   * Pass the page-count change to shift the finished-page snapshots, and pass
+   * page-start counters as a fallback for pages without a finished snapshot.
    */
   updatePageCounterNodesInPages(
     pages: Vtree.Page[],
     pageCountersByPage?: Array<CssCascade.CounterValues | null>,
+    pageDelta = 0,
   ): void {
     for (let i = 0; i < pages.length; i++) {
       const page = pages[i];
       if (!page?.container) continue;
+
+      const pageCounters = this.pageCountersByPage.get(page);
+      if (pageDelta && pageCounters?.["page"]) {
+        pageCounters["page"] = pageCounters["page"].map((v) => v + pageDelta);
+      }
 
       // Issue #1997: patch counter(page) nodes inside named strings from the
       // assignment-page snapshot (which adjustPageCountersOfLaterSpines has
@@ -1580,7 +1882,10 @@ export class CounterStore {
         const key = node.getAttribute(NAMED_STRING_PAGE_COUNTER_ATTR);
         const entry = this.namedStringPageCounterExprMap[key];
         if (!entry) continue;
-        const counters = this.getPageCountersForOffset(entry.offset);
+        const counters = this.getPageCountersForOffset(
+          entry.spineIndex,
+          entry.offset,
+        );
         const values = counters?.[entry.counterName];
         if (values) {
           node.textContent = entry.format(values);
@@ -1701,21 +2006,27 @@ export class CounterStore {
 
   /**
    * Get (or lazily create) a patchable expression for a counter(page) used
-   * inside a named string assigned at the given element offset. The expression
-   * reads its value from the assignment-page snapshot so it stays correct after
-   * cross-spine repagination shifts page numbers (Issue #1997). The same
-   * (offset, counterName) pair always reuses the same expression to avoid
-   * unbounded growth across margin-box re-renders.
+   * inside a named string assigned at the given element offset in the given
+   * spine item. The expression reads its value from the assignment-page
+   * snapshot so it stays correct after cross-spine repagination shifts page
+   * numbers (Issue #1997). The same (spineIndex, offset, counterName) always
+   * reuses the same expression to avoid unbounded growth across margin-box
+   * re-renders.
    */
   getOrCreateNamedStringPageCounterExpr(
     pageScope: Exprs.LexicalScope,
+    spineIndex: number,
     offset: number,
     counterName: string,
     format: (p1: number[]) => string,
   ): Exprs.Val {
     for (const key in this.namedStringPageCounterExprMap) {
       const entry = this.namedStringPageCounterExprMap[key];
-      if (entry.offset === offset && entry.counterName === counterName) {
+      if (
+        entry.spineIndex === spineIndex &&
+        entry.offset === offset &&
+        entry.counterName === counterName
+      ) {
         return entry.expr;
       }
     }
@@ -1723,7 +2034,9 @@ export class CounterStore {
       pageScope,
       () => {
         const counters =
-          offset >= 0 ? this.getPageCountersForOffset(offset) : null;
+          offset >= 0
+            ? this.getPageCountersForOffset(spineIndex, offset)
+            : null;
         const values =
           (counters || this.currentPageCounters)[counterName] || [];
         return format(values);
@@ -1732,6 +2045,7 @@ export class CounterStore {
     );
     this.namedStringPageCounterExprMap[expr.key] = {
       expr,
+      spineIndex,
       offset,
       counterName,
       format,
@@ -1772,14 +2086,11 @@ export class CounterStore {
         node.setAttribute("data-viv-leader-value", val);
         return node;
       } else if (expr.str.startsWith("running-element-")) {
-        const elemList =
-          val &&
-          document.querySelectorAll(`[${Base.ELEMENT_OFFSET_ATTR}="${val}"]`);
-        if (!elemList || elemList.length === 0) {
+        const runningElem = val && this.findRunningElement(val, document);
+        if (!runningElem) {
           return null;
         }
-        const lastElem = elemList[elemList.length - 1];
-        const clonedElem = lastElem.cloneNode(true) as HTMLElement;
+        const clonedElem = runningElem.cloneNode(true) as HTMLElement;
         this.fixPageCounterInRunningElement(clonedElem);
         clonedElem.style.position = "";
         clonedElem.style.visibility = "";
@@ -1821,6 +2132,26 @@ export class CounterStore {
     } else {
       return null;
     }
+  }
+
+  /**
+   * Find the laid-out running element at the given element offset. Element
+   * offsets are numbered per source document while the pages of all source
+   * documents share the viewport document, so search only the pages of the
+   * current page's spine item (Issue #2232). The last match is used, which is
+   * the one in the page being laid out if it is there.
+   */
+  private findRunningElement(
+    offset: string,
+    document: Document,
+  ): Element | null {
+    if (!this.currentPage) {
+      return null;
+    }
+    const elemList = document.querySelectorAll(
+      `[${Base.SPINE_INDEX_ATTR}="${this.currentPage.spineIndex}"] [${Base.ELEMENT_OFFSET_ATTR}="${offset}"]`,
+    );
+    return elemList.length ? elemList[elemList.length - 1] : null;
   }
 
   private fixPageCounterInRunningElement(runningElem: Element): void {
@@ -1874,7 +2205,7 @@ export class CounterStore {
         if (counterValue) {
           const arr: number[] = counterValue[expr.name];
           if (arr) {
-            node.textContent = expr.format(arr[arr.length - 1]);
+            node.textContent = expr.format(arr.at(-1));
           }
         }
       }
@@ -1898,6 +2229,47 @@ export class CounterStore {
 
   createLayoutConstraint(pageIndex: number): Layout.LayoutConstraint {
     return new LayoutConstraint(this, pageIndex);
+  }
+
+  moveTargetEarlierAfterPageBreak(id: string, pageIndex: number): boolean {
+    const oldPageIndex = this.pageIndicesById[id];
+    if (!oldPageIndex || pageIndex >= oldPageIndex.pageIndex) {
+      return true;
+    }
+    // Keep the anti-oscillation guarantee introduced by b0288a35: a target
+    // gets one earlier-page correction for a break that has already been
+    // satisfied, but cannot repeatedly alternate between earlier and later
+    // pages. Commit the correction at the point it is accepted so subsequent
+    // constraint checks use the new position instead of retrying indefinitely.
+    if (this.targetsMovedEarlierAfterPageBreak.has(id)) {
+      return false;
+    }
+    this.targetsMovedEarlierAfterPageBreak.add(id);
+    this.pageIndicesById[id] = { ...oldPageIndex, pageIndex };
+    this.unresolveReferences(id);
+    return true;
+  }
+
+  unresolveReferencesForTargets(targetIds: Iterable<string>): void {
+    for (const id of targetIds) {
+      this.unresolveReferences(id);
+    }
+  }
+
+  private unresolveReferences(id: string): void {
+    const resolvedRefs = this.resolvedReferences[id];
+    if (!resolvedRefs) {
+      return;
+    }
+    let unresolvedRefs = this.unresolvedReferences[id];
+    if (!unresolvedRefs) {
+      unresolvedRefs = this.unresolvedReferences[id] = [];
+    }
+    let ref: TargetCounterReference | undefined;
+    while ((ref = resolvedRefs.shift())) {
+      ref.unresolve();
+      unresolvedRefs.push(ref);
+    }
   }
 }
 
@@ -1923,25 +2295,20 @@ class LayoutConstraint implements Layout.LayoutConstraint {
   ) {}
 
   /** @override */
+  allowLayoutAfterPageBreak(nodeContext: Vtree.NodeContext): boolean {
+    if (this.allowLayout(nodeContext)) {
+      return true;
+    }
+    const id = this.getReferencedTargetId(nodeContext);
+    return (
+      !!id &&
+      this.counterStore.moveTargetEarlierAfterPageBreak(id, this.pageIndex)
+    );
+  }
+
   allowLayout(nodeContext: Vtree.NodeContext): boolean {
-    if (!nodeContext || nodeContext.after) {
-      return true;
-    }
-    const viewNode = nodeContext.viewNode;
-    if (!viewNode || viewNode.nodeType !== 1) {
-      return true;
-    }
-    const id =
-      (viewNode as Element).getAttribute("data-vivliostyle-id") ||
-      (viewNode as Element).getAttribute("id") ||
-      (viewNode as Element).getAttribute("name");
+    const id = this.getReferencedTargetId(nodeContext);
     if (!id) {
-      return true;
-    }
-    if (
-      !this.counterStore.resolvedReferences[id] &&
-      !this.counterStore.unresolvedReferences[id]
-    ) {
       return true;
     }
     const pageIndex = this.counterStore.pageIndicesById[id];
@@ -1949,5 +2316,35 @@ class LayoutConstraint implements Layout.LayoutConstraint {
       return true;
     }
     return this.pageIndex >= pageIndex.pageIndex;
+  }
+
+  private getReferencedTargetId(nodeContext: Vtree.NodeContext): string | null {
+    if (!nodeContext || nodeContext.after) {
+      return null;
+    }
+    const viewNode = nodeContext.viewNode;
+    if (!viewNode || viewNode.nodeType !== 1) {
+      return null;
+    }
+    const id =
+      (viewNode as Element).getAttribute("data-vivliostyle-id") ||
+      (viewNode as Element).getAttribute("id") ||
+      (viewNode as Element).getAttribute("name");
+    if (!id) {
+      return null;
+    }
+    if (
+      this.counterStore.currentPage &&
+      !this.counterStore.currentPage.isReferenceTarget(viewNode as Element, id)
+    ) {
+      return null;
+    }
+    if (
+      !this.counterStore.resolvedReferences[id] &&
+      !this.counterStore.unresolvedReferences[id]
+    ) {
+      return null;
+    }
+    return id;
   }
 }

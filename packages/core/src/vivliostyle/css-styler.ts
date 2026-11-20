@@ -56,7 +56,7 @@ export class SlipMap {
     if (this.map.length == 0) {
       return 0;
     }
-    const range = this.map[this.map.length - 1];
+    const range = this.map.at(-1);
     return range.endSlipped;
   }
 
@@ -64,7 +64,7 @@ export class SlipMap {
     if (this.map.length == 0) {
       this.map.push(new SlipRange(endFixed, endFixed, endFixed));
     } else {
-      const range = this.map[this.map.length - 1];
+      const range = this.map.at(-1);
       const endSlipped = range.endSlipped + endFixed - range.endFixed;
       if (range.endFixed == range.endStuckFixed) {
         range.endFixed = endFixed;
@@ -80,7 +80,7 @@ export class SlipMap {
     if (this.map.length == 0) {
       this.map.push(new SlipRange(endFixed, 0, 0));
     } else {
-      this.map[this.map.length - 1].endFixed = endFixed;
+      this.map.at(-1).endFixed = endFixed;
     }
   }
 
@@ -310,7 +310,7 @@ export class BoxStack {
    * Returns the last box in the stack.
    */
   lastBox(): Box | undefined {
-    return this.stack[this.stack.length - 1];
+    return this.stack.at(-1);
   }
 
   /**
@@ -372,22 +372,62 @@ export class BoxStack {
     return box;
   }
 
-  encounteredTextNode(node: Node) {
-    const box = this.lastBox();
+  /**
+   * Returns if the text node is content that cannot be ignored as whitespace
+   * in the last box.
+   */
+  isNonIgnorableText(node: Node): boolean {
     if (
-      (node.nodeType === Node.TEXT_NODE ||
-        node.nodeType === Node.CDATA_SECTION_NODE) &&
-      (this.atBlockStart || this.atFlowStart) &&
-      box.hasBox()
+      node.nodeType !== Node.TEXT_NODE &&
+      node.nodeType !== Node.CDATA_SECTION_NODE
     ) {
-      const whitespaceValue = box
-        .styleValue("white-space", Css.ident.normal)
-        .toString();
-      const whitespace = Vtree.whitespaceFromPropertyValue(whitespaceValue);
-      if (whitespace && !Vtree.canIgnore(node, whitespace)) {
-        this.atBlockStart = false;
-        this.atFlowStart = false;
+      return false;
+    }
+    return !Vtree.canIgnore(node, this.inheritedWhitespace());
+  }
+
+  /**
+   * Resolves the `white-space` value of the last box, which inherits it from
+   * the ancestor boxes. Box.styleValue() is not used: it only reads the box's
+   * own declarations and caches the given default value.
+   */
+  private inheritedWhitespace(): Vtree.Whitespace {
+    for (let i = this.stack.length - 1; i >= 0; i--) {
+      const box = this.stack[i];
+      const cascval = box.style["white-space"] as CssCascade.CascadeValue;
+      const value = cascval?.evaluate(box.context, "white-space");
+      if (!value) {
+        continue;
       }
+      if (Css.isDefaultingValue(value)) {
+        if (value.toString().toLowerCase() === "initial") {
+          return Vtree.Whitespace.IGNORE;
+        }
+        // inherit, unset and rollback keywords: white-space is inherited.
+        continue;
+      }
+      const whitespace = Vtree.whitespaceFromPropertyValue(value.toString());
+      if (whitespace !== null) {
+        return whitespace;
+      }
+      // An unsupported value (e.g. an invalid var() substitution) keeps the
+      // inherited value, as in ViewFactory.
+    }
+    return Vtree.Whitespace.IGNORE;
+  }
+
+  /**
+   * Text that cannot be ignored as whitespace ends the block start and the
+   * flow start, so that a following forced break is not propagated to them.
+   */
+  encounteredTextNode(node: Node) {
+    if (
+      (this.atBlockStart || this.atFlowStart) &&
+      this.isNonIgnorableText(node) &&
+      this.lastBox().hasBox()
+    ) {
+      this.atBlockStart = false;
+      this.atFlowStart = false;
     }
   }
 
@@ -458,16 +498,16 @@ export class BoxStack {
 }
 
 export class StyleStore implements CssCascade.StyleReader {
-  private readonly map: { [key: string]: CssCascade.ElementStyle } = {};
+  private readonly map = new Map<number, CssCascade.ElementStyle>();
 
   constructor(private readonly xmldoc: XmlDoc.XMLDocHolder) {}
 
   setAt(offset: number, style: CssCascade.ElementStyle): void {
-    this.map[`e${offset}`] = style;
+    this.map.set(offset, style);
   }
 
   styleOf(element: Element): CssCascade.ElementStyle {
-    return this.map[`e${this.xmldoc.getElementOffset(element)}`];
+    return this.map.get(this.xmldoc.getElementOffset(element));
   }
 }
 
@@ -499,8 +539,14 @@ export class Styler implements AbstractStyler {
   rootBackgroundAssigned: boolean = false;
   rootLayoutAssigned: boolean = false;
   lastOffset: number;
-  breakBeforeValues = {} as { [key: number]: string | null };
+  breakBeforeValues = new Map<number, string | null>();
   boxStack: BoxStack;
+  /**
+   * True once the styled part of the document has content in the flow chunk
+   * of the root element: text, generated content, or an element box other
+   * than the root and body element boxes. (Issue #434)
+   */
+  private rootFlowChunkContentFound = false;
   bodyReached: boolean = true;
 
   constructor(
@@ -559,30 +605,27 @@ export class Styler implements AbstractStyler {
 
   hasProp(
     style: CssCascade.ElementStyle,
-    map: CssValidator.ValueMap,
+    map: ReadonlyMap<string, Css.Val>,
     name: string,
   ): boolean {
     const cascVal = style[name] as CssCascade.CascadeValue;
-    return cascVal && cascVal.evaluate(this.context) !== map[name];
+    return cascVal && cascVal.evaluate(this.context) !== map.get(name);
   }
 
   transferPropsToRoot(
     srcStyle: CssCascade.ElementStyle,
-    map: CssValidator.ValueMap,
+    map: ReadonlyMap<string, Css.Val>,
   ): void {
-    for (const pname in map) {
+    for (const [pname, val] of map) {
       const cascval = srcStyle[pname];
       if (cascval) {
         this.rootStyle[pname] = cascval;
         delete srcStyle[pname];
-      } else {
-        const val = map[pname];
-        if (val) {
-          this.rootStyle[pname] = new CssCascade.CascadeValue(
-            val,
-            CssParser.SPECIFICITY_AUTHOR,
-          );
-        }
+      } else if (val) {
+        this.rootStyle[pname] = new CssCascade.CascadeValue(
+          val,
+          CssParser.SPECIFICITY_AUTHOR,
+        );
       }
     }
   }
@@ -636,6 +679,7 @@ export class Styler implements AbstractStyler {
         (backgroundColor && !Css.isDefaultingValue(backgroundColor)) ||
         (backgroundImage && !Css.isDefaultingValue(backgroundImage))
       ) {
+        // css-backgrounds-3 §2.11: the element does not paint this background.
         this.transferPropsToRoot(elemStyle, this.validatorSet.backgroundProps);
         // background-position-x/-y are not part of the `background` shorthand
         // grammar, so they are absent from backgroundProps. Move them only when
@@ -669,15 +713,43 @@ export class Styler implements AbstractStyler {
   }
 
   private determineRootSizes(elemStyle: CssCascade.ElementStyle): void {
+    this.context.rootFontMetricsReady = false;
+    this.context.resolvingRootFontSize = true;
+    // Root font-size and line-height self-references use initial font metrics,
+    // including when root sizes are recomputed after a script loads fonts.
+    this.context.rootLineHeight =
+      this.context.measureFontUnit("lh", this.context.initialFontSize) ??
+      this.context.initialFontSize * Exprs.fallbackLineHeightRatio;
     const fontSize = elemStyle["font-size"] as CssCascade.CascadeValue;
     let isRelativeFontSize = true;
+    let isInvalidFontSize = false;
     if (fontSize && !Css.isDefaultingValue(fontSize.value)) {
       const evaluated = fontSize.evaluate(this.context);
       const val = this.resolveRootSizingCalc(evaluated);
+      isInvalidFontSize = !CSS.supports("font-size", val.toString());
       const fromRelativeCalc =
         evaluated instanceof Css.Func && val instanceof Css.Numeric;
-      if (val instanceof Css.Numeric) {
-        let px = val.num;
+      // The absolute size keywords (e.g. "small") and the relative keywords
+      // ("larger"/"smaller") are relative to the default (initial) font size
+      // and must be resolved to a numeric root font size, so that all
+      // consumers (rem units, rlh, page context, the root element's own
+      // inherited properties) use the same value. (Issue #2174)
+      let px: number | null = CssCascade.resolveAbsoluteFontSizeKeyword(
+        val,
+        this.context.initialFontSize,
+      );
+      if (
+        px == null &&
+        (CssCascade.hasKeywordName(val, "larger") ||
+          CssCascade.hasKeywordName(val, "smaller"))
+      ) {
+        px = CssCascade.resolveRelativeFontSizeKeyword(
+          val as Css.Ident,
+          this.context.initialFontSize,
+        );
+      }
+      if (px == null && val instanceof Css.Numeric) {
+        px = val.num;
         switch (val.unit) {
           case "em":
           case "rem":
@@ -692,54 +764,225 @@ export class Styler implements AbstractStyler {
             break;
           default: {
             const unitSize = Exprs.defaultUnitSizes[val.unit];
+            const metric = this.context.measureFontUnit(
+              val.unit,
+              this.context.initialFontSize,
+            );
             if (unitSize) {
               px *= unitSize;
+              isRelativeFontSize = fromRelativeCalc;
+            } else if (metric != null) {
+              px *= metric;
+              isRelativeFontSize = true;
+            } else if (Exprs.isViewportRelativeLengthUnit(val.unit)) {
+              // The unit size of a viewport relative unit, e.g. `2vw`, must not
+              // be left as the raw number either, and the root element must use
+              // the resolved size like above: the internal units of this engine
+              // (`pv*`) are not CSS that a browser can resolve. A plain
+              // viewport relative unit is normally already converted to a px
+              // length by `fontSize.evaluate()` (the page size is not known
+              // while the root sizes are determined, so the viewer viewport
+              // provides the unit size), so this branch only applies to a unit
+              // that survives the evaluation. (Review)
+              px *= this.context.queryUnitSize(val.unit, true);
+              isRelativeFontSize = true;
+            } else {
+              // Any other dimension is not a length that Vivliostyle can
+              // resolve here, e.g. the `5s` that a var() substitution put into
+              // `font-size: var(--size)`: the root element keeps the initial
+              // font size rather than treating the number as pixels, as the
+              // browser keeps it for an invalid value. (Review)
+              px = null;
             }
-            isRelativeFontSize = fromRelativeCalc;
           }
         }
+      }
+      if (px != null && !Number.isFinite(px)) {
+        // A conversion that produced a non-finite value must not become the
+        // root font size either. (Review)
+        px = null;
+      }
+      if (px == null) {
+        // A font size that is neither a keyword nor a Css.Numeric: a unitless
+        // zero, or a calc()/clamp()/min()/max() whose arguments are lengths
+        // that can be resolved here, e.g.
+        // `:root { font-size: clamp(10px, 20px, 30px) }`. The root element has
+        // no parent, so `em`/`%` arguments refer to the initial font size.
+        // (Issue #2174 follow-up)
+        const resolved = CssCascade.resolveFontSizeValueToPx(
+          this.context,
+          val,
+          this.context.initialFontSize,
+        );
+        if (resolved != null) {
+          px = resolved;
+          if (val instanceof Css.Func) {
+            // As for a calc() that the root sizing could resolve, the root
+            // element must use this value. (Issues #608, #549)
+            isRelativeFontSize = true;
+          } else {
+            // A unitless zero, which is an absolute length like `0px`, so the
+            // root element uses it directly.
+            isRelativeFontSize = false;
+          }
+        }
+      }
+      // A font size that is neither a keyword nor resolvable here, e.g. the
+      // `round(up, 20px, 7px)` whose rounding strategy this engine does not
+      // evaluate, is left to the browser, which keeps the declaration and
+      // computes the value: the root font size that this context records stays
+      // the initial one, so `rem`, the page context and the margin boxes use a
+      // different metric than the rendered root element. Known limitation:
+      // materializing the computed value of the browser would need the
+      // rendered size. (Review)
+      if (px != null) {
+        // `font-size` has a non-negative computed-value range, e.g.
+        // `calc(10px - 20px)` computes to 0px.
+        px = Math.max(0, px);
         this.context.rootFontSize = px;
         this.context.isRelativeRootFontSize = isRelativeFontSize;
       }
     }
+    this.context.resolvingRootFontSize = false;
+    this.context.rootFontProperties = CssCascade.getFontMetricProperties(
+      elemStyle,
+      this.context,
+    );
+    const rootFontWeight = elemStyle["font-weight"] as
+      CssCascade.CascadeValue | undefined;
+    const rootWeight = rootFontWeight?.evaluate(this.context, "font-weight");
+    if (
+      rootWeight instanceof Css.Ident &&
+      (CssCascade.hasKeywordName(rootWeight, "bolder") ||
+        CssCascade.hasKeywordName(rootWeight, "lighter"))
+    ) {
+      // The root has no parent element, so relative weights use the initial
+      // font weight. Resolve the keyword before measuring: the hidden probe is
+      // appended to the viewer body, whose weight may differ from the source
+      // document's initial weight.
+      this.context.rootFontProperties["font-weight"] = String(
+        CssCascade.resolveRelativeFontWeight(rootWeight, 400),
+      );
+    }
+    // A default root font-size can stay implicit while root-metric terms in
+    // calc() already need to use the source root's font settings.
+    this.context.rootFontMetricsReady =
+      this.context.rootFontSize != null ||
+      isInvalidFontSize ||
+      !fontSize ||
+      Css.isDefaultingValue(fontSize.value);
     const rootFontSize =
       this.context.rootFontSize ?? this.context.initialFontSize;
     const lineHeight = elemStyle["line-height"] as CssCascade.CascadeValue;
     let rootLineHeight: number | null = null;
+    // An unspecified root line-height is the initial value `normal`.
+    let normalLineHeight =
+      !lineHeight || Css.isDefaultingValue(lineHeight.value);
     let fromRelativeCalc = false;
     if (lineHeight && !Css.isDefaultingValue(lineHeight.value)) {
       const evaluated = lineHeight.evaluate(this.context);
       const val = this.resolveRootSizingCalc(evaluated);
+      // A value that the browser rejects, e.g. an invalid var() substitution,
+      // leaves the initial `normal`.
+      normalLineHeight =
+        CssCascade.hasKeywordName(val, "normal") ||
+        CssCascade.isInvalidLineHeight(this.context, val);
       fromRelativeCalc =
         evaluated instanceof Css.Func && val instanceof Css.Numeric;
       if (val instanceof Css.Num) {
-        rootLineHeight = val.num * rootFontSize;
+        // An overflowing calculation, e.g. `line-height: calc(exp(1000))`, is
+        // clamped by the browser: an infinite root line height would propagate
+        // into every `rlh` unit and into the page context instead. (Review)
+        rootLineHeight = Number.isFinite(val.num * rootFontSize)
+          ? val.num * rootFontSize
+          : null;
       } else if (val instanceof Css.Numeric) {
-        let px = val.num;
+        let px: number | null = val.num;
         switch (val.unit) {
           case "em":
           case "rem":
-            px *= rootFontSize;
+            px = val.num * rootFontSize;
             break;
           case "%":
-            px *= rootFontSize / 100;
+            px = (val.num * rootFontSize) / 100;
             break;
           case "lh":
           case "rlh":
-            px *= this.context.rootLineHeight;
+            px = val.num * this.context.rootLineHeight;
             break;
           default: {
             const unitSize = Exprs.defaultUnitSizes[val.unit];
+            const metric = this.context.measureFontUnit(
+              val.unit,
+              rootFontSize,
+              this.context.rootFontProperties,
+            );
             if (unitSize) {
-              px *= unitSize;
+              px = val.num * unitSize;
+            } else if (metric != null) {
+              px = val.num * metric;
+              fromRelativeCalc = true;
+            } else if (Exprs.isViewportRelativeLengthUnit(val.unit)) {
+              px = val.num * this.context.queryUnitSize(val.unit, true);
+              // The root element must use this resolved size: an internal unit
+              // such as `2pvw` is not CSS that a browser can resolve, and the
+              // `rlh` unit and the page context use this value. A plain
+              // viewport relative unit is normally already converted to a px
+              // length by `lineHeight.evaluate()`, because the page size is not
+              // known while the root sizes are determined (the viewer viewport
+              // provides the unit size), so this branch only applies to a unit
+              // that survives the evaluation. (Review)
+              fromRelativeCalc = true;
+            } else {
+              // An unsupported dimension keeps the default root line height,
+              // as the browser keeps it for an invalid value. (Review)
+              px = null;
             }
           }
         }
-        rootLineHeight = px;
+        rootLineHeight = px != null && Number.isFinite(px) ? px : null;
+      } else if (val instanceof Css.Func) {
+        // A math function of CSS Values 4 that is not a `calc()`, e.g.
+        // `:root { line-height: round(40px, 7px) }` or `min(40px, 2em)`:
+        // `resolveRootSizingCalc()` only reduces a `calc()`, so the value is
+        // reduced with the resolver that the inherited line heights use, which
+        // also knows those functions. The `em`/`%` arguments of the root
+        // element refer to its own font size, and its `lh`/`rlh` to the line
+        // height that is being resolved (the root has no parent). (Review)
+        const resolved = CssCascade.resolveLineHeightValueToPx(
+          this.context,
+          val,
+          rootFontSize,
+          this.context.rootLineHeight,
+          this.context.rootFontProperties,
+        );
+        if (resolved != null) {
+          rootLineHeight = resolved;
+          // A function of unitless numbers, e.g. the `min(1, 2)` of
+          // `:root { line-height: min(1, 2) }`, is a `<number>`: its computed
+          // value is a multiplier of the font size, so the root element keeps
+          // the declaration, as it does for a plain unitless number. Only the
+          // recorded root line height is in px, for `rlh` and the page
+          // context. (Review)
+          fromRelativeCalc = !CssCascade.isUnitlessNumberValue(val);
+        }
+        // A value that is not resolvable here is left to the browser, as the
+        // root font size above: the root line height that this context records
+        // stays the preferred one, and `rlh` and the page context use a
+        // different metric than the rendered root element. Known limitation,
+        // as above. (Review)
       }
     }
     this.context.rootLineHeight =
-      rootLineHeight ?? this.context.fontSize() * this.context.pref.lineHeight;
+      rootLineHeight ??
+      (normalLineHeight
+        ? this.context.measureFontUnit(
+            "lh",
+            rootFontSize,
+            this.context.rootFontProperties,
+          )
+        : null) ??
+      rootFontSize * Exprs.fallbackLineHeightRatio;
     this.context.isRootLineHeightFromRelativeCalc = fromRelativeCalc;
   }
 
@@ -793,8 +1036,7 @@ export class Styler implements AbstractStyler {
       changes: Array.from(changes || []),
       changeTypes: changeTypes ? { ...changeTypes } : undefined,
     } as CounterSnapshot;
-    const lastSnapshot =
-      this.counterSnapshots[this.counterSnapshots.length - 1];
+    const lastSnapshot = this.counterSnapshots.at(-1);
     // If multiple updates occur at the same offset (e.g., relayout),
     // keep the latest snapshot so counters reflect the most recent state.
     if (lastSnapshot && lastSnapshot.offset === offset) {
@@ -817,9 +1059,7 @@ export class Styler implements AbstractStyler {
   }
 
   getLastCounterSnapshot(): CounterSnapshot | null {
-    return this.counterSnapshots.length
-      ? this.counterSnapshots[this.counterSnapshots.length - 1]
-      : null;
+    return this.counterSnapshots.length ? this.counterSnapshots.at(-1) : null;
   }
 
   /**
@@ -861,7 +1101,15 @@ export class Styler implements AbstractStyler {
         rootOffset,
       );
       if (this.boxStack.empty()) {
-        this.boxStack.push(rootStyle, rootOffset, true, newFlowChunk);
+        const rootBox = this.boxStack.push(
+          rootStyle,
+          rootOffset,
+          true,
+          newFlowChunk,
+        );
+        if (rootBox.beforeBox) {
+          this.rootFlowChunkContentFound = true;
+        }
       }
     }
     let node = this.xmldoc.getNodeByOffset(offset);
@@ -985,7 +1233,7 @@ export class Styler implements AbstractStyler {
         0,
       );
     }
-    const breakBefore = this.breakBeforeValues[startOffset] || null;
+    const breakBefore = this.breakBeforeValues.get(startOffset) || null;
     let flow = this.flows[flowName];
     if (!flow) {
       const parentFlowName = this.boxStack.lastFlowName();
@@ -1010,9 +1258,7 @@ export class Styler implements AbstractStyler {
     if (this.flowToReach == flowName) {
       this.flowToReach = null;
     }
-    if (this.flowListener) {
-      this.flowListener.encounteredFlowChunk(flowChunk, flow);
-    }
+    this.flowListener?.encounteredFlowChunk(flowChunk, flow);
     return flowChunk;
   }
 
@@ -1025,16 +1271,44 @@ export class Styler implements AbstractStyler {
       const forcedBreakOffsets = this.flows[flowName].forcedBreakOffsets;
       if (
         forcedBreakOffsets.length === 0 ||
-        forcedBreakOffsets[forcedBreakOffsets.length - 1] < offset
+        forcedBreakOffsets.at(-1) < offset
       ) {
         forcedBreakOffsets.push(offset);
       }
     }
-    const previousValue = this.breakBeforeValues[offset];
-    this.breakBeforeValues[offset] = Break.resolveEffectiveBreakValue(
-      previousValue,
-      breakValue,
+    const previousValue = this.breakBeforeValues.get(offset);
+    this.breakBeforeValues.set(
+      offset,
+      Break.resolveEffectiveBreakValue(previousValue, breakValue),
     );
+  }
+
+  /**
+   * Returns if the flow chunk of the root element has content to lay out.
+   * When the root element's content is all moved into other flows (e.g. the
+   * body only has elements with `flow-into`), it has none. Styles the rest of
+   * the document if needed to find out. (Issue #434)
+   */
+  rootFlowChunkHasContent(): boolean {
+    if (this.rootFlowChunkContentFound) {
+      return true;
+    }
+    // Styling ahead must not change the page type of the page being laid out
+    // (see also the fix for Issue #1450 in StyleInstance.selectPageMaster).
+    const savedPageType = this.cascade.currentPageType;
+    let offset = this.lastOffset;
+    while (!this.rootFlowChunkContentFound) {
+      offset += 5000;
+      if (this.styleUntil(offset, 0) === Number.POSITIVE_INFINITY) {
+        break;
+      }
+    }
+    this.cascade.currentPageType = savedPageType;
+    return this.rootFlowChunkContentFound;
+  }
+
+  private isInRootFlowChunk(box: Box): boolean {
+    return box.flowChunk.element === this.root;
   }
 
   /**
@@ -1065,6 +1339,9 @@ export class Styler implements AbstractStyler {
             this.cascade.popElement(this.last.node as Element);
             this.primary = this.primaryStack.pop();
             const box = this.boxStack.pop(this.lastOffset);
+            if (box.afterBox && this.isInRootFlowChunk(box)) {
+              this.rootFlowChunkContentFound = true;
+            }
             let breakAfter: string | null = null;
             if (box.afterBox) {
               const afterPseudoBreakBefore =
@@ -1113,6 +1390,14 @@ export class Styler implements AbstractStyler {
       if (cursor.node.nodeType != 1) {
         this.lastOffset += cursor.node.textContent.length;
         this.boxStack.encounteredTextNode(cursor.node);
+        if (
+          !this.rootFlowChunkContentFound &&
+          this.isInRootFlowChunk(this.boxStack.lastBox()) &&
+          this.boxStack.lastBox().hasBox() &&
+          this.boxStack.isNonIgnorableText(cursor.node)
+        ) {
+          this.rootFlowChunkContentFound = true;
+        }
         if (this.primary) {
           this.offsetMap.addStuckRange(this.lastOffset);
         } else {
@@ -1177,6 +1462,13 @@ export class Styler implements AbstractStyler {
               box.breakBefore,
             );
           }
+        }
+        if (
+          this.isInRootFlowChunk(box) &&
+          box.hasBox() &&
+          (box.beforeBox || (elem !== this.root && elem !== this.xmldoc.body))
+        ) {
+          this.rootFlowChunkContentFound = true;
         }
         const blockStartOffset = this.boxStack.nearestBlockStartOffset(box);
 

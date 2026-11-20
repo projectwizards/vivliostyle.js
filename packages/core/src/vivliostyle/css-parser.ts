@@ -1115,7 +1115,7 @@ export class Parser {
             break;
           case TokenType.COLON:
             if (valStack.length > 1) {
-              switch (valStack[valStack.length - 1]) {
+              switch (valStack.at(-1)) {
                 case TokenType.QMARK:
                   valStack.pop();
                   val = new Exprs.Cond(
@@ -1288,6 +1288,21 @@ export class Parser {
     }
   }
 
+  /**
+   * Raw source text of the argument of a functional pseudo-class or
+   * pseudo-element, from `funcPosition` (the position of its name) to the
+   * closing parenthesis the tokenizer is left on by
+   * `skipPseudoFunctionContents`.
+   */
+  rawPseudoFunctionArg(funcPosition: number): string {
+    const tokenizer = this.tokenizer;
+    const text = tokenizer.input.substring(
+      funcPosition,
+      tokenizer.token().position,
+    );
+    return text.substring(text.indexOf("(") + 1);
+  }
+
   skipPseudoFunctionContents(): boolean {
     let depth = 0;
     while (true) {
@@ -1339,7 +1354,7 @@ export class Parser {
 
       // FALLTHROUGH
       case TokenType.IDENT:
-        if (hasLeadingPlus && token.text.charAt(0) === "-") {
+        if (hasLeadingPlus && token.text.startsWith("-")) {
           // reject '+-n'
           return null;
         }
@@ -1443,57 +1458,8 @@ export class Parser {
     return null;
   }
 
-  makeCondition(
-    classes: string | null,
-    condition: Exprs.Val | null,
-  ): Css.Expr | null {
-    const scope = this.handler.getScope();
-    condition = condition || scope._true;
-    if (classes) {
-      const classList = classes.split(/\s+/);
-      for (const className of classList) {
-        switch (className) {
-          case "vertical":
-            condition = Exprs.and(
-              scope,
-              condition,
-              new Exprs.Not(scope, new Exprs.Named(scope, "pref-horizontal")),
-            );
-            break;
-          case "horizontal":
-            condition = Exprs.and(
-              scope,
-              condition,
-              new Exprs.Named(scope, "pref-horizontal"),
-            );
-            break;
-          case "day":
-            condition = Exprs.and(
-              scope,
-              condition,
-              new Exprs.Not(scope, new Exprs.Named(scope, "pref-night-mode")),
-            );
-            break;
-          case "night":
-            condition = Exprs.and(
-              scope,
-              condition,
-              new Exprs.Named(scope, "pref-night-mode"),
-            );
-            break;
-          default:
-            condition = scope._false;
-        }
-      }
-    }
-    if (condition === scope._true) {
-      return null;
-    }
-    return new Css.Expr(condition);
-  }
-
   isInsidePropertyOnlyRule(): boolean {
-    switch (this.ruleStack[this.ruleStack.length - 1]) {
+    switch (this.ruleStack.at(-1)) {
       case "[selector]":
       case "font-face":
       case "counter-style":
@@ -1525,6 +1491,7 @@ export class Parser {
     let num: number;
     let val: Css.Val | null = null;
     let params: (number | string)[] | null;
+    let funcPosition = 0;
     let selectorStartPosition: number | null = null;
 
     if (parsingStyleAttr) {
@@ -1552,11 +1519,11 @@ export class Parser {
       if (
         this.actions === actionsPropVal &&
         this.errorBrackets.length > 0 &&
-        (token.type === this.errorBrackets[this.errorBrackets.length - 1] ||
+        (token.type === this.errorBrackets.at(-1) ||
           token.type === TokenType.SEMICOL ||
           token.type === TokenType.BANG)
       ) {
-        if (token.type === this.errorBrackets[this.errorBrackets.length - 1]) {
+        if (token.type === this.errorBrackets.at(-1)) {
           this.errorBrackets.pop();
           if (token.type === TokenType.C_PAR) {
             // For nested func in parens (Issue #1014)
@@ -1772,6 +1739,7 @@ export class Parser {
               continue;
             case TokenType.FUNC:
               text = token.text.toLowerCase();
+              funcPosition = token.position;
               tokenizer.consume();
               switch (text) {
                 case "is":
@@ -1893,12 +1861,21 @@ export class Parser {
                     tokenizer.consume();
                     break;
                   }
-                // fall through
-                default:
+                  // An argument that is not a single identifier is invalid;
+                  // the empty params array tells the handler to void it.
                   params = [];
                   if (!this.skipPseudoFunctionContents()) {
                     break pseudoclassType;
                   }
+                  break;
+                default:
+                  // A pseudo-class this engine does not implement. Its raw
+                  // argument text goes to the handler, which validates the
+                  // whole functional selector with `CSS.supports`.
+                  if (!this.skipPseudoFunctionContents()) {
+                    break pseudoclassType;
+                  }
+                  params = [this.rawPseudoFunctionArg(funcPosition)];
               }
               token = tokenizer.token();
               if (token.type == TokenType.C_PAR) {
@@ -1937,14 +1914,24 @@ export class Parser {
               continue;
             case TokenType.FUNC:
               text = token.text.toLowerCase();
+              funcPosition = token.position;
               tokenizer.consume();
               if (text == "nth-fragment") {
                 params = this.readNthPseudoParams();
                 if (params === null) {
                   break;
                 }
-              } else {
+              } else if (text == "first-n-lines") {
                 params = this.readPseudoParams();
+              } else {
+                // A pseudo-element this engine does not implement. Its raw
+                // argument text goes to the handler, which validates the whole
+                // functional selector with `CSS.supports`; `readPseudoParams`
+                // would reject tokens the argument may legitimately contain.
+                if (!this.skipPseudoFunctionContents()) {
+                  break;
+                }
+                params = [this.rawPseudoFunctionArg(funcPosition)];
               }
               token = tokenizer.token();
               if (token.type == TokenType.C_PAR) {
@@ -2286,8 +2273,8 @@ export class Parser {
             } else if (
               this.exprContext === ExprContext.SUPPORTS &&
               token.text.toLowerCase() === "not" &&
-              valStack[valStack.length - 1] !== OP_MEDIA_AND &&
-              valStack[valStack.length - 1] !== OP_MEDIA_OR &&
+              valStack.at(-1) !== OP_MEDIA_AND &&
+              valStack.at(-1) !== OP_MEDIA_OR &&
               (token1.type === TokenType.O_PAR ||
                 token1.type === TokenType.FUNC)
             ) {
@@ -2441,7 +2428,7 @@ export class Parser {
           this.inStyleDeclaration = false;
           if (this.ruleStack.length) {
             this.ruleStack.pop();
-            switch (this.ruleStack[this.ruleStack.length - 1]) {
+            switch (this.ruleStack.at(-1)) {
               case "page":
               case "-epubx-page-master":
               case "-epubx-partition-group":
@@ -2859,7 +2846,7 @@ export class Parser {
           // Close bracket while skipping error syntax
           if (
             this.errorBrackets.length > 0 &&
-            this.errorBrackets[this.errorBrackets.length - 1] == token.type
+            this.errorBrackets.at(-1) == token.type
           ) {
             this.errorBrackets.pop();
           }
@@ -2914,8 +2901,7 @@ export class Parser {
                   }
                   if (
                     this.errorBrackets.length > 0 &&
-                    this.errorBrackets[this.errorBrackets.length - 1] ==
-                      token.type
+                    this.errorBrackets.at(-1) == token.type
                   ) {
                     this.errorBrackets.pop();
                   }
@@ -2935,8 +2921,7 @@ export class Parser {
                 case TokenType.C_BRK:
                   if (
                     this.errorBrackets.length > 0 &&
-                    this.errorBrackets[this.errorBrackets.length - 1] ==
-                      token.type
+                    this.errorBrackets.at(-1) == token.type
                   ) {
                     this.errorBrackets.pop();
                   }
@@ -3066,7 +3051,6 @@ export function parseStylesheet(
   tokenizer: CssTokenizer.Tokenizer,
   handler: DispatchParserHandler,
   baseURL: string | null,
-  classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
   // A style sheet given as text alone has no base. resolveURL() reads the
@@ -3078,18 +3062,16 @@ export function parseStylesheet(
       new CssTokenizer.Tokenizer(expandedText, handler),
       handler,
       base,
-      classes,
       media,
     );
   }
-  return parseStylesheetInternal(tokenizer, handler, base, classes, media);
+  return parseStylesheetInternal(tokenizer, handler, base, media);
 }
 
 function parseStylesheetInternal(
   tokenizer: CssTokenizer.Tokenizer,
   handler: DispatchParserHandler,
   baseURL: string,
-  classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
   const frame: Task.Frame<boolean> = Task.newFrame("parseStylesheet");
@@ -3102,7 +3084,6 @@ function parseStylesheetInternal(
       baseURL,
     );
   }
-  condition = parser.makeCondition(classes, condition && condition.toExpr());
   if (condition) {
     handler.startMediaRule(condition);
     handler.startRuleBody();
@@ -3126,7 +3107,7 @@ function parseStylesheetInternal(
           const innerFrame: Task.Frame<boolean> = Task.newFrame(
             "parseStylesheet.import",
           );
-          parseStylesheetFromURL(resolvedURL, handler, null, null).then(() => {
+          parseStylesheetFromURL(resolvedURL, handler, null).then(() => {
             if (parser.importCondition) {
               handler.endRule();
             }
@@ -3162,14 +3143,13 @@ export function parseStylesheetFromText(
   text: string,
   handler: DispatchParserHandler,
   baseURL: string | null,
-  classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
   return Task.handle(
     "parseStylesheetFromText",
     (frame) => {
       const tok = new CssTokenizer.Tokenizer(text, handler);
-      parseStylesheet(tok, handler, baseURL, classes, media).thenFinish(frame);
+      parseStylesheet(tok, handler, baseURL, media).thenFinish(frame);
     },
     (frame, err) => {
       Logging.logger.warn(err, `Failed to parse stylesheet text: ${text}`);
@@ -3181,7 +3161,6 @@ export function parseStylesheetFromText(
 export function parseStylesheetFromURL(
   url: string,
   handler: DispatchParserHandler,
-  classes: string | null,
   media: string | null,
 ): Task.Result<boolean> {
   return Task.handle(
@@ -3195,7 +3174,6 @@ export function parseStylesheetFromURL(
             response.responseText,
             handler,
             url,
-            classes,
             media,
           ).then((result) => {
             if (!result) {

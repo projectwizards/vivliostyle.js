@@ -93,7 +93,7 @@ export abstract class PageBox<
     const specified = this.specified;
     const destSpecified = dest.specified;
     for (const prop in specified) {
-      if (Object.prototype.hasOwnProperty.call(specified, prop)) {
+      if (Object.hasOwn(specified, prop)) {
         destSpecified[prop] = specified[prop];
       }
     }
@@ -452,6 +452,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
   pageMasterInstance: PageMasterInstance | null = null;
   namedValues: { [key: string]: Exprs.Val } = {};
   namedFuncs: { [key: string]: Exprs.Val } = {};
+  writingMode: string = "horizontal-tb";
   vertical: boolean = false;
   rtl: boolean = false;
   suppressEmptyBoxGeneration: boolean = false;
@@ -563,9 +564,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       } else if (name == "measure") {
         altName = this.vertical ? "height" : "width";
       } else {
-        const map = this.vertical
-          ? CssCascade.couplingMapVert
-          : CssCascade.couplingMapHor;
+        const map = CssCascade.getCouplingMap(this.writingMode, this.rtl);
         altName = name;
         for (const key in map) {
           altName = altName.replace(key, map[key]);
@@ -981,11 +980,32 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       regionIds,
       false,
     );
-    this.vertical = CssCascade.isVertical(
+    if (context instanceof StyleInstance) {
+      // Adaptive page-box declarations are not part of the document element
+      // cascade, so their var() references have not gone through the usual
+      // cascade substitution pass. Resolve them here before checking geometry;
+      // a substituted browser-only viewport unit cannot be evaluated by the
+      // page-box layout code.
+      context.styler.cascade.applyVarFilter([cascMap], null);
+    }
+    // Variable substitution can introduce browser-only units after page-box
+    // parsing. Treat them as invalid at computed-value time before page
+    // dimensions and margins are converted to expression values. This applies
+    // to both @page boxes and adaptive page-template partitions.
+    for (const name in cascMap) {
+      if (
+        CssValidator.isEngineEvaluatedLengthProperty(name, true) &&
+        CssValidator.containsBrowserViewportUnit(cascMap[name].value)
+      ) {
+        cascMap[name] = cascMap[name].withValue(Css.ident.unset);
+      }
+    }
+    this.writingMode = CssCascade.resolveWritingMode(
       cascMap,
       context,
-      this.parentInstance ? this.parentInstance.vertical : false,
+      this.parentInstance?.writingMode ?? "horizontal-tb",
     );
+    this.vertical = this.writingMode !== "horizontal-tb";
     this.rtl = CssCascade.isRtl(
       cascMap,
       context,
@@ -1001,7 +1021,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     CssCascade.convertToPhysical(
       cascMap,
       style,
-      this.vertical,
+      this.writingMode,
       this.rtl,
       isLeftPage,
       (name, cascVal) => cascVal.value,
@@ -1035,7 +1055,7 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       if (
         name === "font-size" &&
         context.isRelativeRootFontSize &&
-        context.rootFontSize
+        context.rootFontSize != null
       ) {
         val = new Css.Numeric(context.rootFontSize, "px");
       } else {
@@ -1268,7 +1288,9 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     container: Vtree.Container,
   ): void {
     if (this.vertical) {
-      this.assignRightPosition(context, container);
+      if (container.getBoxDir() < 0)
+        this.assignRightPosition(context, container);
+      else this.assignLeftPosition(context, container);
     } else {
       this.assignTopPosition(context, container);
     }
@@ -1279,7 +1301,9 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     container: Vtree.Container,
   ): void {
     if (this.vertical) {
-      this.assignLeftPosition(context, container);
+      if (container.getBoxDir() < 0)
+        this.assignLeftPosition(context, container);
+      else this.assignRightPosition(context, container);
     } else {
       this.assignBottomPosition(context, container);
     }
@@ -1333,12 +1357,11 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     docFaces: Font.DocumentFaces,
     clientLayout: Vtree.ClientLayout,
   ): void {
-    if (!this.parentInstance || this.vertical != this.parentInstance.vertical) {
-      Base.setCSSProperty(
-        container.element,
-        "writing-mode",
-        this.vertical ? "vertical-rl" : "horizontal-tb",
-      );
+    if (
+      !this.parentInstance ||
+      this.writingMode !== this.parentInstance.writingMode
+    ) {
+      Base.setCSSProperty(container.element, "writing-mode", this.writingMode);
     }
     if (!this.parentInstance || this.rtl != this.parentInstance.rtl) {
       Base.setCSSProperty(
@@ -1523,14 +1546,19 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
       this.assignStartEndPosition(context, container);
     }
     if (this.vertical ? this.isAutoWidth : this.isAutoHeight) {
-      if (
-        this.vertical
-          ? this.isRightDependentOnAutoWidth
-          : this.isTopDependentOnAutoHeight
-      ) {
-        this.assignBeforePosition(context, container);
+      // Finalize physical sizes in dependency order. assignLeftPosition()
+      // writes both left and width, even when block-start is the left edge.
+      if (this.vertical) {
+        if (this.isRightDependentOnAutoWidth) {
+          this.assignRightPosition(context, container);
+        }
+        this.assignLeftPosition(context, container);
+      } else {
+        if (this.isTopDependentOnAutoHeight) {
+          this.assignTopPosition(context, container);
+        }
+        this.assignBottomPosition(context, container);
       }
-      this.assignAfterPosition(context, container);
     }
     if (columnCount > 1) {
       const ruleWidth = this.getPropAsNumber(context, "column-rule-width");
@@ -1557,9 +1585,11 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
             parent?: {
               getBlockEndEdgeOfBlockStartFloats?: (
                 inlinePos?: number,
+                writingMode?: string,
               ) => number;
               getBlockStartEdgeOfBlockEndFloats?: (
                 inlinePos?: number,
+                writingMode?: string,
               ) => number;
             };
           };
@@ -1583,10 +1613,12 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
           const blockStartFloatEndEdge =
             columnLike.pageFloatLayoutContext?.parent?.getBlockEndEdgeOfBlockStartFloats?.(
               physicalInlinePos,
+              column.writingMode,
             ) ?? NaN;
           const blockEndFloatStartEdge =
             columnLike.pageFloatLayoutContext?.parent?.getBlockStartEdgeOfBlockEndFloats?.(
               physicalInlinePos,
+              column.writingMode,
             ) ?? NaN;
           const blockStartLimit = isFinite(blockStartFloatEndEdge)
             ? this.vertical
@@ -1616,14 +1648,20 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
           const renderedEnd = renderedStart + size;
           const adjustedStart = Math.max(
             renderedStart,
-            isFinite(this.vertical ? blockEndLimit : blockStartLimit)
-              ? Math.max(0, this.vertical ? blockEndLimit : blockStartLimit)
+            isFinite(column.getBoxDir() < 0 ? blockEndLimit : blockStartLimit)
+              ? Math.max(
+                  0,
+                  column.getBoxDir() < 0 ? blockEndLimit : blockStartLimit,
+                )
               : 0,
           );
           const adjustedEnd = Math.min(
             renderedEnd,
-            isFinite(this.vertical ? blockStartLimit : blockEndLimit)
-              ? Math.max(0, this.vertical ? blockStartLimit : blockEndLimit)
+            isFinite(column.getBoxDir() < 0 ? blockStartLimit : blockEndLimit)
+              ? Math.max(
+                  0,
+                  column.getBoxDir() < 0 ? blockStartLimit : blockEndLimit,
+                )
               : renderedEnd,
           );
           const adjustedSize = Math.max(0, adjustedEnd - adjustedStart);
@@ -1698,14 +1736,14 @@ export class PageBoxInstance<P extends PageBox = PageBox<any>> {
     }
     if (this.pageBox.pseudoName == userAgentPageMasterPseudo) {
       for (const name in docElementStyle) {
-        if (name.match(/^background-/) || name == "writing-mode") {
+        if (name.startsWith("background-") || name == "writing-mode") {
           style[name] = docElementStyle[name];
         }
       }
     }
     if (this.pageBox.pseudoName == "layout-host") {
       for (const name in docElementStyle) {
-        if (!name.match(/^background-/) && name != "writing-mode") {
+        if (!name.startsWith("background-") && name != "writing-mode") {
           style[name] = docElementStyle[name];
         }
       }
@@ -2100,6 +2138,8 @@ export class PageBoxParserHandler
   extends CssParser.SlaveParserHandler
   implements CssValidator.PropertyReceiver
 {
+  readonly ruleType = "page";
+
   constructor(
     scope: Exprs.LexicalScope,
     owner: CssParser.DispatchParserHandler,

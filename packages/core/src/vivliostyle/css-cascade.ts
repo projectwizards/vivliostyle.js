@@ -19,10 +19,12 @@
  * @fileoverview CssCascade - CSS Cascade.
  */
 import * as Asserts from "./asserts";
+import { fontMetricProperties, type FontProperties } from "./font-metrics";
 import * as Base from "./base";
 import * as CmykStore from "./cmyk-store";
 import * as CounterStyle from "./counter-style";
 import * as Css from "./css";
+import * as CssLogicalUtil from "./css-logical-util";
 import * as CssParser from "./css-parser";
 import * as CssProp from "./css-prop";
 import * as CssTokenizer from "./css-tokenizer";
@@ -33,6 +35,7 @@ import * as LayoutHelper from "./layout-helper";
 import * as Logging from "./logging";
 import * as Matchers from "./matchers";
 import * as Plugin from "./plugin";
+import * as RangeClientRects from "./range-client-rects";
 import * as SemanticFootnote from "./semantic-footnote";
 import * as Vtree from "./vtree";
 import { CssCascade, CssStyler, Layout } from "./types";
@@ -47,6 +50,7 @@ export type ElementStyle = {
 };
 
 export const inheritedProps = {
+  ...Object.fromEntries(fontMetricProperties.map((name) => [name, true])),
   "border-collapse": true,
   "border-spacing": true,
   "caption-side": true,
@@ -151,10 +155,7 @@ export function getPolyfilledInheritedProps(): string[] {
   const hooks: Plugin.PolyfilledInheritedPropsHook[] = Plugin.getHooksForName(
     Plugin.HOOKS.POLYFILLED_INHERITED_PROPS,
   );
-  return hooks.reduce(
-    (props, f) => props.concat(f()),
-    ([] as string[]).concat(polyfilledInheritedProps),
-  );
+  return [...polyfilledInheritedProps, ...hooks.flatMap((f) => f())];
 }
 
 export const supportedNamespaces = {
@@ -345,6 +346,11 @@ const ORIGIN_UNIT = 0x1000000;
  * layer order is reversed.
  */
 const FIRST_IMPORTANT_ORIGIN = 4;
+
+/** Whether a winning declaration belongs to an important cascade origin. */
+export function isImportant(cascVal: CascadePriority): boolean {
+  return Math.floor(cascVal.priority / ORIGIN_UNIT) >= FIRST_IMPORTANT_ORIGIN;
+}
 
 let lastRuleId = 0;
 
@@ -684,10 +690,14 @@ function isRolledBackBy(
   candidate: CascadeValue,
   reverting: CascadeValue,
 ): boolean {
-  switch (reverting.value) {
-    case Css.ident.revert_rule:
+  // The kind has to be dispatched case-insensitively as well: a value that a
+  // var() substitution puts into the declaration is not canonicalized, and
+  // mixing the kinds up would drop declarations of the wrong origins or rules.
+  // (Review)
+  switch (Css.getRollbackKind(reverting.value)) {
+    case "revert-rule":
       return candidate.ruleId === reverting.ruleId;
-    case Css.ident.revert_layer:
+    case "revert-layer":
       // `revert-layer` rolls back to the layers *before* the current one, so
       // the current layer and every later one drop out — including the
       // important declarations of later layers, which outrank the current
@@ -931,11 +941,11 @@ export function isSpecialName(name: string): boolean {
 }
 
 export function isMapName(name: string): boolean {
-  return name.charAt(0) === "_" && name !== "_viewConditionalStyles";
+  return name.startsWith("_") && name !== "_viewConditionalStyles";
 }
 
 export function isPropName(name: string): boolean {
-  return name.charAt(0) !== "_" && !SPECIALS[name];
+  return !name.startsWith("_") && !SPECIALS[name];
 }
 
 export function isInherited(name: string): boolean {
@@ -1047,7 +1057,7 @@ export function mergeIn(
       // special properties: list of all assigned values
       const as = getSpecial(style, prop);
       const ts = getMutableSpecial(target, prop);
-      Array.prototype.push.apply(ts, as);
+      ts.push(...as);
     } else {
       // regular properties: higher priority wins
       const cascval = getProp(style, prop);
@@ -1094,49 +1104,1418 @@ export function chainActions(
   return action;
 }
 
+/**
+ * Check whether the value is the given CSS keyword. The CSS keywords are ASCII
+ * case-insensitive, and values substituted from a custom property (`var()`)
+ * are not canonicalized to lowercase by the validator, so the names are
+ * compared case-insensitively. (Issue #2174 follow-up)
+ */
+export function hasKeywordName(value: Css.Val, name: string): boolean {
+  return value instanceof Css.Ident && value.name.toLowerCase() === name;
+}
+
+/**
+ * Whether the value of an inherited property makes the element take the value
+ * of its parent: `inherit`, `unset` (the same as `inherit` for an inherited
+ * property), and `currentcolor` in `color`. The keywords are compared by name,
+ * because a keyword that comes from a custom property is not canonicalized,
+ * e.g. `--x: INHERIT; color: var(--x)`.
+ */
+export function isInheritingValue(propName: string, value: Css.Val): boolean {
+  return (
+    hasKeywordName(value, "inherit") ||
+    hasKeywordName(value, "unset") ||
+    (propName === "color" && hasKeywordName(value, "currentcolor"))
+  );
+}
+
+/**
+ * Resolve the relative font-size keywords `larger`/`smaller` against the
+ * parent font-size, using the same factor (1.2) as browsers. (Issue #2174)
+ */
+export function resolveRelativeFontSizeKeyword(
+  ident: Css.Ident,
+  parentFontSize: number,
+): number {
+  return hasKeywordName(ident, "larger")
+    ? parentFontSize * 1.2
+    : parentFontSize / 1.2;
+}
+
+/**
+ * Resolve the relative font-weight keyword `bolder`/`lighter` against the
+ * inherited font weight, following the CSS Fonts 4 relative weights table:
+ * `bolder` uses 400 for an inherited weight below 350, 700 below 550 and 900
+ * up to 900, while a heavier inherited weight (up to 1000) is kept as it is;
+ * `lighter` uses 100 (or the inherited weight when it is smaller than 100),
+ * 400 below 750 and 700 otherwise.
+ */
+export function resolveRelativeFontWeight(
+  keyword: Css.Ident,
+  inheritedWeight: number,
+): number {
+  if (hasKeywordName(keyword, "bolder")) {
+    if (inheritedWeight < 350) {
+      return 400;
+    }
+    if (inheritedWeight < 550) {
+      return 700;
+    }
+    return inheritedWeight > 900 ? inheritedWeight : 900;
+  }
+  if (inheritedWeight < 550) {
+    return Math.min(inheritedWeight, 100);
+  }
+  return inheritedWeight < 750 ? 400 : 700;
+}
+
+/**
+ * The absolute font-size keywords in the order of the tables below: the rows
+ * of the table are the default font size in px (9 to 16, the range that the
+ * engines have a table for) and the columns are xx-small..xxx-large. The
+ * engines share this table (Blink `font_size_functions.cc`, Gecko
+ * `to_length_without_context` and its `nsRuleNode::CalcFontPointSize`, WebKit
+ * `StyleFontSizeFunctions.cpp`), e.g. the 16px row is 9/10/13/16/18/24/32/48 px;
+ * `xxx-small` is not a keyword of CSS Fonts 4. The quirks mode table of the
+ * engines and the table of the fixed default size, which a monospace element
+ * uses, are not modelled. CSS Fonts 4 gives the factors of
+ * `fontSizeKeywordFactors` as a guideline for the table, and the engines use
+ * exactly those factors, with 8/9 rounded to 0.89, when the default font size
+ * is outside the table; `medium` is then the default font size. Vivliostyle
+ * models the default font size as `context.initialFontSize`. (Issue #2174
+ * follow-up, Review)
+ */
+const fontSizeKeywordNames = [
+  "xx-small",
+  "x-small",
+  "small",
+  "medium",
+  "large",
+  "x-large",
+  "xx-large",
+  "xxx-large",
+];
+
+const fontSizeKeywordTable = [
+  [9, 9, 9, 9, 11, 14, 18, 27],
+  [9, 9, 9, 10, 12, 15, 20, 30],
+  [9, 9, 10, 11, 13, 17, 22, 33],
+  [9, 9, 10, 12, 14, 18, 24, 36],
+  [9, 10, 12, 13, 16, 20, 26, 39],
+  [9, 10, 12, 14, 17, 21, 28, 42],
+  [9, 10, 13, 15, 18, 23, 30, 45],
+  [9, 10, 13, 16, 18, 24, 32, 48],
+];
+
+// The scaling factors of CSS Fonts 4, in the order of the keywords, as the
+// engines apply them: 3/5, 3/4, 8/9 (rounded to 0.89), 1, 6/5, 3/2, 2/1, 3/1.
+const fontSizeKeywordFactors = [0.6, 0.75, 0.89, 1, 1.2, 1.5, 2, 3];
+
+/**
+ * Resolve an absolute font-size keyword (e.g. "small") to px against the
+ * default font size. Returns null when the value is not an absolute keyword.
+ */
+export function resolveAbsoluteFontSizeKeyword(
+  value: Css.Val,
+  defaultFontSize: number,
+): number | null {
+  if (value instanceof Css.Ident) {
+    const index = fontSizeKeywordNames.indexOf(value.name.toLowerCase());
+    if (index < 0) {
+      return null;
+    }
+    // The engines look the table up with a rounded default font size and apply
+    // the factors to the exact one. (Review)
+    const rounded = Math.round(defaultFontSize);
+    return rounded >= 9 && rounded <= 16
+      ? fontSizeKeywordTable[rounded - 9][index]
+      : defaultFontSize * fontSizeKeywordFactors[index];
+  }
+  return null;
+}
+
+/**
+ * Whether a font weight number is in the range of CSS Fonts 4, which accepts
+ * `<number [1,1000]>` (or the `normal`/`bold` keywords). (Review)
+ */
+export function isValidFontWeight(num: number): boolean {
+  return Number.isFinite(num) && num >= 1 && num <= 1000;
+}
+
+/**
+ * Whether a declared font-size value is valid although it cannot be resolved to
+ * a length here: a browser-supported value that the validator passes through,
+ * e.g. the `math` keyword (whose value depends on the math depth) or a unit
+ * that only the browser resolves such as `ch`. A value that a var()
+ * substitution made invalid and a value with an unresolved var() are not
+ * preserved. (Review)
+ */
+export function isValidUnresolvedFontSize(
+  context: Exprs.Context,
+  value: Css.Val,
+): boolean {
+  return (
+    !CssValidator.containsVar(value) &&
+    // A supported function whose computation is not a number, e.g. the
+    // `round(20px, 0px)` of a declaration, is not a value that only the
+    // browser resolves: it is invalid at computed-value time, so the element
+    // keeps the font size that the source parent accumulated, as the browser
+    // inherits it. (Review)
+    !evaluatesToNaN(context, value) &&
+    CSS.supports("font-size", value.toString())
+  );
+}
+
+/**
+ * Whether a value is a calculation of a supported math function that evaluates
+ * to `NaN`, e.g. the `log(100, 0)` or the `round(40px, 0)` of a declaration:
+ * the browser accepts such a declaration but its computed value is not a
+ * number, which makes the declaration invalid at computed-value time, so the
+ * property inherits the parent's value. A value that this engine cannot
+ * evaluate, e.g. one with a unit that only the browser resolves, is not
+ * reported: it may well become a number in the browser. (Review)
+ */
+export function evaluatesToNaN(
+  context: Exprs.Context,
+  value: Css.Val,
+): boolean {
+  if (
+    !(value instanceof Css.Func || value instanceof Css.Expr) ||
+    CssValidator.containsVar(value)
+  ) {
+    return false;
+  }
+  if (/infinity/i.test(value.toString())) {
+    // A value that already contains an infinite number, e.g. the
+    // `calc(exp(1000))` that a length cannot represent, is not what this check
+    // looks for: the name is a constant of the evaluator
+    // (`Exprs.Context.evalName()`) and the browsers clamp such a calculation
+    // rather than discard it. A `NaN` in the text is deliberately not
+    // short-circuited: the constant and a `NaN` that a function computes are
+    // the same value for the browsers, so both are reported here and the
+    // declarations that depend on it inherit, like the other invalid values.
+    // (The browsers censor a `NaN` to zero where the type matches the property
+    // instead; this engine keeps the inherited value for the basis values of
+    // detached content, see the limitations of the pull request. Review)
+    return false;
+  }
+  const visitor = new CalcFilterVisitor(context, true);
+  // The expression evaluator reduces a math function when it is the
+  // calculation of a `calc()`, so the value is wrapped like the callers of the
+  // number and length resolvers wrap it.
+  new Css.Func("calc", [value]).visit(visitor);
+  return visitor.evaluatedToNaN;
+}
+
+/**
+ * Whether a declared line height is invalid: `line-height` accepts `normal`, a
+ * non-negative number or a non-negative length or percentage, so any other
+ * post-substitution value is rejected by the browser, which keeps the inherited
+ * line height. (Review)
+ */
+export function isInvalidLineHeight(
+  context: Exprs.Context,
+  value: Css.Val,
+): boolean {
+  if (
+    value === Css.empty ||
+    CssValidator.containsVar(value) ||
+    Css.isDefaultingValue(value) ||
+    hasKeywordName(value, "normal")
+  ) {
+    // The CSS-wide keywords are materialized by the walk, and a value with an
+    // unresolved var() is not known to be invalid here.
+    return false;
+  }
+  if (value instanceof Css.Expr || value instanceof Css.Func) {
+    // A math function is allowed until it is evaluated, but one that is invalid
+    // at computed-value time, e.g. the `min(10px, 2)` that a var() substitution
+    // put into the declaration, makes the browser reject the declaration and
+    // keep the inherited line height. `CSS.supports()` only knows the syntax,
+    // so a supported function whose result is not a number, e.g.
+    // `log(100, 0)`, is detected by evaluating it. The internal viewport units
+    // of this engine are treated as the lengths they are, because the browser
+    // does not know them, while a value that mixes types (`min(2pvw, 1)`) or
+    // uses an unknown function is rejected like any other. (Review)
+    return (
+      !CSS.supports("line-height", checkableText(value)) ||
+      evaluatesToNaN(context, value)
+    );
+  }
+  if (value instanceof Css.Num) {
+    return value.num < 0;
+  }
+  if (value instanceof Css.Numeric) {
+    return value.num < 0 || !CSS.supports("line-height", checkableText(value));
+  }
+  // Any other form, i.e. an identifier other than `normal`, a string or a
+  // list that a var() substitution put into the declaration, is rejected.
+  return true;
+}
+
+/**
+ * Whether a declared font-weight value is invalid: `font-weight` accepts a
+ * number in the 1-1000 range of CSS Fonts 4 and the keywords (the relative
+ * `bolder`/`lighter` are resolved by the visitor), so every other
+ * post-substitution form, e.g. the `nonsense` or `700px` that a var()
+ * substitution put into the declaration, is rejected by the browser, which
+ * inherits the parent font weight. A math function is valid and is validated
+ * after it has been evaluated (a value outside the range is clamped, one whose
+ * result is not a number, e.g. `log(100, 0)`, is invalid). (Review)
+ */
+export function isInvalidFontWeight(
+  context: Exprs.Context,
+  value: Css.Val,
+): boolean {
+  if (value instanceof Css.Num) {
+    return !isValidFontWeight(value.num);
+  }
+  if (value instanceof Css.Ident) {
+    if (value === Css.empty || Css.isRollbackValue(value)) {
+      // Not a value of this property: it is handled elsewhere.
+      return false;
+    }
+    return !(
+      hasKeywordName(value, "normal") ||
+      hasKeywordName(value, "bold") ||
+      hasKeywordName(value, "bolder") ||
+      hasKeywordName(value, "lighter") ||
+      // The CSS-wide keywords are handled by the walk of the detached content;
+      // compare the names, because a keyword that comes from a custom property
+      // is not canonicalized.
+      hasKeywordName(value, "initial") ||
+      hasKeywordName(value, "inherit") ||
+      hasKeywordName(value, "unset")
+    );
+  }
+  if (value instanceof Css.Func || value instanceof Css.Expr) {
+    // A math function is valid as long as the browser accepts it: a function
+    // that is invalid at computed-value time, e.g. the `min(900px, 1em)` that a
+    // var() substitution put into the declaration, is rejected, while one whose
+    // value this engine does not evaluate, e.g. `round(650, 100)`, is left for
+    // the browser. A supported function whose result is not a number, e.g.
+    // `log(100, 0)`, is invalid as well: the element inherits the parent font
+    // weight, which a relative keyword of a descendant must resolve against.
+    // (Review)
+    return (
+      !CSS.supports("font-weight", value.toString()) ||
+      evaluatesToNaN(context, value)
+    );
+  }
+  return true;
+}
+
+/**
+ * Whether a function value is valid for a property in the sense of the
+ * browser. The math functions of CSS Values 4 are evaluated by this engine as
+ * numbers of its expression language, which converts every dimension to px, so
+ * a function whose arguments or result have a type that the property does not
+ * accept — e.g. the `round(20px, 7)` that rounds a length to a multiple of a
+ * number, or the number that `sign()` returns — must not become a computed
+ * value here: such a declaration is invalid, and the element inherits. A
+ * value that is not a function is valid as far as this check is concerned.
+ * (Review)
+ */
+function isSupportedFunctionValue(propName: string, value: Css.Val): boolean {
+  return (
+    !(value instanceof Css.Func || value instanceof Css.Expr) ||
+    CSS.supports(propName, value.toString())
+  );
+}
+
+/**
+ * Whether a function value is one that the browser rejects for the property,
+ * while the math functions of this engine could evaluate it: e.g. the
+ * `calc(round(20px, 7))` that a var() substitution put into a declaration,
+ * whose `round()` step has a type that the property does not accept. Such a
+ * declaration is invalid at computed-value time, so the browser keeps the
+ * inherited value, and this engine must not make it valid by evaluating the
+ * function. A function with an internal viewport unit (`pv*`) is not such a
+ * value: the browser does not know those units, while this engine resolves
+ * them. Vivliostyle page properties are checked using standard properties
+ * with the same math-value grammar.
+ */
+function isFunctionRejectedByBrowser(
+  propName: string,
+  value: Css.Val,
+): boolean {
+  if (propName === "size") {
+    // @page size is a descriptor: do not depend on whether the browser also
+    // exposes a property named size. Check each dimension as a length only.
+    const dimensions = value instanceof Css.SpaceList ? value.values : [value];
+    return dimensions.some(
+      (dimension) =>
+        needsMathFunctionTypeCheck(dimension) &&
+        dimension instanceof Css.Func &&
+        !CSS.supports("border-top-width", checkableText(dimension)),
+    );
+  }
+  // Reuse the layout coupling maps for browser-unknown logical/page sides.
+  // Shorthand aliases such as inset-inside have already become inside here.
+  if (!CSS.supports(propName, "initial")) {
+    propName =
+      couplingMapHor[propName] ?? couplingMapLeftPage[propName] ?? propName;
+  }
+  // Only functions are checked, so keyword differences do not matter here.
+  switch (propName) {
+    case "bleed":
+    case "crop-offset":
+    case "min-page-width":
+    case "min-page-height":
+    case "snap-width":
+    case "snap-height":
+      propName = "outline-offset";
+      break;
+    case "float-min-wrap-block":
+      propName = "padding-left";
+      break;
+    case "flow-linger":
+    case "flow-priority":
+    case "page":
+      propName = "z-index";
+      break;
+    case "utilization":
+      // z-index accepts signed number calculations, including fractions. Its
+      // integer rounding is irrelevant: only syntax/types are checked here.
+      propName = "z-index";
+      break;
+  }
+  return (
+    value instanceof Css.Func &&
+    CSS.supports(propName, "initial") &&
+    !CSS.supports(propName, checkableText(value))
+  );
+}
+
+/**
+ * Check values containing math functions other than calc(), with no
+ * functions outside CSS math. Browser validation must not reject functions
+ * that Vivliostyle resolves itself, such as `leader()`, or change the legacy
+ * calc() arithmetic used by existing publications.
+ */
+class MathFunctionVisitor extends Css.Visitor {
+  isMath = true;
+  hasNonCalcMath = false;
+
+  override visitFunc(func: Css.Func): Css.Val | null {
+    if (
+      func.name.toLowerCase() !== "calc" &&
+      func.name.toLowerCase() !== "min" &&
+      func.name.toLowerCase() !== "max" &&
+      func.name.toLowerCase() !== "clamp" &&
+      !OTHER_MATH_FUNCTION_NAMES.includes(func.name.toLowerCase())
+    ) {
+      this.isMath = false;
+    } else if (this.isMath) {
+      if (func.name.toLowerCase() !== "calc") {
+        this.hasNonCalcMath = true;
+      }
+      this.visitValues(func.values);
+    }
+    return null;
+  }
+}
+
+function needsMathFunctionTypeCheck(value: Css.Val): boolean {
+  const visitor = new MathFunctionVisitor();
+  value.visit(visitor);
+  // Keep the legacy calc() evaluator's permissive arithmetic, including
+  // `calc(0 - 10px)`, which existing publications use. Only the newly
+  // evaluated math functions and min()/max()/clamp() need this type check.
+  return visitor.isMath && visitor.hasNonCalcMath;
+}
+
+/**
+ * The value in the form that `CSS.supports()` can check: the internal page
+ * viewport units of this engine are replaced by a length, as
+ * `Css.withoutPageViewportUnits()` does, because a browser does not know those
+ * units although this engine resolves them, e.g. against the size of the page
+ * box. A declaration that uses one is a valid length for a browser, so the
+ * syntax and the types of the value are checked as if it were written with
+ * such a length: a value that mixes types, e.g. `min(2pvw, 1)`, and an unknown
+ * function, e.g. `foo(2pvw)`, stay invalid. (Review)
+ */
+function checkableText(value: Css.Val): string {
+  return Css.withoutPageViewportUnits(value.toString());
+}
+
+/**
+ * Whether a declared font-size value is a negative literal length. Such a value
+ * is outside the non-negative range of `font-size`, so it is invalid: the
+ * browser rejects the declaration and the element inherits the parent font
+ * size, e.g. when a var() substitution puts such a length into the declaration.
+ * A math function that computes a negative value is valid instead and is
+ * clamped to zero. (Review)
+ */
+export function isNegativeLiteralFontSize(value: Css.Val): boolean {
+  return value instanceof Css.Numeric && value.num < 0;
+}
+
+/**
+ * Whether a line height is a negative literal, e.g. the `-5px` that a var()
+ * substitution put into the declaration: the computed-value range of
+ * `line-height` is non-negative, so the browser rejects such a declaration and
+ * inherits the parent line height, while a math function that computes a
+ * negative value is valid and is clamped to zero instead. (Review)
+ */
+export function isNegativeLiteralLineHeight(value: Css.Val): boolean {
+  return (
+    (value instanceof Css.Numeric || value instanceof Css.Num) && value.num < 0
+  );
+}
+
+/** Font settings accumulated by the source inheritance walk. */
+export function getFontMetricProperties(
+  props: ElementStyle,
+  context: Exprs.Context,
+): FontProperties {
+  const properties: FontProperties = { lang: context.fontLanguage || "" };
+  for (const name of fontMetricProperties) {
+    const value = getProp(props, name)?.evaluate(context, name);
+    if (value && !Css.isDefaultingValue(value))
+      properties[name] = value.toString();
+  }
+  return properties;
+}
+
+/**
+ * Resolve a font-size value that is neither a keyword nor a Css.Numeric to px:
+ * a unitless number (valid for font-size only as zero, e.g. `font-size: 0`),
+ * a calc() expression, or a clamp()/min()/max() function. The em/% and
+ * viewport units in these values have already been converted to px by
+ * visitNumeric while the inherited values were accumulated, so an expression
+ * whose remaining units are all resolvable can be evaluated here.
+ *
+ * `parentFontSize` is the font size that the `em`/`%` arguments refer to. It is
+ * only needed for a value that has not been through that conversion, e.g. the
+ * root font size, whose parent font size is the initial font size. A resolved
+ * value is clamped to the non-negative computed-value range of `font-size`.
+ * Returns null when the value cannot be resolved to a length. (Issue #2174
+ * follow-up)
+ */
+export function resolveFontSizeValueToPx(
+  context: Exprs.Context,
+  value: Css.Val,
+  parentFontSize?: number,
+): number | null {
+  if (!isSupportedFunctionValue("font-size", value)) {
+    return null;
+  }
+  if (value instanceof Css.Num) {
+    // Only a unitless zero is a valid font-size. Any other unitless number,
+    // e.g. one that a var() substitution put into the declaration, is rejected
+    // by the browser, which inherits the parent font size instead.
+    return value.num === 0 ? 0 : null;
+  }
+  if (parentFontSize != null && value instanceof Css.Func) {
+    value = convertParentRelativeFontSizeUnits(context, value, parentFontSize);
+  }
+  const px =
+    value instanceof Css.Func && isMathFunction(value)
+      ? evaluateMathFunctionToPx(context, value)
+      : evaluateValueToPx(context, value);
+  // A conversion of a dimension that has no unit size, e.g. the `5s` that a
+  // var() substitution put into `font-size: var(--size)`, is not a length
+  // (`NaN`), so the declaration is invalid and the element inherits the parent
+  // font size. (Review)
+  return px == null || !Number.isFinite(px) ? null : Math.max(0, px);
+}
+
+/**
+ * Convert the parts of a font-size value that resolve against the inherited
+ * font size (`em`, `%`, and the units that such values resolve to) into px,
+ * using the given parent font size as that inherited value. The conversion of
+ * the walk is reused; the parts that do not depend on the parent font size are
+ * left for the caller.
+ */
+function convertParentRelativeFontSizeUnits(
+  context: Exprs.Context,
+  func: Css.Func,
+  parentFontSize: number,
+  parentLineHeight?: number,
+  fontProperties?: FontProperties,
+): Css.Val {
+  const parentProps = {
+    "font-size": new CascadeValue(new Css.Numeric(parentFontSize, "px"), 0),
+  } as ElementStyle;
+  if (parentLineHeight != null) {
+    // The `lh` unit refers to the line height of the parent, so that it does
+    // not fall back to the preferred line height. (Review)
+    parentProps["line-height"] = new CascadeValue(
+      new Css.Numeric(parentLineHeight, "px"),
+      0,
+    );
+  }
+  const visitor = new InheritanceVisitor(parentProps, context, fontProperties);
+  visitor.setPropName("font-size");
+  return func.visit(visitor);
+}
+
+class LineHeightUnitVisitor extends Css.FilterVisitor {
+  found = false;
+
+  override visitNumeric(numeric: Css.Numeric): Css.Val {
+    if (numeric.unit === "lh") {
+      this.found = true;
+    }
+    return numeric;
+  }
+}
+
+/**
+ * Whether a value uses the `lh` unit, which refers to the line height of the
+ * parent and is not accumulated in a detached subtree. (Review)
+ */
+export function usesLineHeightUnit(value: Css.Val): boolean {
+  const visitor = new LineHeightUnitVisitor();
+  value.visit(visitor);
+  return visitor.found;
+}
+
+/**
+ * Replace the `lh` units of a value with px, using the line height that the
+ * element inherits. (Review)
+ */
+export class LineHeightUnitReplacer extends Css.FilterVisitor {
+  constructor(private readonly inheritedLineHeight: number) {
+    super();
+  }
+
+  override visitNumeric(numeric: Css.Numeric): Css.Val {
+    return numeric.unit === "lh"
+      ? new Css.Numeric(numeric.num * this.inheritedLineHeight, "px")
+      : numeric;
+  }
+}
+
+/**
+ * Whether a value is a unitless number: a value that contains a dimension, e.g.
+ * the `1px` of `min(1px, 2px)`, is a length instead. This engine converts every
+ * dimension to px while a value is accumulated, so a `Css.Numeric` in a value
+ * here means such a length. (Review)
+ */
+class DimensionVisitor extends Css.FilterVisitor {
+  found = false;
+
+  override visitFunc(func: Css.Func): Css.Val {
+    // The arguments of a function that returns a `<number>` whatever its
+    // arguments are, e.g. the `20px` of `sign(20px)`, are a number and not a
+    // length: they do not make the surrounding value a length, so the
+    // arguments are not visited. (Review)
+    if (NUMBER_MATH_FUNCTION_NAMES.includes(func.name.toLowerCase())) {
+      return func;
+    }
+    return super.visitFunc(func);
+  }
+
+  override visitNumeric(numeric: Css.Numeric): Css.Val {
+    this.found = true;
+    return numeric;
+  }
+}
+
+class LengthPercentageTypeVisitor extends Css.FilterVisitor {
+  override visitNumeric(numeric: Css.Numeric): Css.Val {
+    // Font-size and line-height percentages have a length basis. A type
+    // probe needs that context even before their actual px values are known.
+    return numeric.unit === "%" ? new Css.Numeric(numeric.num, "px") : numeric;
+  }
+}
+
+// Requires native CSS typed division, enabled by default in Firefox 158.
+// Earlier Firefox releases do not resolve dimensionally cancelled values.
+function isNumberCalculationValue(value: Css.Val): boolean {
+  return (
+    value instanceof Css.Func &&
+    CSS.supports(
+      "z-index",
+      checkableText(value.visit(new LengthPercentageTypeVisitor())),
+    )
+  );
+}
+
+export function isUnitlessNumberValue(value: Css.Val): boolean {
+  // Lengths and percentages can cancel through division, including in a
+  // root declaration whose percentages have not yet been converted to px.
+  if (isNumberCalculationValue(value)) {
+    return true;
+  }
+  const visitor = new DimensionVisitor();
+  value.visit(visitor);
+  return !visitor.found;
+}
+
+/**
+ * The px value of a math function of unitless numbers, e.g. the `min(1, 2)` of
+ * `line-height: min(1, 2)`: `line-height` accepts a `<number>`, whose computed
+ * value is the number multiplied by the font size of the element (`fontSize`),
+ * and a function that this engine evaluates but that is not a length is such a
+ * number. Returns null when the value is not such a function or evaluates to a
+ * value that is not a finite number. (Review)
+ */
+function resolveUnitlessLineHeightFunctionToPx(
+  context: Exprs.Context,
+  value: Css.Val,
+  fontSize: number,
+): number | null {
+  if (!(value instanceof Css.Func) || !isUnitlessNumberValue(value)) {
+    return null;
+  }
+  const num = evaluateValueToNumber(context, value);
+  if (num == null || !Number.isFinite(num)) {
+    return null;
+  }
+  // `line-height` has a non-negative computed-value range, as a length has.
+  return Math.max(0, num * fontSize);
+}
+
+/**
+ * Resolve a computed line-height value that uses the `lh` unit, e.g.
+ * `line-height: calc(1lh + 10px)`, against the line height that the element
+ * inherits. Returns null when the value cannot be resolved to a length.
+ * (Review)
+ */
+export function resolveLineHeightValueToPx(
+  context: Exprs.Context,
+  func: Css.Func,
+  parentFontSize: number,
+  inheritedLineHeight: number,
+  fontProperties?: FontProperties,
+): number | null {
+  if (!isSupportedFunctionValue("line-height", func)) {
+    return null;
+  }
+  // The `lh` unit of a line height refers to the line height that the element
+  // inherits, which the walk accumulates for the source parent. The visitor
+  // converts the other parent relative units, but it leaves `lh` alone for a
+  // property other than `font-size`. (Review)
+  func = func.visit(
+    new LineHeightUnitReplacer(inheritedLineHeight),
+  ) as Css.Func;
+  const converted = convertParentRelativeFontSizeUnits(
+    context,
+    func,
+    parentFontSize,
+    inheritedLineHeight,
+    fontProperties,
+  );
+  // `evaluateValueToPx()` reduces the math functions of the value (including
+  // the other functions of CSS Values 4, e.g. the `round(1lh, 7px)` that has
+  // become `round(40px, 7px)` here) and the arithmetic around them. (Review)
+  const px = evaluateValueToPx(context, converted);
+  if (px == null) {
+    // A function of unitless numbers, e.g. `min(1, 2)`, is not a length: it is
+    // a number, whose computed line height is the number multiplied by the
+    // font size of the element. (Review)
+    return resolveUnitlessLineHeightFunctionToPx(
+      context,
+      converted,
+      parentFontSize,
+    );
+  }
+  // A length cannot be an infinity, and the browser clamps such a calculation
+  // itself, so it is left unresolved (as a font size is). (Review)
+  if (!Number.isFinite(px)) {
+    return null;
+  }
+  // `line-height` has a non-negative computed-value range, so a math function
+  // that computes below zero is clamped: `calc(1lh - 100px)` with a 40px
+  // inherited line height is 0, and materializing the -60 that the expression
+  // evaluates to would make the browser reject the declaration and inherit the
+  // 40px instead of applying zero. (Review)
+  return Math.max(0, px);
+}
+
+/**
+ * Evaluate a clamp()/min()/max() function of numbers, e.g. the font-weight
+ * `min(900, 1000)`. Returns null when any argument cannot be resolved to a
+ * number.
+ */
+function evaluateMathFunctionToNumber(
+  context: Exprs.Context,
+  func: Css.Func,
+): number | null {
+  const name = func.name.toLowerCase();
+  const isClamp = name === "clamp";
+  if (func.values.length === 0 || (isClamp && func.values.length !== 3)) {
+    return null;
+  }
+  const numbers: number[] = [];
+  for (const value of func.values) {
+    const num = evaluateValueToNumber(context, value);
+    if (num == null) {
+      return null;
+    }
+    numbers.push(num);
+  }
+  if (isClamp) {
+    return Math.max(numbers[0], Math.min(numbers[1], numbers[2]));
+  }
+  return name === "min" ? Math.min(...numbers) : Math.max(...numbers);
+}
+
+/**
+ * Evaluate a value that is expected to be a number, e.g. a plain number or a
+ * sum such as `800 + 100`. Returns null when it is not a resolvable number.
+ */
+function evaluateValueToNumber(
+  context: Exprs.Context,
+  value: Css.Val,
+): number | null {
+  if (value instanceof Css.Func && isMathFunction(value)) {
+    // A nested math function, e.g. the inner max() of `min(900, max(100, 800))`.
+    return evaluateMathFunctionToNumber(context, value);
+  }
+  const evaluated = evaluateCSSToCSS(context, value, "font-weight");
+  if (evaluated instanceof Css.Num) {
+    return evaluated.num;
+  }
+  if (
+    value instanceof Css.Expr ||
+    value instanceof Css.Func ||
+    value instanceof Css.SpaceList
+  ) {
+    // A calc() expression evaluates a sum or product, which a plain value
+    // (e.g. a math function argument) is not parsed as.
+    const asCalc = evaluateCSSToCSS(
+      context,
+      new Css.Func("calc", [value]),
+      "font-weight",
+    );
+    if (asCalc instanceof Css.Num) {
+      return asCalc.num;
+    }
+  }
+  return null;
+}
+
+/**
+ * Replace the clamp()/min()/max() functions of a number value with their
+ * value, from the innermost one outwards, so that the expression evaluator can
+ * evaluate the arithmetic expression around them.
+ */
+class NumberMathFunctionReducer extends Css.FilterVisitor {
+  constructor(private readonly context: Exprs.Context) {
+    super();
+  }
+
+  override visitFunc(func: Css.Func): Css.Val {
+    const visited = super.visitFunc(func) as Css.Func;
+    if (isMathFunction(visited)) {
+      const num = evaluateMathFunctionToNumber(this.context, visited);
+      if (num != null) {
+        return new Css.Num(num);
+      }
+    }
+    return visited;
+  }
+}
+
+/**
+ * Evaluate a number-valued math function of `font-weight`, e.g. the
+ * `min(900, 1000)` or the `calc(650 + 50)` of a declaration, or the same value
+ * of an accumulated weight. Returns null when the value does not reduce to a
+ * number other than `NaN`; a number outside the range of CSS Fonts 4, which an
+ * overflowing calculation such as `exp(1000)` is as well, is clamped to the
+ * range. (Review)
+ */
+export function evaluateFontWeightMathFunction(
+  context: Exprs.Context,
+  value: Css.Val,
+): Css.Num | null {
+  if (!isSupportedFunctionValue("font-weight", value)) {
+    return null;
+  }
+  const reduced = value.visit(new NumberMathFunctionReducer(context));
+  // `evaluateValueToNumber()` also evaluates a function that is not wrapped in
+  // a `calc()`, e.g. the `round(650, 100)` of a declaration, which the
+  // expression evaluator resolves through the math functions of CSS Values 4.
+  // (Review)
+  const num = evaluateValueToNumber(context, reduced);
+  if (num == null || Number.isNaN(num)) {
+    return null;
+  }
+  // A calculation that overflows to an infinity is clamped to the range of
+  // CSS Fonts 4, like any other out of range result: `font-weight: exp(1000)`
+  // is 1000 for the element itself and for a detached descendant whose
+  // relative keyword resolves against it. (Review)
+  return new Css.Num(Math.min(1000, Math.max(1, num)));
+}
+
+function isMathFunction(func: Css.Func): boolean {
+  const name = func.name.toLowerCase();
+  return name === "clamp" || name === "min" || name === "max";
+}
+
+/**
+ * Evaluate a clamp()/min()/max() function of lengths, e.g. the font-size
+ * `clamp(1rem, 2vw + 1em, 3rem)`. Returns null when any argument cannot be
+ * resolved to px.
+ */
+function evaluateMathFunctionToPx(
+  context: Exprs.Context,
+  func: Css.Func,
+): number | null {
+  const name = func.name.toLowerCase();
+  const isClamp = name === "clamp";
+  if (func.values.length === 0 || (isClamp && func.values.length !== 3)) {
+    return null;
+  }
+  const pxValues: number[] = [];
+  for (const value of func.values) {
+    const px = evaluateValueToPx(context, value);
+    if (px == null) {
+      return null;
+    }
+    pxValues.push(px);
+  }
+  if (isClamp) {
+    return Math.max(pxValues[0], Math.min(pxValues[1], pxValues[2]));
+  }
+  return name === "min" ? Math.min(...pxValues) : Math.max(...pxValues);
+}
+
+/**
+ * Evaluate a value that is expected to be a length in px, e.g. a single
+ * absolute length or a sum such as `2vw + 1em` that visitNumeric has already
+ * converted to `12.85px + 16px`. Returns null when it is not a resolvable
+ * absolute length.
+ */
+function evaluateValueToPx(
+  context: Exprs.Context,
+  value: Css.Val,
+): number | null {
+  if (value instanceof Css.Func && isMathFunction(value)) {
+    // A nested math function, e.g. the inner max() of
+    // `min(40px, max(1em, 20px))`.
+    return evaluateMathFunctionToPx(context, value);
+  }
+  // A math function can be embedded in an arithmetic expression, e.g. the
+  // clamp() of `calc(clamp(10px, 20px, 30px) + 5px)`. The expression evaluator
+  // only supports lengths and min()/max(), so those functions are reduced to
+  // their px value first.
+  const reduced = value.visit(new MathFunctionReducer(context));
+  const evaluated = evaluateCSSToCSS(context, reduced, "font-size");
+  if (isAbsoluteLengthValue(evaluated)) {
+    const numeric = evaluated as Css.Numeric;
+    const px = numeric.num * Exprs.defaultUnitSizes[numeric.unit];
+    // A length cannot be an infinity (an overflowing calculation is clamped
+    // by the browser), and a dimension without a unit size is not a length
+    // at all. (Review)
+    return Number.isFinite(px) ? px : null;
+  }
+  if (
+    reduced instanceof Css.Numeric ||
+    reduced instanceof Css.Func ||
+    reduced instanceof Css.SpaceList
+  ) {
+    // A calc() expression evaluates a sum or product, which a plain value
+    // (e.g. a math function argument) is not parsed as.
+    const asCalc = evaluateCSSToCSS(
+      context,
+      new Css.Func("calc", [reduced]),
+      "font-size",
+    );
+    if (isAbsoluteLengthValue(asCalc)) {
+      const numeric = asCalc as Css.Numeric;
+      const px = numeric.num * Exprs.defaultUnitSizes[numeric.unit];
+      return Number.isFinite(px) ? px : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Replace the `clamp()`/`min()`/`max()` functions of a value with their px
+ * value, from the innermost one outwards, so that the expression evaluator can
+ * evaluate the arithmetic expression around them.
+ */
+class MathFunctionReducer extends Css.FilterVisitor {
+  constructor(private readonly context: Exprs.Context) {
+    super();
+  }
+
+  override visitFunc(func: Css.Func): Css.Val {
+    const visited = super.visitFunc(func) as Css.Func;
+    if (isMathFunction(visited)) {
+      const px = evaluateMathFunctionToPx(this.context, visited);
+      return px != null ? new Css.Numeric(px, "px") : visited;
+    }
+    // The other math functions of CSS Values 4 are evaluated by the expression
+    // evaluator, which the `calc()` wrapper of this helper makes reduce them:
+    // a value such as the `round(40px, 7px)` of an ancestor line height must
+    // not stay unresolved, or a detached descendant that resolves the `lh`
+    // unit against it would use the line height of the synthetic parent. The
+    // evaluation does not visit the value through this reducer again, so it
+    // cannot recurse. (Review)
+    const px = evaluateOtherMathFunctionToPx(this.context, visited);
+    return px != null ? new Css.Numeric(px, "px") : visited;
+  }
+}
+
+/**
+ * Whether an expression of the expression language is a single call to a math
+ * function of CSS Values 4 that returns a `<number>` whatever its arguments
+ * are. The other functions keep the type of their arguments (`abs()`, `mod()`,
+ * `rem()`, `round()` and the `clamp()`/`min()`/`max()` family, and `hypot()`,
+ * which computes to the common type of its arguments), and this language
+ * converts every dimension to a number, so the result of such a call must not
+ * be materialized as a length even when its argument is one:
+ * `calc(sign(20px))` is the unitless number 1, which a property that needs a
+ * length, e.g. `width`, rejects. (Review)
+ */
+function isNumberCalculation(expr: Exprs.Val): boolean {
+  return (
+    expr instanceof Exprs.Call &&
+    NUMBER_MATH_FUNCTION_NAMES.includes(expr.qualifiedName.toLowerCase())
+  );
+}
+
+const NUMBER_MATH_FUNCTION_NAMES = ["exp", "log", "pow", "sign", "sqrt"];
+
+/**
+ * Replace the arguments of the math functions that return a `<number>`
+ * whatever their arguments are with nothing, e.g. the `20px` of `sign(20px)`:
+ * such a dimension belongs to a number and must not make the calculation look
+ * like a length. The value is visited structurally, so the arguments of a
+ * nested call, e.g. the `abs(20px)` of `2 * sign(abs(20px))`, are opaque as
+ * well. (Review)
+ */
+class NumberFunctionArgumentRemover extends Css.FilterVisitor {
+  override visitFunc(func: Css.Func): Css.Val {
+    const visited = super.visitFunc(func) as Css.Func;
+    return NUMBER_MATH_FUNCTION_NAMES.includes(visited.name.toLowerCase())
+      ? new Css.Func(visited.name, [])
+      : visited;
+  }
+}
+
+/**
+ * The text of a calculation in which the arguments of those functions are
+ * removed, which is the text that its type is inferred from. (Review)
+ */
+function withoutNumberMathFunctionArguments(value: Css.Val): string {
+  return value.visit(new NumberFunctionArgumentRemover()).toString();
+}
+
+/**
+ * The math functions of CSS Values 4, other than `clamp()`/`min()`/`max()`,
+ * that the expression evaluator evaluates. A function that is not one of them,
+ * e.g. a `translate()`, is not attempted.
+ */
+function isOtherMathFunction(func: Css.Func): boolean {
+  return OTHER_MATH_FUNCTION_NAMES.includes(func.name.toLowerCase());
+}
+
+const OTHER_MATH_FUNCTION_NAMES = [
+  "abs",
+  "exp",
+  "hypot",
+  "log",
+  "mod",
+  "pow",
+  "rem",
+  "round",
+  "sign",
+  "sqrt",
+];
+
+/**
+ * Evaluate a math function of CSS Values 4 that is not a `clamp()`/`min()`/
+ * `max()`, e.g. `round(40px, 7px)`, to px. The expression evaluator knows the
+ * functions of CSS Values 4, but it needs the function to be the calculation
+ * of a `calc()`. Returns null when the value does not reduce. (Review)
+ */
+function evaluateOtherMathFunctionToPx(
+  context: Exprs.Context,
+  func: Css.Func,
+): number | null {
+  if (!isOtherMathFunction(func)) {
+    return null;
+  }
+  const evaluated = evaluateCSSToCSS(
+    context,
+    new Css.Func("calc", [func]),
+    "font-size",
+  );
+  if (!isAbsoluteLengthValue(evaluated)) {
+    return null;
+  }
+  const numeric = evaluated as Css.Numeric;
+  return numeric.num * Exprs.defaultUnitSizes[numeric.unit];
+}
+
+function isAbsoluteLengthValue(value: Css.Val): boolean {
+  return value instanceof Css.Numeric && Exprs.isAbsoluteLengthUnit(value.unit);
+}
+
 export class InheritanceVisitor extends Css.FilterVisitor {
   propName: string = "";
+  fontLanguage: string | null = null;
 
   constructor(
     public readonly props: ElementStyle,
     public readonly context: Exprs.Context,
+    private readonly fontProperties?: FontProperties,
   ) {
     super();
+  }
+
+  private metricProperties(): FontProperties {
+    return (
+      this.fontProperties ?? {
+        ...getFontMetricProperties(this.props, this.context),
+        lang: this.fontLanguage ?? this.context.fontLanguage ?? "",
+      }
+    );
   }
 
   setPropName(name: string): void {
     this.propName = name;
   }
 
-  private getFontSize() {
+  /**
+   * The font size in px that the accumulated values inherit, i.e. the font size
+   * of the parent, or null when it is a value that only the browser resolves,
+   * e.g. the `math` keyword or the `ch` unit. (Used by the walk to resolve the
+   * `lh` unit of a computed line height. Review)
+   */
+  getInheritedFontSize(): number | null {
+    return this.getFontSize();
+  }
+
+  private getFontSize(): number | null {
     const cascval = getProp(this.props, "font-size");
-    if (!cascval.value.isNumeric()) {
-      // FIXME: cascval may be Ident value e.g. "smaller"
+    if (!cascval) {
+      // The accumulated value is removed when `initial` (e.g. `font-size:
+      // initial` or `all: initial`) is processed. (Issue #1696)
+      return this.context.initialFontSize;
+    }
+    const value = cascval.value;
+    const keywordSize = resolveAbsoluteFontSizeKeyword(
+      value,
+      this.context.initialFontSize,
+    );
+    if (keywordSize != null) {
+      return keywordSize;
+    }
+    if (!value.isNumeric()) {
+      const px = resolveFontSizeValueToPx(this.context, value);
+      if (px != null) {
+        return px;
+      }
+      if (isValidUnresolvedFontSize(this.context, value)) {
+        // A valid value that only the browser resolves, e.g. the `math`
+        // keyword, has no size in px here: the values that depend on it are
+        // left to the browser as well, which resolves them against the
+        // computed size instead of the inherited fallback. (Review)
+        return null;
+      }
+      // FIXME: cascval may be a value that cannot be resolved to a length
+      // here (the relative keywords "larger"/"smaller" are resolved in
+      // visitIdent, the absolute size keywords just above, and expressions
+      // that depend on an unresolved var() remain).
       return Exprs.defaultUnitSizes["em"];
     }
-    const n = cascval.value as Css.Numeric;
+    const n = value as Css.Numeric;
     if (!Exprs.isAbsoluteLengthUnit(n.unit)) {
-      throw new Error("Unexpected state");
+      // A unit that only the browser resolves, e.g. `ch`: see above. (Review)
+      return null;
     }
-    return n.num * Exprs.defaultUnitSizes[n.unit];
+    // `font-size` has a non-negative computed-value range.
+    return Math.max(0, n.num * Exprs.defaultUnitSizes[n.unit]);
+  }
+
+  /**
+   * The line height that the `lh` unit of a `font-size` refers to: the computed
+   * line height of the parent, i.e. of the value that was accumulated for the
+   * parent before the font size of the current element is processed. Returns
+   * null when it cannot be determined. (Issue #2174 follow-up)
+   */
+  /**
+   * The line height in px that the accumulated values inherit, i.e. the line
+   * height of the parent. A relative value among them is resolved against
+   * `parentFontSize` — the font size of the parent, which the font-relative
+   * units of a line height refer to — defaulting to the font size that the
+   * visitor currently sees, which is the parent's while a `font-size` value is
+   * processed and the current level's own when a `line-height` value is. (Used
+   * by the walk to resolve the `lh` unit of a computed line height. Review)
+   */
+  getInheritedLineHeight(parentFontSize?: number | null): number | null {
+    return this.getInheritedLineHeightUnitSize(parentFontSize);
+  }
+
+  private getInheritedLineHeightUnitSize(
+    parentFontSize: number | null = this.getFontSize(),
+  ): number | null {
+    let value = getProp(this.props, "line-height")?.value;
+    // Whether the value is a function of this engine that has been reduced to
+    // a number or a length here: such a computed value is clamped to the
+    // non-negative range of `line-height`, while a negative literal is invalid
+    // and the browser inherits the parent line height instead. (Review)
+    let computedValue = false;
+    if (value instanceof Css.Numeric) {
+      const unit = value.unit;
+      if (
+        unit !== "em" &&
+        unit !== "rem" &&
+        unit !== "%" &&
+        unit !== "lh" &&
+        unit !== "rlh" &&
+        Exprs.defaultUnitSizes[unit] != null
+      ) {
+        // An absolute line height, e.g. `line-height: 40px`, does not depend
+        // on the font size, so it is resolved before one is required: an
+        // inherited font size that only the browser resolves, e.g. the `math`
+        // keyword of an ancestor, must not make such a line height unknown.
+        // (Review)
+        return value.num * Exprs.defaultUnitSizes[unit];
+      }
+      if (Exprs.isViewportRelativeLengthUnit(unit)) {
+        // A viewport relative line height, e.g. the `line-height: 2pvw` that a
+        // detached descendant resolves an `lh` unit against, does not depend on
+        // the font size either, and the unit size of the internal units is
+        // known to this engine only: a declaration that the browser rejects
+        // (it does not know `pv*`) must not make the basis unknown. (Review)
+        return value.num * this.context.queryUnitSize(unit, false);
+      }
+    }
+    if (parentFontSize == null) {
+      // Every remaining value is relative to a font size: a number and
+      // `normal` to the inherited one, `em`/`%` to the same, and `rem`/`rlh`
+      // to the root ones. That font size is a value that only the browser
+      // resolves here, so the line height is not known either. (Review)
+      return null;
+    }
+    if (value instanceof Css.Expr || value instanceof Css.Func) {
+      computedValue = true;
+      // A computed line height, e.g. `line-height: calc(1.5 * 16px)`, which is
+      // still a function while the inherited values are accumulated. A
+      // percentage of it refers to the font size of the element itself, so it
+      // is converted before the expression is evaluated.
+      if (value instanceof Css.Func) {
+        value = convertParentRelativeFontSizeUnits(
+          this.context,
+          value,
+          parentFontSize,
+          undefined,
+          this.metricProperties(),
+        );
+        // A function of unitless numbers, e.g. `min(1, 2)`, is a number rather
+        // than a length: it is not reduced by the visitors below, so it is
+        // resolved here, or an inherited line height would fall back to the
+        // preferred one. (Review)
+        const numPx = resolveUnitlessLineHeightFunctionToPx(
+          this.context,
+          value,
+          parentFontSize,
+        );
+        if (numPx != null) {
+          return numPx;
+        }
+        // `evaluateCSSToCSS()` only reduces `calc()`, so a valid math function
+        // such as `line-height: min(40px, 2em)` must be reduced to its px value
+        // here: otherwise an inherited line height falls back to the preferred
+        // line height for a detached descendant that resolves an `lh` unit. An
+        // `lh` unit of this value refers to the line height of the level above,
+        // which is not known here, so such a value is left unresolved instead
+        // of using the placeholder size of the unit. (Review)
+        if (!usesLineHeightUnit(value)) {
+          value = value.visit(new MathFunctionReducer(this.context));
+        }
+      }
+      value = evaluateCSSToCSS(this.context, value, "line-height");
+    }
+    // A computed value that is below zero is clamped, as `line-height` has a
+    // non-negative computed-value range: `min(-10px, -20px)` is 0, and a
+    // detached descendant that resolves an `lh` unit against it must use that
+    // zero rather than the -20px of the calculation. (Review)
+    const clampComputed = (lineHeight: number): number =>
+      computedValue ? Math.max(0, lineHeight) : lineHeight;
+    if (value instanceof Css.Num) {
+      // A number that is not finite cannot be a line height: it is left
+      // unknown instead of propagating an infinity into the `lh` unit.
+      // (Review)
+      return Number.isFinite(value.num)
+        ? clampComputed(value.num * parentFontSize)
+        : null;
+    }
+    if (value instanceof Css.Numeric) {
+      switch (value.unit) {
+        case "em":
+        case "%":
+          return clampComputed(
+            (value.unit === "%" ? value.num / 100 : value.num) * parentFontSize,
+          );
+        case "lh":
+        case "rlh":
+          // The line height of the parent is relative to the line height of the
+          // parent of the parent, which is not accumulated here.
+          return null;
+        default: {
+          const unitSize = Exprs.defaultUnitSizes[value.unit];
+          if (unitSize) {
+            return clampComputed(value.num * unitSize);
+          }
+          const size = this.context.measureFontUnit(
+            value.unit,
+            parentFontSize,
+            this.metricProperties(),
+          );
+          return size != null ? clampComputed(value.num * size) : null;
+        }
+      }
+    }
+    // Preserve normal for inheritance; only lh conversion needs its length.
+    return (
+      (value
+        ? this.context.measureFontUnit(
+            "lh",
+            parentFontSize,
+            this.metricProperties(),
+          )
+        : null) ?? Exprs.fallbackLineHeightRatio * parentFontSize
+    );
+  }
+
+  private getFontWeight(): number {
+    // The accumulated value is the inherited (parent's) font weight, or the
+    // initial value 400 when no ancestor declared font-weight.
+    const cascval = getProp(this.props, "font-weight");
+    let value = cascval?.value;
+    if (value instanceof Css.Expr || value instanceof Css.Func) {
+      // `font-weight` also accepts a function, e.g. `calc(650)` or
+      // `min(900, 1000)`, which `evaluateCSSToCSS()` alone does not reduce.
+      value =
+        evaluateFontWeightMathFunction(this.context, value) ??
+        evaluateCSSToCSS(this.context, value, "font-weight");
+    }
+    if (value instanceof Css.Num) {
+      // A number outside the range of CSS Fonts 4, e.g. one that a var()
+      // substitution put into the declaration, is invalid: the element inherits
+      // the parent font weight, so it must not become the base of a relative
+      // keyword. (Review)
+      return isValidFontWeight(value.num) ? value.num : 400;
+    }
+    if (value && hasKeywordName(value, "bold")) {
+      return 700;
+    }
+    return 400;
   }
 
   override visitNumeric(numeric: Css.Numeric): Css.Val {
     if (this.propName === "font-size") {
-      return convertFontSizeToPx(numeric, this.getFontSize(), this.context);
+      const parentFontSize = this.getFontSize();
+      if (
+        parentFontSize == null &&
+        (numeric.unit === "em" || numeric.unit === "%")
+      ) {
+        // The value is relative to an inherited font size that only the
+        // browser resolves, so it is preserved as it is and resolved by the
+        // browser in the same context. (Review)
+        return numeric;
+      }
+      return convertFontSizeToPx(
+        numeric,
+        parentFontSize,
+        this.context,
+        this.getInheritedLineHeightUnitSize(),
+        this.metricProperties(),
+      );
     } else if (
       numeric.unit === "em" ||
       numeric.unit === "rem" ||
       numeric.unit === "lh" ||
-      numeric.unit === "rlh"
+      numeric.unit === "rlh" ||
+      /^r?(ex|cap|ch|ic)$/.test(numeric.unit)
     ) {
+      const parentFontSize = this.getFontSize();
+      if (
+        parentFontSize == null &&
+        (numeric.unit === "em" || /^(ex|cap|ch|ic)$/.test(numeric.unit))
+      ) {
+        // As above: the `em` unit of a dependent property must not be
+        // resolved against the inherited fallback when the element's own font
+        // size is a value that only the browser resolves. (Review)
+        return numeric;
+      }
       return convertFontRelativeLengthToPx(
         numeric,
-        this.getFontSize(),
+        parentFontSize ?? 0,
         this.context,
+        this.metricProperties(),
       );
+    } else if (this.propName === "line-height") {
+      // A percentage line height is inherited as the length computed at its
+      // declaring element. Unitless numbers remain multipliers instead.
+      const fontSize = this.getFontSize();
+      if (numeric.unit === "%" && fontSize != null) {
+        return new Css.Numeric(numeric.num * 0.01 * fontSize, "px");
+      }
     }
     return numeric;
+  }
+
+  override visitIdent(ident: Css.Ident): Css.Val {
+    if (this.propName === "font-size") {
+      // Resolve the absolute size keywords (e.g. "small") against the default
+      // font size, and the relative keywords "larger"/"smaller" against the
+      // inherited font size, to numeric computed values, so that detached
+      // content (footnotes, page floats, running elements) and the root's
+      // inherited properties are not re-resolved per level. (Issue #2174)
+      const keywordSize = resolveAbsoluteFontSizeKeyword(
+        ident,
+        this.context.initialFontSize,
+      );
+      if (keywordSize != null) {
+        return new Css.Numeric(keywordSize, "px");
+      }
+      if (hasKeywordName(ident, "larger") || hasKeywordName(ident, "smaller")) {
+        const parentFontSize = this.getFontSize();
+        if (parentFontSize != null) {
+          return new Css.Numeric(
+            resolveRelativeFontSizeKeyword(ident, parentFontSize),
+            "px",
+          );
+        }
+        // The inherited font size is a value that only the browser resolves:
+        // the keyword is preserved and resolved by the browser against its
+        // own computed size. (Review)
+      }
+      if (hasKeywordName(ident, "math")) {
+        // The math font size depends on the mathematical context of the
+        // element: it is 1em of the inherited font size for the depths that
+        // this engine represents, which is the value of a depth 0 element, so
+        // it is resolved like `1em` and a detached element uses the font size
+        // of its source parent instead of the one of the synthetic parent that
+        // the browser would resolve the keyword in after the element is
+        // reparented. A well formed MathML document keeps that meaning: the
+        // `math` keyword of the `math` element is depth 0, and the deeper
+        // elements take their scaling from the user agent stylesheet
+        // (`math-depth: add(1)`), which this cascade does not see, so they are
+        // resolved by the browser against the font size that is resolved here
+        // (measured: an exponent of a footnote is 0.71em of its base, like its
+        // inline reference). A `math` that an author declares on an element of
+        // a deeper depth is the one case that is not modelled here: the
+        // materialized 1em makes a relative value of a detached descendant
+        // larger than the browser would compute it (measured: a footnote
+        // inside an element whose `font-size: math` has
+        // `math-depth: add(1)` is 64px, twice the 1em of 32px, instead of the
+        // 45.4px that the browser computes from the 22.7px). `math-depth` is
+        // not supported by this engine. (Review)
+        const parentFontSize = this.getFontSize();
+        if (parentFontSize != null) {
+          return new Css.Numeric(parentFontSize, "px");
+        }
+      }
+    } else if (this.propName === "font-weight") {
+      if (hasKeywordName(ident, "bolder") || hasKeywordName(ident, "lighter")) {
+        return new Css.Int(
+          resolveRelativeFontWeight(ident, this.getFontWeight()),
+        );
+      }
+    }
+    return ident;
   }
 
   override visitExpr(expr: Css.Expr): Css.Val {
@@ -1152,6 +2531,7 @@ export function convertFontRelativeLengthToPx(
   numeric: Css.Numeric,
   baseFontSize: number,
   context: Exprs.Context,
+  fontProperties?: FontProperties,
 ): Css.Numeric {
   const unit = numeric.unit;
   const num = numeric.num;
@@ -1161,8 +2541,13 @@ export function convertFontRelativeLengthToPx(
     return new Css.Numeric(num * context.fontSize(), "px");
   } else if (unit === "rlh") {
     return new Css.Numeric(num * context.rootLineHeight, "px");
-  } else {
+  } else if (unit === "lh") {
+    // FontMetrics measures normal only. The actual line-height basis must be
+    // supplied by the caller, or resolved by the browser in the final style.
     return numeric;
+  } else {
+    const size = context.measureFontUnit(unit, baseFontSize, fontProperties);
+    return size != null ? new Css.Numeric(num * size, "px") : numeric;
   }
 }
 
@@ -1170,6 +2555,8 @@ export function convertFontSizeToPx(
   numeric: Css.Numeric,
   parentFontSize: number | null,
   context: Exprs.Context,
+  inheritedLineHeight?: number | null,
+  fontProperties?: FontProperties,
 ): Css.Numeric {
   // FIXME: This fallback to 0 is obviously an invalid value. A null arrives
   // from reading back the computed style of an element whose view is detached
@@ -1182,10 +2569,19 @@ export function convertFontSizeToPx(
   // AttachedPageFloatLayoutContext.invalidate(). That trial is discarded. The
   // real DOM is built again while attached to the document, and the invalid
   // value does not reach the rendered result.
+  if (parentFontSize == null && /^(ex|cap|ch|ic)$/.test(numeric.unit)) {
+    return numeric;
+  }
+  if (numeric.unit === "lh" && inheritedLineHeight != null) {
+    // For `font-size`, the `lh` unit refers to the computed line height of the
+    // parent. (Issue #2174 follow-up)
+    return new Css.Numeric(numeric.num * inheritedLineHeight, "px");
+  }
   numeric = convertFontRelativeLengthToPx(
     numeric,
     parentFontSize ?? 0,
     context,
+    fontProperties,
   );
   const unit = numeric.unit;
   const num = numeric.num;
@@ -1194,13 +2590,15 @@ export function convertFontSizeToPx(
   } else if (unit === "%") {
     return new Css.Numeric((num / 100) * (parentFontSize ?? 0), "px");
   } else {
-    return new Css.Numeric(num * context.queryUnitSize(unit, false), "px");
+    const unitSize = context.queryUnitSize(unit, false);
+    if (Number.isFinite(unitSize)) {
+      return new Css.Numeric(num * unitSize, "px");
+    }
+    return numeric;
   }
 }
 
-export type ActionTable = {
-  [key: string]: CascadeAction;
-};
+export type ActionTable = Map<string, CascadeAction>;
 
 export class StyledCascadeInstance {
   constructor(
@@ -1288,6 +2686,7 @@ export class ApplyRuleAction extends CascadeAction {
 export type PrimarySlot = {
   table: ActionTable;
   key: string;
+  htmlKey?: string;
 };
 
 export abstract class ChainedAction {
@@ -1322,7 +2721,14 @@ export abstract class WiredAction<
   makePrimary(cascade: Cascade): boolean {
     const slot = this.condition.primarySlot(cascade);
     if (slot) {
-      cascade.insertInTable(slot.table, slot.key, this.chained);
+      if (slot.htmlKey !== undefined) {
+        // The lookup finds candidates under either spelling. The guard
+        // selects the spelling that applies to the current element.
+        cascade.insertInTable(slot.table, slot.key, this);
+        cascade.insertInTable(slot.table, slot.htmlKey, this);
+      } else {
+        cascade.insertInTable(slot.table, slot.key, this.chained);
+      }
       return true;
     }
     return false;
@@ -1394,12 +2800,22 @@ export class CheckIdAction extends ChainedAction {
 }
 
 export class CheckLocalNameAction extends ChainedAction {
+  protected readonly htmlLocalName: string;
+
   constructor(public readonly localName: string) {
     super();
+    this.htmlLocalName = asciiLowerCase(localName);
   }
 
-  override matches(cascadeInstance: StyledCascadeInstance): boolean {
-    return cascadeInstance.instance.currentLocalName == this.localName;
+  override matches(cascadeInstance: ElementCascadeInstance): boolean {
+    const { currentLocalName, currentNamespace } = cascadeInstance.instance;
+    const name =
+      this.localName !== this.htmlLocalName &&
+      currentNamespace === Base.NS.XHTML &&
+      cascadeInstance.currentElement?.ownerDocument.contentType === "text/html"
+        ? this.htmlLocalName
+        : this.localName;
+    return currentLocalName === name;
   }
 
   override getPriority(): number {
@@ -1408,37 +2824,44 @@ export class CheckLocalNameAction extends ChainedAction {
   // tag is a pretty good thing to check, after epub:type
 
   override primarySlot(cascade: Cascade): PrimarySlot | null {
-    return { table: cascade.tags, key: this.localName };
+    return {
+      table: cascade.tags,
+      key: this.localName,
+      htmlKey:
+        this.localName !== this.htmlLocalName ? this.htmlLocalName : undefined,
+    };
   }
 }
 
-export class CheckNSTagAction extends ChainedAction {
+export class CheckNSTagAction extends CheckLocalNameAction {
   constructor(
     public readonly ns: string,
-    public readonly localName: string,
+    localName: string,
   ) {
-    super();
+    super(localName);
   }
 
-  override matches(cascadeInstance: StyledCascadeInstance): boolean {
+  override matches(cascadeInstance: ElementCascadeInstance): boolean {
     return (
-      cascadeInstance.instance.currentLocalName == this.localName &&
-      cascadeInstance.instance.currentNamespace == this.ns
+      cascadeInstance.instance.currentNamespace === this.ns &&
+      super.matches(cascadeInstance)
     );
   }
 
-  override getPriority(): number {
-    return 8;
-  }
-  // tag is a pretty good thing to check, after epub:type
-
   override primarySlot(cascade: Cascade): PrimarySlot | null {
-    let prefix = cascade.nsPrefix[this.ns];
+    let prefix = cascade.nsPrefix.get(this.ns);
     if (!prefix) {
       prefix = `ns${cascade.nsCount++}:`;
-      cascade.nsPrefix[this.ns] = prefix;
+      cascade.nsPrefix.set(this.ns, prefix);
     }
-    return { table: cascade.nstags, key: prefix + this.localName };
+    return {
+      table: cascade.nstags,
+      key: prefix + this.localName,
+      htmlKey:
+        this.ns === Base.NS.XHTML && this.localName !== this.htmlLocalName
+          ? prefix + this.htmlLocalName
+          : undefined,
+    };
   }
 }
 
@@ -1497,20 +2920,24 @@ function checkAttribute(
   if (!element) {
     return false;
   }
-  const htmlAttributeNamesAreCaseInsensitive =
-    element.ownerDocument?.contentType === "text/html";
-  const selectorName = htmlAttributeNamesAreCaseInsensitive
-    ? asciiLowerCase(name)
-    : name;
+  // HTML folds the selector name. DOM APIs can preserve uppercase in the
+  // attribute's local name, which is compared as stored.
+  const unnamespacedSelectorName =
+    element.namespaceURI === Base.NS.XHTML &&
+    element.ownerDocument.contentType === "text/html"
+      ? asciiLowerCase(name)
+      : name;
   if (ns !== null) {
-    const attribute = element.getAttributeNodeNS(ns || null, selectorName);
+    const attribute = element.getAttributeNodeNS(
+      ns || null,
+      ns ? name : unnamespacedSelectorName,
+    );
     return !!attribute && pred(attribute);
   }
   for (const attribute of Array.from(element.attributes)) {
-    const attributeName = htmlAttributeNamesAreCaseInsensitive
-      ? asciiLowerCase(attribute.localName)
-      : attribute.localName;
-    if (attributeName === selectorName && pred(attribute)) {
+    const selectorName =
+      attribute.namespaceURI === null ? unnamespacedSelectorName : name;
+    if (attribute.localName === selectorName && pred(attribute)) {
       return true;
     }
   }
@@ -1918,7 +3345,7 @@ export class CheckConditionAction extends ChainedAction {
   }
 
   override matches(cascadeInstance: StyledCascadeInstance): boolean {
-    return !!cascadeInstance.instance.conditions[this.condition];
+    return !!cascadeInstance.instance.conditions.get(this.condition);
   }
 
   override wire(chained: CascadeAction): WiredAction {
@@ -2568,6 +3995,19 @@ export interface CounterResolver {
    * https://drafts.csswg.org/css-gcpm-3/#running-elements
    */
   setRunningElement(name: string, elementOffset: number): void;
+
+  /**
+   * Set bookmark for the CSS bookmark-level, bookmark-label and
+   * bookmark-state properties
+   * https://drafts.csswg.org/css-content-3/#bookmark-generation
+   */
+  setBookmark(
+    element: Element,
+    elementOffset: number,
+    level: number,
+    label: string,
+    closed: boolean,
+  ): void;
 }
 
 export class AttrValueFilterVisitor extends Css.FilterVisitor {
@@ -2586,7 +4026,7 @@ export class AttrValueFilterVisitor extends Css.FilterVisitor {
     if (Css.isDefaultingValue(value)) {
       return value;
     }
-    const validator = this.validatorSet.validators[this.propName];
+    const validator = this.validatorSet.validators.get(this.propName);
     if (validator) {
       return value.visit(validator) ?? Css.ident.unset;
     }
@@ -2768,7 +4208,7 @@ export class ContentPropVisitor extends Css.FilterVisitor {
       return false;
     }
     const counters = CssProp.toCounters(value, options);
-    return Object.prototype.hasOwnProperty.call(counters, counterName);
+    return Object.hasOwn(counters, counterName);
   }
 
   /**
@@ -2844,7 +4284,7 @@ export class ContentPropVisitor extends Css.FilterVisitor {
   }
 
   private formatLastValue(values: number[], type: string): string {
-    const last = values.length ? values[values.length - 1] : 0;
+    const last = values.length ? values.at(-1) : 0;
     return this.format(last, type);
   }
 
@@ -2912,12 +4352,8 @@ export class ContentPropVisitor extends Css.FilterVisitor {
         // Issue #1999: increment-only inside page/margin-box content is a
         // delta from the page-start counter value, not a fresh local counter.
         const pageCounters = store.currentPageCounters?.[counterName] || [];
-        const pageStartVal = pageCounters.length
-          ? pageCounters[pageCounters.length - 1]
-          : 0;
-        counterValues = [
-          pageStartVal + cascadeDocCounters[cascadeDocCounters.length - 1],
-        ];
+        const pageStartVal = pageCounters.length ? pageCounters.at(-1) : 0;
+        counterValues = [pageStartVal + cascadeDocCounters.at(-1)];
         storeFootnoteCounterValuesIfNeeded(counterValues);
         return formatCounterValues(counterValues);
       }
@@ -2949,7 +4385,7 @@ export class ContentPropVisitor extends Css.FilterVisitor {
         store.currentPageDocCounters?.[counterName] || [];
       const pageStartCounters = store.currentPageCounters?.[counterName] || [];
       const pageStartVal = pageStartCounters.length
-        ? pageStartCounters[pageStartCounters.length - 1]
+        ? pageStartCounters.at(-1)
         : 0;
       // Adjust the outermost (first) counter value with the page contribution.
       // The page counter operates at the outermost scope, so only the first
@@ -3025,7 +4461,7 @@ export class ContentPropVisitor extends Css.FilterVisitor {
     }
     const arr = this.cascade.counters[counterName];
     if (arr && arr.length) {
-      const numval = (arr && arr.length && arr[arr.length - 1]) || 0;
+      const numval = (arr && arr.length && arr.at(-1)) || 0;
       return new Css.Str(this.format(numval, type));
     } else {
       const c = new Css.Expr(
@@ -3385,17 +4821,15 @@ function getContentWidth(
   if (node.nodeType === 1) {
     rects = Array.from((node as Element).getClientRects());
   } else {
-    const range = node.ownerDocument.createRange();
-    range.selectNodeContents(node);
-    rects = clientLayout.getRangeClientRects(range);
+    rects = RangeClientRects.getLayoutClientRectsOfNodeContents(
+      clientLayout,
+      node,
+    );
   }
 
   const totalWidth = rects.reduce(
     (acc, rect) =>
-      acc +
-      (writingMode === "vertical-rl" || writingMode === "vertical-lr"
-        ? rect.height
-        : rect.width),
+      acc + (CssLogicalUtil.isVertical(writingMode) ? rect.height : rect.width),
     0,
   );
 
@@ -3445,29 +4879,6 @@ const postLayoutBlockLeader: Plugin.PostLayoutBlockHook = (
     const { writingMode, direction, marginInlineEnd } =
       column.clientLayout.getElementComputedStyle(pseudoElem);
 
-    function setLeaderTextContent(leaderStr: string): void {
-      if (direction === "rtl") {
-        // in RTL direction, enclose the leader with U+200F (RIGHT-TO-LEFT MARK)
-        // to ensure RTL order around the leader.
-        const RLM = "\u200f";
-        leaderElem.textContent =
-          (leaderStr.startsWith(RLM) ? "" : RLM) +
-          leaderStr +
-          (leaderStr.endsWith(RLM) ? "" : RLM);
-      } else {
-        leaderElem.textContent = leaderStr;
-      }
-    }
-
-    // prevent leader layout problem (Issue #1117)
-    leaderElem.style.marginInlineStart = "1px";
-
-    // reset the expanded leader
-    setLeaderTextContent(leader);
-    // setting inline-block removes the pseudo CONTENT from normal text flow
-    pseudoElem.style.display = "inline-block";
-    pseudoElem.style.textIndent = "0"; // cancel inherited text-indent
-
     // Workaround for Issue #1598:
     // In multi-column layout with column-fill: balance, changing leader length
     // triggers column rebalancing, making the initially measured `box` unreliable.
@@ -3484,9 +4895,150 @@ const postLayoutBlockLeader: Plugin.PostLayoutBlockHook = (
       columnContainer.style.columnFill = "auto";
     }
 
-    const box = column.clientLayout.getElementClientRect(container.viewNode);
-    const innerInit = column.clientLayout.getElementClientRect(pseudoElem);
-    const innerMarginInlineEnd = column.parseComputedLength(marginInlineEnd);
+    // Firefox sends the line of a leader that overflows a column to the next
+    // column and, until the event loop updates the rendering, keeps it there
+    // through the layout that reading a client rect forces, however far the
+    // leader shrinks again. Switching column-fill makes the container fragment
+    // its contents again.
+    const refragmentColumns =
+      columnContainer && Base.browserType === "firefox"
+        ? () => {
+            columnContainer.style.columnFill = "balance";
+            column.clientLayout.getElementClientRect(columnContainer);
+            columnContainer.style.columnFill = "auto";
+          }
+        : () => {};
+
+    function setLeaderTextContent(leaderStr: string): void {
+      if (direction === "rtl") {
+        // in RTL direction, enclose the leader with U+200F (RIGHT-TO-LEFT MARK)
+        // to ensure RTL order around the leader.
+        const RLM = "\u200f";
+        leaderElem.textContent =
+          (leaderStr.startsWith(RLM) ? "" : RLM) +
+          leaderStr +
+          (leaderStr.endsWith(RLM) ? "" : RLM);
+      } else {
+        leaderElem.textContent = leaderStr;
+      }
+      refragmentColumns();
+    }
+
+    // prevent leader layout problem (Issue #1117)
+    leaderElem.style.marginInlineStart = "1px";
+
+    // reset the expanded leader
+    setLeaderTextContent(leader);
+    // setting inline-block removes the pseudo CONTENT from normal text flow
+    pseudoElem.style.display = "inline-block";
+    pseudoElem.style.textIndent = "0"; // cancel inherited text-indent
+
+    const previousLineBreak = pseudoElem.previousElementSibling;
+    if (previousLineBreak?.hasAttribute("data-viv-leader-break")) {
+      previousLineBreak.remove();
+    }
+
+    const vertical = CssLogicalUtil.isVertical(writingMode);
+    const [inlineLowSide, inlineHighSide] = vertical
+      ? (["top", "bottom"] as const)
+      : (["left", "right"] as const);
+    const [blockLowSide, blockHighSide] = vertical
+      ? (["left", "right"] as const)
+      : (["top", "bottom"] as const);
+    const [blockStartSide, blockEndSide] = CssLogicalUtil.isBlockReversed(
+      writingMode,
+    )
+      ? ([blockHighSide, blockLowSide] as const)
+      : ([blockLowSide, blockHighSide] as const);
+    const blockSign = CssLogicalUtil.isBlockReversed(writingMode) ? -1 : 1;
+    const [inlineStartSide, inlineEndSide] = CssLogicalUtil.isInlineReversed(
+      writingMode,
+      direction === "rtl",
+    )
+      ? ([inlineHighSide, inlineLowSide] as const)
+      : ([inlineLowSide, inlineHighSide] as const);
+    const inlineSign = CssLogicalUtil.isInlineReversed(
+      writingMode,
+      direction === "rtl",
+    )
+      ? -1
+      : 1;
+    const inlineSizeOf = (rect: Vtree.ClientRect) =>
+      rect[inlineHighSide] - rect[inlineLowSide];
+    // The comparisons below run between client rects that separate layout
+    // passes produced, where a box that has not moved can still come back with
+    // a coordinate differing in its low bits, so they need a dead zone. Its
+    // width is the tolerance `Column.almostEquals` compares client rect
+    // coordinates with where the viewport emulates no pixel ratio. It stays
+    // fixed because the displacements these comparisons separate are line and
+    // content sizes in CSS pixels, while emulating a pixel ratio leaves those
+    // sizes alone and only makes the rects finer.
+    const subPixel = 0.5;
+    // Where a leader is measured against the edge it grows toward, that width
+    // would let it past the edge by half a pixel, so the comparison of the two
+    // takes the width of the arithmetic alone. Client rect coordinates sit on
+    // the layout unit of the viewport, so a sum of them can stand a unit away
+    // from a coordinate it should equal.
+    const coordinateNoise = 1 / column.clientLayout.layoutUnitPerPixel;
+
+    // The lines run in the direction of the block container, which an author
+    // can set against the direction of the leader itself.
+    const containerStyle = column.clientLayout.getElementComputedStyle(
+      container.viewNode,
+    );
+    const lineIsRtl = containerStyle.direction === "rtl";
+    const lineIsReversed = CssLogicalUtil.isInlineReversed(
+      writingMode,
+      lineIsRtl,
+    );
+    const lineStartSide = lineIsReversed ? inlineHighSide : inlineLowSide;
+    const lineSign = lineIsReversed ? -1 : 1;
+    const leaderRunsWithTheLine = lineIsRtl === (direction === "rtl");
+
+    // The client rect of the block container is its border box, while its
+    // lines end at its content box.
+    const containerInset = (side: string) =>
+      column.parseComputedLength(
+        containerStyle.getPropertyValue(`padding-${side}`),
+      ) +
+      column.parseComputedLength(
+        containerStyle.getPropertyValue(`border-${side}-width`),
+      );
+
+    // Alignment distributes the free space of a line between its two edges,
+    // and every pattern the leader gains takes from that space, so the browser
+    // moves the pseudo element along the line unless the free space all sits
+    // at the end of the line. The number of patterns that fit does not depend
+    // on where that space sits. The declarations go on the element itself
+    // because a rule of the polyfill style sheet aligns the last line of a
+    // split block to both edges.
+    const physicalLineStart = lineIsRtl ? "right" : "left";
+    const alignsToLineStart =
+      ["start", physicalLineStart].includes(containerStyle.textAlign) &&
+      ["auto", "start", physicalLineStart].includes(
+        containerStyle.textAlignLast,
+      );
+    const containerInlineStyle = (container.viewNode as HTMLElement).style;
+    const alignmentToRestore: {
+      property: string;
+      value: string;
+      priority: string;
+    }[] = [];
+    if (leaderRunsWithTheLine && !alignsToLineStart) {
+      for (const property of ["text-align", "text-align-last"] as const) {
+        alignmentToRestore.push({
+          property,
+          value: containerInlineStyle.getPropertyValue(property),
+          priority: containerInlineStyle.getPropertyPriority(property),
+        });
+        containerInlineStyle.setProperty(
+          property,
+          property === "text-align" ? "start" : "auto",
+          "important",
+        );
+      }
+      container.viewNode.setAttribute("data-viv-text-align-start", "");
+    }
 
     // Calculate width of following inline siblings (Issue #1563)
     const inlineNodes: (Element | Text)[] = [];
@@ -3537,6 +5089,83 @@ const postLayoutBlockLeader: Plugin.PostLayoutBlockHook = (
       sibling = sibling.nextSibling;
     }
 
+    const box = column.clientLayout.getElementClientRect(container.viewNode);
+    let innerInit = column.clientLayout.getElementClientRect(pseudoElem);
+    const innerMarginInlineEnd = column.parseComputedLength(marginInlineEnd);
+    const patternSize = inlineSizeOf(
+      column.clientLayout.getElementClientRect(leaderElem),
+    );
+
+    // A block container that continues in another column has a client rect for
+    // each fragment, side by side in the inline direction, while its bounding
+    // client rect spans all of them.
+    const viewportBox = container.viewNode.getBoundingClientRect();
+    const fragments = Array.from(container.viewNode.getClientRects());
+    const boxOffset = box[inlineStartSide] - viewportBox[inlineStartSide];
+    const boxWith = (sides: Partial<Vtree.ClientRect>): Vtree.ClientRect => {
+      const { left, top, right, bottom } = { ...box, ...sides };
+      return {
+        left,
+        top,
+        right,
+        bottom,
+        width: right - left,
+        height: bottom - top,
+      };
+    };
+    const fragmentBoxes = (
+      fragments.length > 0 ? fragments : [viewportBox]
+    ).map((fragment) =>
+      boxWith({
+        [inlineStartSide]:
+          fragment[inlineStartSide] +
+          boxOffset +
+          inlineSign * containerInset(inlineStartSide),
+        [inlineEndSide]:
+          fragment[inlineEndSide] +
+          boxOffset -
+          inlineSign * (containerInset(inlineEndSide) + innerMarginInlineEnd),
+      }),
+    );
+    const inlineDistance = (fragmentBox: Vtree.ClientRect, center: number) =>
+      Math.max(
+        fragmentBox[inlineLowSide] - center,
+        center - fragmentBox[inlineHighSide],
+        0,
+      );
+    const fragmentBoxOf = (rect: Vtree.ClientRect) => {
+      const center = (rect[inlineLowSide] + rect[inlineHighSide]) / 2;
+      return fragmentBoxes.reduce((nearest, fragmentBox) =>
+        inlineDistance(fragmentBox, center) < inlineDistance(nearest, center)
+          ? fragmentBox
+          : nearest,
+      );
+    };
+    let initialFragmentBox = fragmentBoxOf(innerInit);
+
+    // A range around a node yields a rect for each line it occupies, where the
+    // contents of a replaced element or of an empty inline box yield none and
+    // the bounding rect of an element spans every line it occupies at once.
+    const firstInlineRectOf = (node: Element | Text) =>
+      RangeClientRects.getLayoutClientRectsBetween(
+        column.clientLayout,
+        RangeClientRects.before(node),
+        RangeClientRects.after(node),
+      ).find((rect) => inlineSizeOf(rect) > 0);
+
+    let followingInit: Vtree.ClientRect | undefined;
+    for (const node of inlineNodes) {
+      followingInit = firstInlineRectOf(node);
+      if (followingInit) {
+        break;
+      }
+    }
+
+    // The following content is measured on a single line: where it wraps, the
+    // browser gives the collapsible space at the wrap point no client rect
+    // width, and justification stretches the spaces of the wrapped line.
+    container.viewNode.setAttribute("data-viv-nowrap", "");
+
     // Measure the width of following siblings by reducing each node's actual width
     let followingInlineSiblingsWidth = inlineNodes.reduce(
       (acc, node) =>
@@ -3561,86 +5190,195 @@ const postLayoutBlockLeader: Plugin.PostLayoutBlockHook = (
       followingInlineSiblingsWidth += parentWidth - pseudoWidth;
     }
 
+    container.viewNode.removeAttribute("data-viv-nowrap");
+
     // capture the line boundary
     // Some leader text ("_" e.g.) creates higher top than container.
-    if (writingMode === "vertical-rl" || writingMode === "vertical-lr") {
-      if (direction === "rtl") {
-        box.top += innerMarginInlineEnd;
-      } else {
-        box.bottom -= innerMarginInlineEnd;
-      }
-      box.top = Math.min(innerInit.top, box.top);
-      box.bottom = Math.max(innerInit.bottom, box.bottom);
-    } else {
-      if (direction === "rtl") {
-        box.left += innerMarginInlineEnd;
-      } else {
-        box.right -= innerMarginInlineEnd;
-      }
-      box.left = Math.min(innerInit.left, box.left);
-      box.right = Math.max(innerInit.right, box.right);
+    const lineBoxAround = (inner: Vtree.ClientRect) =>
+      boxWith({
+        ...initialFragmentBox,
+        [inlineLowSide]: Math.min(
+          inner[inlineLowSide],
+          initialFragmentBox[inlineLowSide],
+        ),
+        [inlineHighSide]: Math.max(
+          inner[inlineHighSide],
+          initialFragmentBox[inlineHighSide],
+        ),
+      });
+    let initialLineBox = lineBoxAround(innerInit);
+    const lineBoxOf = (inner: Vtree.ClientRect) => {
+      const fragmentBox = fragmentBoxOf(inner);
+      return fragmentBox === initialFragmentBox ? initialLineBox : fragmentBox;
+    };
+
+    function overrun(inner: Vtree.ClientRect): boolean {
+      const lineBox = lineBoxOf(inner);
+      const end =
+        inner[inlineEndSide] + inlineSign * followingInlineSiblingsWidth;
+      return (
+        lineBox[inlineLowSide] - Math.min(inner[inlineLowSide], end) >
+          coordinateNoise ||
+        Math.max(inner[inlineHighSide], end) - lineBox[inlineHighSide] >
+          coordinateNoise ||
+        lineBox[blockLowSide] - inner[blockLowSide] > subPixel ||
+        inner[blockHighSide] - lineBox[blockHighSide] > subPixel
+      );
     }
 
-    function overrun() {
-      const inner = column.clientLayout.getElementClientRect(pseudoElem);
-      if (writingMode === "vertical-rl" || writingMode === "vertical-lr") {
-        if (direction === "rtl") {
-          inner.top -= followingInlineSiblingsWidth;
-        } else {
-          inner.bottom += followingInlineSiblingsWidth;
-        }
-      } else {
-        if (direction === "rtl") {
-          inner.left -= followingInlineSiblingsWidth;
-        } else {
-          inner.right += followingInlineSiblingsWidth;
-        }
-      }
-      if (
-        box.left > inner.left ||
-        box.right < inner.right ||
-        box.top > inner.top ||
-        box.bottom < inner.bottom
-      ) {
-        return true;
-      }
-      return false;
+    // The browser moves the pseudo element along its line where it balances
+    // the lines or redistributes the free space of its container again, and it
+    // moves the lines in the block direction where the container aligns them
+    // to its center or end.
+    const hasMovedAlongLine = (inner: Vtree.ClientRect) =>
+      fragmentBoxOf(inner) !== initialFragmentBox ||
+      Math.abs(inner[lineStartSide] - innerInit[lineStartSide]) >= subPixel;
+    const hasMovedAcrossLines = (inner: Vtree.ClientRect) =>
+      fragmentBoxOf(inner) !== initialFragmentBox ||
+      Math.abs(inner[blockLowSide] - innerInit[blockLowSide]) >= subPixel;
+
+    // A leader belongs on the line where the content before it ends, and grows
+    // while the content following it still fits on that line. Only where a
+    // single pattern and that content do not fit there does the leader move to
+    // the next line, and it then grows while it fits on that line.
+    // TODO: CSS Generated Content 3 puts a leader and the content around it on
+    // one line, so it leaves the length undefined where the content following
+    // the leader carries a forced break or is longer than a line. That content
+    // is measured here as a width on one line: the part after a break counts
+    // as though it shared the line, which shortens the leader by that width,
+    // and content longer than a line leaves no room, which keeps the leader at
+    // a single pattern.
+    // An inline box that `vertical-align` displaces can clear the leader in the
+    // block direction while it stays on the line, so content that has left the
+    // line is recognized by the direction of the line as well: it resumes at
+    // the start of its line, no further along than the leader.
+    const startsOnALaterLine = (rect: Vtree.ClientRect) =>
+      (rect[blockStartSide] - innerInit[blockEndSide]) * blockSign >=
+        -subPixel &&
+      (rect[lineStartSide] - innerInit[lineStartSide]) * lineSign <= subPixel;
+    const fitsWithOnePattern =
+      !overrun(innerInit) &&
+      (followingInit === undefined || !startsOnALaterLine(followingInit));
+    // The room runs in the direction of the leader, which is the direction of
+    // the line unless an author sets them against each other. On such a line
+    // it measures the other way, and the search below pays for that in probes
+    // rather than in the count it settles on.
+    const roomOnTheLine = () =>
+      (initialLineBox[inlineEndSide] -
+        (fitsWithOnePattern
+          ? innerInit[inlineStartSide]
+          : initialLineBox[inlineStartSide])) *
+        inlineSign -
+      followingInlineSiblingsWidth;
+    let lineRoom = roomOnTheLine();
+    // CSS Generated Content 3 breaks the line after the content preceding a
+    // leader where not one full copy of the leader is visible beside it, and
+    // draws the leader and the content following it on the next line. A leader
+    // long enough to fill that line reaches it on its own wherever it is also
+    // too long for the room beside the content before it. The break goes into
+    // the tree only where it does not, because a break of its own aligns the
+    // line before it as the last line of a block.
+    const roomBesideTheContentBefore =
+      (initialLineBox[inlineEndSide] - innerInit[inlineStartSide]) * inlineSign;
+    const startsTheNextLine =
+      !fitsWithOnePattern &&
+      lineRoom >= inlineSizeOf(innerInit) &&
+      lineRoom <= roomBesideTheContentBefore;
+    if (startsTheNextLine) {
+      const lineBreak = pseudoElem.ownerDocument.createElementNS(
+        Base.NS.XHTML,
+        "br",
+      );
+      lineBreak.setAttribute("data-viv-leader-break", "");
+      pseudoParent.insertBefore(lineBreak, pseudoElem);
+      innerInit = column.clientLayout.getElementClientRect(pseudoElem);
+      initialFragmentBox = fragmentBoxOf(innerInit);
+      initialLineBox = lineBoxAround(innerInit);
+      lineRoom = roomOnTheLine();
     }
+    const leaderIsOnItsLine = fitsWithOnePattern || startsTheNextLine;
+    const isTooLong = (inner: Vtree.ClientRect) =>
+      leaderIsOnItsLine
+        ? overrun(inner) ||
+          (hasMovedAlongLine(inner) && hasMovedAcrossLines(inner))
+        : overrun(inner) &&
+          (hasMovedAlongLine(inner) ||
+            inlineSizeOf(inner) > lineRoom + followingInlineSiblingsWidth);
 
     function setLeader() {
-      // min-max search
-      let lower: number;
-      let upper: number;
-      let templeader = leader.repeat(10000);
-      setLeaderTextContent(templeader);
-      if (overrun()) {
-        lower = 1;
-        upper = 10000;
-      } else {
+      const maxCount = 10000;
+      // A pattern that advances the line by nothing, as a zero width space or
+      // a combining mark does, reaches no edge however often it repeats. What
+      // stands beside it in the pseudo element can still be too long for the
+      // line, and repeating the pattern leaves that as it is.
+      if (!(patternSize > 0)) {
+        setLeaderTextContent(leader.repeat(maxCount));
+        if (isTooLong(column.clientLayout.getElementClientRect(pseudoElem))) {
+          setLeaderTextContent(leader);
+        }
         return;
       }
-      // leader is set to overrun state here
-      for (let i = 0; i < 16; i++) {
-        let templeader = "";
-        const mid = Math.floor((lower + upper) / 2);
-        for (let j = 0; j < mid; j++) {
-          templeader += leader;
-        }
-        setLeaderTextContent(templeader);
-        if (overrun()) {
-          upper = mid;
+      const sizeWithoutPatterns = inlineSizeOf(innerInit) - patternSize;
+      const patternRoom = lineRoom - sizeWithoutPatterns;
+      let notTooLong = {
+        count: 1,
+        fits: leaderIsOnItsLine && !overrun(innerInit),
+      };
+      let tooLongCount = maxCount + 1;
+      let measuredCount = 1;
+      let patternAdvance = patternSize;
+      let step = 1;
+      while (tooLongCount - notTooLong.count > 1) {
+        // The browser decides whether a leader is too long on more than its
+        // inline size, as it does where it reorders a bidirectional line or
+        // gives the following content a line of its own, so the room can keep
+        // proposing a count the search has already measured.
+        const estimate = Math.min(
+          Math.floor(patternRoom / patternAdvance),
+          maxCount,
+        );
+        const half = Math.max(
+          1,
+          Math.floor((tooLongCount - notTooLong.count) / 2),
+        );
+        let count: number;
+        if (estimate > notTooLong.count && estimate < tooLongCount) {
+          count = estimate;
+          step = 1;
+        } else if (estimate >= tooLongCount) {
+          count = notTooLong.count + half;
         } else {
-          if (lower == mid) {
-            return;
-          }
-          lower = mid;
+          count = notTooLong.count + Math.min(step, half);
+          step *= 2;
+        }
+        setLeaderTextContent(leader.repeat(count));
+        measuredCount = count;
+        const inner = column.clientLayout.getElementClientRect(pseudoElem);
+        if (isTooLong(inner)) {
+          tooLongCount = count;
+        } else {
+          notTooLong = { count, fits: leaderIsOnItsLine || !overrun(inner) };
+        }
+        const measuredAdvance =
+          (inlineSizeOf(inner) - sizeWithoutPatterns) / count;
+        if (measuredAdvance > 0) {
+          patternAdvance = measuredAdvance;
         }
       }
-      setLeaderTextContent(leader);
+      const expandedCount = notTooLong.fits ? notTooLong.count : 1;
+      if (measuredCount !== expandedCount) {
+        setLeaderTextContent(leader.repeat(expandedCount));
+      }
     }
 
     // set the expanded leader
     setLeader();
+    if (alignmentToRestore.length > 0) {
+      container.viewNode.removeAttribute("data-viv-text-align-start");
+      for (const { property, value, priority } of alignmentToRestore) {
+        containerInlineStyle.setProperty(property, value, priority);
+      }
+    }
 
     // Without inline-end, we use margin-inline-start to adjust the position.
     // To get the margin size, set float, calculate then cancel float.
@@ -3663,21 +5401,10 @@ const postLayoutBlockLeader: Plugin.PostLayoutBlockHook = (
       }
       return inset;
     }
-    let padding = 0;
-    if (direction == "rtl") {
-      if (writingMode == "vertical-rl" || writingMode == "vertical-lr") {
-        padding = innerInline.top - innerAligned.top - getInset("top");
-      } else {
-        padding = innerInline.left - innerAligned.left - getInset("left");
-      }
-    } else {
-      if (writingMode == "vertical-rl" || writingMode == "vertical-lr") {
-        padding = innerAligned.bottom - innerInline.bottom - getInset("bottom");
-      } else {
-        padding = innerAligned.right - innerInline.right - getInset("right");
-      }
-    }
-    padding -= followingInlineSiblingsWidth;
+    let padding =
+      (innerAligned[inlineEndSide] - innerInline[inlineEndSide]) * inlineSign -
+      getInset(inlineEndSide) -
+      followingInlineSiblingsWidth;
     padding = Math.max(0, padding - 0.1); // prevent line wrapping (Issue #1112)
     pseudoElem.style.float = "";
     leaderElem.style.marginInlineStart = `${padding}px`;
@@ -3706,15 +5433,15 @@ export const ORDER_INCREMENT = 1 / 0x100000;
 
 export class Cascade {
   nsCount: number = 0;
-  nsPrefix: { [key: string]: string } = {};
-  tags: ActionTable = {};
-  nstags: ActionTable = {};
-  epubtypes: ActionTable = {};
-  classes: ActionTable = {};
-  ids: ActionTable = {};
-  pagetypes: ActionTable = {};
+  nsPrefix = new Map<string, string>();
+  tags: ActionTable = new Map();
+  nstags: ActionTable = new Map();
+  epubtypes: ActionTable = new Map();
+  classes: ActionTable = new Map();
+  ids: ActionTable = new Map();
+  pagetypes: ActionTable = new Map();
   order: number = 0;
-  readonly layerTrees: { [flavor: string]: CascadeLayerTree } = {};
+  readonly layerTrees = new Map<string, CascadeLayerTree>();
 
   /**
    * Returns the cascade layer for a `@layer` rule of the given origin.
@@ -3725,16 +5452,20 @@ export class Cascade {
     parent: CascadeLayer | null,
     nameList: string[] | null,
   ): CascadeLayer {
-    const tree = (this.layerTrees[flavor] ??= new CascadeLayerTree());
+    let tree = this.layerTrees.get(flavor);
+    if (!tree) {
+      tree = new CascadeLayerTree();
+      this.layerTrees.set(flavor, tree);
+    }
     return tree.register(parent, nameList);
   }
 
   insertInTable(table: ActionTable, key: string, action: CascadeAction): void {
-    const a = table[key];
+    const a = table.get(key);
     if (a) {
       action = a.mergeWith(action);
     }
-    table[key] = action;
+    table.set(key, action);
   }
 
   createInstance(
@@ -3776,7 +5507,7 @@ export interface StyleReader {
 export class CascadeInstance {
   code: Cascade;
   stack = [[], []] as ConditionItem[][];
-  conditions = Object.create(null) as { [key: string]: number };
+  conditions = new Map<string, number>();
   currentElement: Element | null = null;
   currentElementOffset: number | null = null;
   currentLocalName: string = "";
@@ -3809,7 +5540,7 @@ export class CascadeInstance {
     emptySiblingTypeCounts(),
   ];
   currentFollowingSiblingTypeCounts: SiblingTypeCounts;
-  viewConditions: { [key: string]: Matchers.Matcher[] } = Object.create(null);
+  viewConditions = new Map<string, Matchers.Matcher[]>();
   dependentConditions: string[] = [];
   elementStack: Element[] = [];
 
@@ -3839,31 +5570,33 @@ export class CascadeInstance {
   }
 
   pushConditionItem(item: ConditionItem): void {
-    this.stack[this.stack.length - 1].push(item);
+    this.stack.at(-1).push(item);
   }
 
   increment(condition: string, viewCondition: Matchers.Matcher | null): void {
-    this.conditions[condition] = (this.conditions[condition] || 0) + 1;
+    this.conditions.set(condition, (this.conditions.get(condition) || 0) + 1);
     if (!viewCondition) {
       return;
     }
-    if (this.viewConditions[condition]) {
-      this.viewConditions[condition].push(viewCondition);
+    const matchers = this.viewConditions.get(condition);
+    if (matchers) {
+      matchers.push(viewCondition);
     } else {
-      this.viewConditions[condition] = [viewCondition];
+      this.viewConditions.set(condition, [viewCondition]);
     }
   }
 
   decrement(condition: string, viewCondition: Matchers.Matcher | null): void {
-    this.conditions[condition]--;
-    if (!this.viewConditions[condition]) {
+    this.conditions.set(condition, this.conditions.get(condition) - 1);
+    const matchers = this.viewConditions.get(condition);
+    if (!matchers) {
       return;
     }
-    this.viewConditions[condition] = this.viewConditions[condition].filter(
-      (item) => item !== viewCondition,
-    );
-    if (this.viewConditions[condition].length === 0) {
-      delete this.viewConditions[condition];
+    const remaining = matchers.filter((item) => item !== viewCondition);
+    if (remaining.length === 0) {
+      this.viewConditions.delete(condition);
+    } else {
+      this.viewConditions.set(condition, remaining);
     }
   }
 
@@ -3880,13 +5613,11 @@ export class CascadeInstance {
     }
     const dependentConditionMatchers = this.dependentConditions
       .map((conditionId) => {
-        const conditions = this.viewConditions[conditionId];
+        const conditions = this.viewConditions.get(conditionId);
         if (conditions && conditions.length > 0) {
           return conditions.length === 1
             ? conditions[0]
-            : Matchers.MatcherBuilder.buildAnyMatcher(
-                ([] as Matchers.Matcher[]).concat(conditions),
-              );
+            : Matchers.MatcherBuilder.buildAnyMatcher([...conditions]);
         } else {
           return null;
         }
@@ -3910,7 +5641,7 @@ export class CascadeInstance {
     table: ActionTable,
     key: string,
   ): void {
-    const action = table[key];
+    const action = table.get(key);
     if (action) {
       action.apply(cascadeInstance);
     }
@@ -3935,7 +5666,7 @@ export class CascadeInstance {
   }
 
   defineCounter(counterName: string, value: number) {
-    let scoping = this.counterScoping[this.counterScoping.length - 1];
+    let scoping = this.counterScoping.at(-1);
     if (!scoping) {
       scoping = Object.create(null) as { [key: string]: boolean };
       this.counterScoping[this.counterScoping.length - 1] = scoping;
@@ -3951,11 +5682,16 @@ export class CascadeInstance {
     scoping[counterName] = true;
   }
 
-  pushCounters(props: ElementStyle, elementStyle: ElementStyle): void {
-    const counterChanges = new Set<string>();
-    const counterChangeTypes: {
-      [key: string]: "reset" | "set" | "increment";
-    } = Object.create(null);
+  pushCounters(
+    props: ElementStyle,
+    elementStyle: ElementStyle,
+    accumulateChanges = false,
+  ): void {
+    if (!accumulateChanges) {
+      this.lastCounterChanges = [];
+      this.lastCounterChangeTypes = Object.create(null);
+    }
+    const counterChangeTypes = this.lastCounterChangeTypes;
     let displayVal: Css.Val = Css.ident.inline;
     const display = props["display"] as CascadeValue;
     if (display) {
@@ -3964,13 +5700,9 @@ export class CascadeInstance {
     // Ignore counter-* on 'display: none' elements and their descendants
     if (displayVal === Css.ident.none) {
       this.currentElement?.setAttribute("data-viv-display-none", "true");
-      this.lastCounterChanges = [];
-      this.lastCounterChangeTypes = Object.create(null);
       this.counterScoping.push(null);
       return;
     } else if (this.currentElement?.closest("[data-viv-display-none]")) {
-      this.lastCounterChanges = [];
-      this.lastCounterChangeTypes = Object.create(null);
       this.counterScoping.push(null);
       return;
     }
@@ -4064,13 +5796,11 @@ export class CascadeInstance {
     }
     if (resetMap) {
       for (const resetCounterName in resetMap) {
-        counterChanges.add(resetCounterName);
         counterChangeTypes[resetCounterName] = "reset";
       }
     }
     if (incrementMap) {
       for (const incrementCounterName in incrementMap) {
-        counterChanges.add(incrementCounterName);
         if (!counterChangeTypes[incrementCounterName]) {
           counterChangeTypes[incrementCounterName] = "increment";
         }
@@ -4078,12 +5808,12 @@ export class CascadeInstance {
     }
     if (setMap) {
       for (const setCounterName in setMap) {
-        counterChanges.add(setCounterName);
         counterChangeTypes[setCounterName] = "set";
       }
     }
-    this.lastCounterChanges = Array.from(counterChanges);
-    this.lastCounterChangeTypes = counterChangeTypes;
+    if (resetMap || incrementMap || setMap) {
+      this.lastCounterChanges = Object.keys(counterChangeTypes);
+    }
     if (resetMap) {
       for (const resetCounterName in resetMap) {
         this.defineCounter(resetCounterName, resetMap[resetCounterName]);
@@ -4111,7 +5841,7 @@ export class CascadeInstance {
     }
     if (Display.isListItem(displayVal)) {
       const listItemCounts = this.counters["list-item"];
-      const listItemCount = listItemCounts[listItemCounts.length - 1];
+      const listItemCount = listItemCounts.at(-1);
       props["ua-list-item-count"] = new CascadeValue(
         new Css.Num(listItemCount),
         0,
@@ -4193,6 +5923,77 @@ export class CascadeInstance {
   }
 
   /**
+   * Process CSS bookmark-level, bookmark-label and bookmark-state properties
+   * https://drafts.csswg.org/css-content-3/#bookmark-generation
+   */
+  setBookmark(
+    props: ElementStyle,
+    element: Element,
+    elementOffset: number,
+  ): void {
+    // These properties are not inherited by default, but they are kept in
+    // the element style (not passed to the DOM, see
+    // Vgen.propertiesNotPassedToDOM), so that a child with an explicit
+    // `inherit` value can get the value of its parent. Returns null for the
+    // initial value.
+    const getValue = (name: string): Css.Val | null => {
+      let style = props;
+      for (let e = element; ;) {
+        let value = (style[name] as CascadeValue)?.value ?? null;
+        if (value && !Css.isDefaultingValue(value)) {
+          // Revalidate, since a value substituted from var() is not
+          // validated (e.g., `--label: none; bookmark-label: var(--label)`)
+          // and the keyword case is kept.
+          value = value.visit(this.validatorSet.validators.get(name)) ?? null;
+          return value && !Css.isDefaultingValue(value) ? value : null;
+        }
+        if (value !== Css.ident.inherit) {
+          return null; // unspecified, initial, unset, etc.
+        }
+        e = e.parentElement;
+        if (!e) {
+          return null;
+        }
+        style = this.styles.styleOf(e);
+      }
+    };
+    const level = getValue("bookmark-level");
+    if (
+      !(level instanceof Css.Num) ||
+      !Number.isInteger(level.num) ||
+      level.num < 1
+    ) {
+      return; // bookmark-level: none (initial value)
+    }
+    const labelValue = getValue("bookmark-label");
+    let label: string;
+    if (labelValue) {
+      // Do not let open-quote/close-quote in the label change the quotes
+      // rendered in the document.
+      const originalQuoteDepth = this.quoteDepth;
+      const contentVal = labelValue.visit(
+        new ContentPropVisitor(this, element, this.counterResolver, props),
+      );
+      label = getStringValueFromCssContentVal(contentVal, this.context);
+      this.quoteDepth = originalQuoteDepth;
+    } else {
+      // bookmark-label initial value: content(text)
+      label = element.textContent;
+    }
+    label = label.replace(/\s+/g, " ").trim();
+    // The keyword may keep its case when given via var().
+    const closed =
+      getValue("bookmark-state")?.toString().toLowerCase() === "closed";
+    this.counterResolver.setBookmark(
+      element,
+      elementOffset,
+      level.num,
+      label,
+      closed,
+    );
+  }
+
+  /**
    * Process CSS running elements
    * https://drafts.csswg.org/css-gcpm-3/#running-elements
    */
@@ -4213,7 +6014,12 @@ export class CascadeInstance {
     elementStyle: ElementStyle,
     pseudoName?: string,
   ): void {
-    this.pushCounters(pseudoprops, elementStyle);
+    // The styler snapshots counters after the leading pseudos. Keep the
+    // footnote increment at the call's source offset even when a subsequent
+    // pseudo only reads it. Deferred ::after content has its own position.
+    const keepFootnoteChanges =
+      !!pseudoName && !!this.lastCounterChangeTypes["footnote"];
+    this.pushCounters(pseudoprops, elementStyle, keepFootnoteChanges);
     const content = pseudoprops["content"] as CascadeValue;
     if (content) {
       pseudoprops["content"] = content.filterValue(
@@ -4227,6 +6033,22 @@ export class CascadeInstance {
       );
     }
     this.popCounters();
+  }
+
+  private dropPseudoelement(
+    baseStyle: ElementStyle,
+    pseudos: ElementStyleMap,
+    pseudoName: string,
+  ): ElementStyleMap {
+    // Rebuilding keeps _pseudos out of V8 dictionary mode.
+    const keptPseudos = {} as ElementStyleMap;
+    for (const name in pseudos) {
+      if (name !== pseudoName) {
+        keptPseudos[name] = pseudos[name];
+      }
+    }
+    baseStyle["_pseudos"] = keptPseudos;
+    return keptPseudos;
   }
 
   pushElement(
@@ -4248,7 +6070,7 @@ export class CascadeInstance {
     this.currentLocalName = element.localName;
     const prefix =
       this.currentNamespace !== null
-        ? this.code.nsPrefix[this.currentNamespace]
+        ? this.code.nsPrefix.get(this.currentNamespace)
         : undefined;
     if (prefix) {
       this.currentNSTag = prefix + this.currentLocalName;
@@ -4263,7 +6085,7 @@ export class CascadeInstance {
     const epubTypes = types ? types.split(/\s+/) : EMPTY;
     const lang = Base.getLangAttribute(element);
     if (lang) {
-      this.stack[this.stack.length - 1].push(new RestoreLangItem(this.lang));
+      this.stack.at(-1).push(new RestoreLangItem(this.lang));
       this.lang = lang.toLowerCase();
     }
     const isRoot = this.isRoot;
@@ -4274,7 +6096,7 @@ export class CascadeInstance {
     siblingOrderStack.push(0);
     const siblingTypeCountsStack = this.siblingTypeCountsStack;
     const currentSiblingTypeCounts = (this.currentSiblingTypeCounts =
-      siblingTypeCountsStack[siblingTypeCountsStack.length - 1]);
+      siblingTypeCountsStack.at(-1));
     const currentNamespaceTypeCounts = typeCountsForNamespace(
       currentSiblingTypeCounts,
       this.currentNamespace,
@@ -4283,8 +6105,7 @@ export class CascadeInstance {
       (currentNamespaceTypeCounts[this.currentLocalName] || 0) + 1;
     siblingTypeCountsStack.push(emptySiblingTypeCounts());
     const followingSiblingOrderStack = this.followingSiblingOrderStack;
-    const lastOrder =
-      followingSiblingOrderStack[followingSiblingOrderStack.length - 1];
+    const lastOrder = followingSiblingOrderStack.at(-1);
     if (lastOrder !== null) {
       this.currentFollowingSiblingOrder = followingSiblingOrderStack[
         followingSiblingOrderStack.length - 1
@@ -4297,9 +6118,7 @@ export class CascadeInstance {
       this.followingSiblingTypeCountsStack;
     const currentFollowingSiblingTypeCounts =
       (this.currentFollowingSiblingTypeCounts =
-        followingSiblingTypeCountsStack[
-          followingSiblingTypeCountsStack.length - 1
-        ]);
+        followingSiblingTypeCountsStack.at(-1));
     const followingNamespaceTypeCounts =
       currentFollowingSiblingTypeCounts &&
       (this.currentNamespace !== null
@@ -4370,7 +6189,7 @@ export class CascadeInstance {
       });
       this.counterListener.countersOfId(id, counters);
     }
-    const pseudos = getStyleMap(baseStyle, "_pseudos");
+    let pseudos = getStyleMap(baseStyle, "_pseudos");
     if (pseudos) {
       let before = true;
       for (const pseudoName of pseudoNames) {
@@ -4431,7 +6250,7 @@ export class CascadeInstance {
               isSemanticFootnoteContent &&
               !hasSemanticFootnotePseudoContent)
           ) {
-            delete pseudos[pseudoName];
+            pseudos = this.dropPseudoelement(baseStyle, pseudos, pseudoName);
           } else if (before) {
             this.processPseudoelementProps(
               pseudoProps,
@@ -4450,7 +6269,7 @@ export class CascadeInstance {
                 baseStyle,
               );
               // Delete the pseudo to prevent fake element generation
-              delete pseudos[pseudoName];
+              pseudos = this.dropPseudoelement(baseStyle, pseudos, pseudoName);
             } else if (pseudoName === "footnote-marker") {
               // For ::footnote-marker, use native ::marker only when
               // list-style-position: outside. When inside (default), use
@@ -4496,7 +6315,11 @@ export class CascadeInstance {
                   0,
                 );
                 // Delete the pseudo to prevent fake element generation
-                delete pseudos[pseudoName];
+                pseudos = this.dropPseudoelement(
+                  baseStyle,
+                  pseudos,
+                  pseudoName,
+                );
               }
               // else: keep the pseudo for traditional span-based rendering
             } else if (
@@ -4533,6 +6356,9 @@ export class CascadeInstance {
 
     // process CSS running elements
     this.setRunningElement(baseStyle, elementOffset);
+
+    // process CSS bookmark properties
+    this.setBookmark(baseStyle, element, elementOffset);
 
     if (itemToPushLast) {
       this.stack[this.stack.length - 2].push(itemToPushLast);
@@ -4754,7 +6580,7 @@ export class CascadeInstance {
         return val;
       }
     }
-    return this.validatorSet.defaultValues[propName] ?? null;
+    return this.validatorSet.defaultValues.get(propName) ?? null;
   }
 
   resolvePseudoelementInheritedPropertyValue(
@@ -4772,7 +6598,7 @@ export class CascadeInstance {
         !Css.isRollbackValue(val)
       ) {
         if (val === Css.ident.initial) {
-          return this.validatorSet.defaultValues[propName] ?? null;
+          return this.validatorSet.defaultValues.get(propName) ?? null;
         }
         return val;
       }
@@ -4817,14 +6643,39 @@ export class CascadeInstance {
    */
   applyVarFilter(elementStyles: ElementStyle[], element: Element | null): void {
     const elementStyle = elementStyles[0];
-    const sourceElementStyles = elementStyles.map((style) => ({ ...style }));
     const LIMIT_LOOP = 32; // prevent cyclic or too deep dependency
     const propsLH: ElementStyle = {}; // for shorthand -> longhand cascade
     const pendingPseudoMap = getStyleMap(elementStyle, "_pseudos");
     const propNames = Object.keys(elementStyle).filter(isPropName);
+    // The custom properties are resolved against the values before the
+    // substitution, which modifies elementStyle. The snapshot is used only for
+    // them, so it is not made for an element without custom properties (most
+    // elements; this runs for every element).
+    const sourceElementStyles = propNames.some((name) =>
+      Css.isCustomPropName(name),
+    )
+      ? elementStyles.map((style) => ({ ...style }))
+      : elementStyles;
+
+    // Merge a longhand that was also set by a shorthand with var().
+    const mergeIntoLonghand = (name: string): void => {
+      if (propsLH[name]) {
+        const av = getProp(elementStyle, name);
+        if (av && av.value !== Css.empty) {
+          setPropCascadeValue(propsLH, name, av, this.context);
+        }
+      }
+    };
 
     const applyVarFilterToProperty = (name: string): void => {
       const cascVal = getProp(elementStyle, name);
+      if (!containsVar(cascVal.value)) {
+        // Nothing to substitute: the visitor below would return the value
+        // as it is. Skipping it avoids its allocations for every property of
+        // every element.
+        mergeIntoLonghand(name);
+        return;
+      }
       let value = cascVal.value;
       const lookupElementStyles = Css.isCustomPropName(name)
         ? sourceElementStyles
@@ -4869,6 +6720,12 @@ export class CascadeInstance {
       }
       if (value !== cascVal.value) {
         // all variables substituted
+        if (
+          CssValidator.isEngineEvaluatedLengthProperty(name) &&
+          CssValidator.containsBrowserViewportUnit(value)
+        ) {
+          value = Css.ident.unset;
+        }
         const shorthand = this.validatorSet
           .getShorthand(name, value)
           ?.clone(this.scope);
@@ -4896,7 +6753,7 @@ export class CascadeInstance {
                 for (const nameLH of shorthand.propList) {
                   const avLH = cascVal.withValue(
                     shorthand.values[nameLH] ??
-                      this.validatorSet.defaultValues[nameLH] ??
+                      this.validatorSet.defaultValues.get(nameLH) ??
                       Css.ident.initial,
                   );
                   const tvLH = getProp(elementStyle, nameLH);
@@ -4914,12 +6771,7 @@ export class CascadeInstance {
           elementStyle[name] = cascVal.withValue(value);
         }
       }
-      if (propsLH[name]) {
-        const av = getProp(elementStyle, name);
-        if (av && av.value !== Css.empty) {
-          setPropCascadeValue(propsLH, name, av, this.context);
-        }
-      }
+      mergeIntoLonghand(name);
     };
 
     for (const name in elementStyle) {
@@ -4973,7 +6825,118 @@ export class CascadeInstance {
         }
       } else if (isPropName(name) && !Css.isCustomPropName(name)) {
         const cascVal = getProp(elementStyle, name);
-        elementStyle[name] = cascVal.withValue(cascVal.value.visit(visitor));
+        // A negative literal length is invalid for `font-size` (its range is
+        // non-negative), e.g. one that a var() substitution introduced into the
+        // declaration. The browser rejects such a declaration and inherits the
+        // parent font size, so the declaration is turned into `unset` here,
+        // before the math functions are evaluated: a math function that
+        // computes a negative value is valid and is clamped to zero below.
+        // (Review)
+        // A math function that the browser rejects for the property, e.g. the
+        // `calc(round(20px))` whose one-argument `round()` is a number and not
+        // a length, or the `calc(round(20px, 7))` that a var() substitution
+        // put into a `font-size` declaration, is invalid at computed-value
+        // time: the browser keeps the inherited value (or the initial one), so
+        // the declaration is turned into `unset` here rather than being made
+        // valid by the math functions that this engine evaluates below. Only a
+        // value containing non-calc() math functions is checked; pure legacy
+        // calc() arithmetic retains its existing behavior.
+        const rejectedFunction =
+          (name === "size" || needsMathFunctionTypeCheck(cascVal.value)) &&
+          isFunctionRejectedByBrowser(name, cascVal.value);
+        let value =
+          (name === "font-size" && isNegativeLiteralFontSize(cascVal.value)) ||
+          (name === "font-weight" &&
+            isInvalidFontWeight(this.context, cascVal.value)) ||
+          // A negative literal line height is invalid like a negative literal
+          // font size, so the declaration becomes `unset` and the element
+          // inherits the parent line height, as the browser does. (Review)
+          (name === "line-height" &&
+            isNegativeLiteralLineHeight(cascVal.value)) ||
+          rejectedFunction
+            ? Css.ident.unset
+            : cascVal.value.visit(visitor);
+        if (name === "size" && !rejectedFunction) {
+          // Page dimensions must be numeric: unlike element properties they
+          // cannot leave standalone math functions for the browser to resolve.
+          const evaluateDimension = (dimension: Css.Val): Css.Val =>
+            dimension instanceof Css.Func &&
+            dimension.name.toLowerCase() !== "calc" &&
+            needsMathFunctionTypeCheck(dimension)
+              ? new Css.Func("calc", [dimension]).visit(visitor)
+              : dimension;
+          value =
+            value instanceof Css.SpaceList
+              ? new Css.SpaceList(value.values.map(evaluateDimension))
+              : evaluateDimension(value);
+        }
+        if (name === "font-weight") {
+          if (value instanceof Css.Func || value instanceof Css.Expr) {
+            // The validator passes browser-supported math functions through,
+            // e.g. `min(900, 1000)`, but `CalcFilterVisitor` only reduces
+            // `calc()`: reduce the other math functions here, before the range
+            // is validated. A supported function that does not reduce to a
+            // number, e.g. `round(650, 100)`, is kept and evaluated by the
+            // browser; only a function that the browser rejects, e.g. the
+            // `min(900px, 1em)` that a var() substitution put into the
+            // declaration, is invalid (`isInvalidFontWeight` below). (Review)
+            value =
+              evaluateFontWeightMathFunction(this.context, value) ?? value;
+          }
+          if (value instanceof Css.Num) {
+            // A weight that is not a literal, e.g. `calc(1200)`, is valid: the
+            // computed value is clamped to the range of CSS Fonts 4, which
+            // includes an overflowing calculation such as
+            // `calc(exp(1000))`, while a result that is not a number is
+            // invalid like a literal outside the range. (Review)
+            value = Number.isNaN(value.num)
+              ? Css.ident.unset
+              : new Css.Num(Math.min(1000, Math.max(1, value.num)));
+          } else if (isInvalidFontWeight(this.context, value)) {
+            value = Css.ident.unset;
+          }
+        } else if (
+          name === "font-size" &&
+          value instanceof Css.Numeric &&
+          value.num < 0
+        ) {
+          // A math function that computes a negative value is valid and its
+          // computed value is clamped to the non-negative range of `font-size`,
+          // but emitting the negative length would be rejected by the browser,
+          // which would inherit the parent font size instead of computing zero.
+          // (Review)
+          value = new Css.Numeric(0, value.unit);
+        } else if (
+          // `font-weight` is the property whose range this engine applies to an
+          // overflowing calculation itself (`evaluateFontWeightMathFunction`
+          // below), so every other property keeps the declaration: the token
+          // `Infinity` is not CSS at all, and the browser clamps such a
+          // calculation, e.g. `opacity: calc(exp(1000))` to 1, while a stored
+          // infinity would propagate into the root sizes and into the line
+          // height that a detached descendant resolves an `lh` unit against.
+          // (Review)
+          name !== "font-weight" &&
+          (value instanceof Css.Numeric || value instanceof Css.Num) &&
+          !Number.isFinite(value.num)
+        ) {
+          value = cascVal.value;
+        } else if (
+          name === "line-height" &&
+          (value instanceof Css.Numeric || value instanceof Css.Num) &&
+          value.num < 0
+        ) {
+          // A math function that computes a negative line height is valid and
+          // its computed value is clamped to the non-negative range of
+          // `line-height`: materializing the negative length would make the
+          // browser reject the declaration and inherit the parent line height
+          // instead of applying zero. A negative literal was turned into
+          // `unset` above, before the math functions were evaluated. (Review)
+          value =
+            value instanceof Css.Numeric
+              ? new Css.Numeric(0, value.unit)
+              : new Css.Num(0);
+        }
+        elementStyle[name] = cascVal.withValue(value);
       }
     }
   }
@@ -5289,9 +7252,9 @@ export class CascadeParserHandler
       this.specificity += 1;
     }
     if (name && ns) {
-      this.chain.push(new CheckNSTagAction(ns, name.toLowerCase()));
+      this.chain.push(new CheckNSTagAction(ns, name));
     } else if (name) {
-      this.chain.push(new CheckLocalNameAction(name.toLowerCase()));
+      this.chain.push(new CheckLocalNameAction(name));
     } else {
       this.chain.push(new CheckNamespaceAction(ns as string));
     }
@@ -5336,7 +7299,7 @@ export class CascadeParserHandler
         ? !functionalPseudoClasses.has(name.toLowerCase())
         : functionalPseudoClasses.has(name.toLowerCase())
     ) {
-      this.invalidSelector(`Unsupported pseudo-class :${name}`);
+      this.unsupportedPseudoclassSelector(name, params);
       return;
     }
     switch (name.toLowerCase()) {
@@ -5458,10 +7421,24 @@ export class CascadeParserHandler
         this.pseudoelementSelector(name, params);
         return;
       default:
-        this.invalidSelector(`Unknown pseudo-class :${name}`);
+        this.unsupportedPseudoclassSelector(name, params);
         return;
     }
     this.specificity += 256;
+  }
+
+  private unsupportedPseudoclassSelector(
+    name: string,
+    params: (number | string)[] | null,
+  ): void {
+    if (
+      CSS.supports(`selector(${unsupportedSelectorText(":", name, params)})`)
+    ) {
+      this.chain.push(new CheckConditionAction("")); // always fails
+      this.specificity += 256;
+    } else {
+      this.invalidSelector(`Unsupported pseudo-class :${name}`);
+    }
   }
 
   override pseudoelementSelector(
@@ -5515,11 +7492,25 @@ export class CascadeParserHandler
           this.chain.push(new CheckConditionAction("")); // always fails
         }
         break;
-      default: // always fails
-        this.invalidSelector(`Unknown pseudo-element ::${name}`);
+      default:
+        this.unsupportedPseudoelementSelector(name, params);
         return;
     }
     this.specificity += 1;
+  }
+
+  private unsupportedPseudoelementSelector(
+    name: string,
+    params: (number | string)[] | null,
+  ): void {
+    if (
+      CSS.supports(`selector(${unsupportedSelectorText("::", name, params)})`)
+    ) {
+      this.chain.push(new CheckConditionAction("")); // always fails
+      this.specificity += 1;
+    } else {
+      this.invalidSelector(`Unknown pseudo-element ::${name}`);
+    }
   }
 
   override idSelector(id: string): void {
@@ -5945,6 +7936,22 @@ const functionalPseudoClasses: ReadonlySet<string> = new Set([
   "nth-last-of-type",
   "nth-of-type",
 ]);
+
+/**
+ * Source text of a pseudo-class or pseudo-element this engine does not
+ * implement, for probing with `CSS.supports`. `params` holds the raw argument
+ * text of a functional form, as the parser hands it over, and is null for the
+ * plain form. The name is escaped again because the tokenizer has decoded the
+ * escapes it was written with.
+ */
+function unsupportedSelectorText(
+  colons: string,
+  name: string,
+  params: (number | string)[] | null,
+): string {
+  const ident = Base.escapeCSSIdent(name);
+  return params ? `${colons}${ident}(${params[0]})` : `${colons}${ident}`;
+}
 
 export let conditionCount: number = 0;
 
@@ -6375,24 +8382,50 @@ export function parseStyleAttribute(
   return handler.elementStyle;
 }
 
+export function resolveWritingMode(
+  cascaded: { [key: string]: CascadeValue },
+  context: Exprs.Context,
+  inherited: string,
+): string {
+  const value = cascaded["writing-mode"]?.evaluate(context, "writing-mode");
+  // Custom-property substitution preserves casing and can introduce values
+  // that are invalid at computed-value time for this inherited property.
+  if (!value?.isIdent()) return inherited;
+  const mode = value.toString().toLowerCase();
+  switch (mode) {
+    case "initial":
+    case "lr":
+    case "rl":
+    case "lr-tb":
+    case "rl-tb":
+      return "horizontal-tb";
+    case "tb":
+    case "tb-rl":
+      return "vertical-rl";
+    case "horizontal-tb":
+    case "vertical-rl":
+    case "vertical-lr":
+    case "sideways-rl":
+    case "sideways-lr":
+      return mode;
+    default:
+      // Includes inherit, unset, rollback keywords and invalid substitutions.
+      return inherited;
+  }
+}
+
 export function isVertical(
   cascaded: { [key: string]: CascadeValue },
   context: Exprs.Context,
   vertical: boolean,
 ): boolean {
-  const writingModeCasc = cascaded["writing-mode"];
-  if (writingModeCasc) {
-    const writingMode = writingModeCasc.evaluate(context, "writing-mode");
-    if (
-      writingMode &&
-      writingMode !== Css.ident.inherit &&
-      writingMode !== Css.ident.unset &&
-      !Css.isRollbackValue(writingMode)
-    ) {
-      return writingMode === Css.ident.vertical_rl;
-    }
-  }
-  return vertical;
+  return CssLogicalUtil.isVertical(
+    resolveWritingMode(
+      cascaded,
+      context,
+      vertical ? "vertical-rl" : "horizontal-tb",
+    ),
+  );
 }
 
 export function isRtl(
@@ -6479,6 +8512,30 @@ export function mergeStyle(
   }
 }
 
+const writingModeCouplingMaps = new Map<string, { [key: string]: string }>();
+
+export function getCouplingMap(
+  writingMode: string,
+  rtl: boolean,
+): { [key: string]: string } {
+  const direction = rtl ? "rtl" : "ltr";
+  const key = `${writingMode}:${direction}`;
+  const cached = writingModeCouplingMaps.get(key);
+  if (cached) return cached;
+  const sideMap = Object.fromEntries(
+    ["block-start", "block-end", "inline-start", "inline-end"].map((side) => [
+      side,
+      CssLogicalUtil.toPhysical(side, writingMode, direction),
+    ]),
+  );
+  const map = buildCouplingMap(sideMap, {
+    "block-size": CssLogicalUtil.isVertical(writingMode) ? "width" : "height",
+    "inline-size": CssLogicalUtil.isVertical(writingMode) ? "height" : "width",
+  });
+  writingModeCouplingMaps.set(key, map);
+  return map;
+}
+
 /**
  * Convert logical properties to physical ones, taking specificity into account.
  * @param src Source properties map
@@ -6491,19 +8548,19 @@ export function mergeStyle(
 export const convertToPhysical = <T>(
   src: { [key: string]: CascadeValue },
   dest: { [key: string]: T },
-  vertical: boolean,
+  vertical: boolean | string,
   rtl: boolean,
   leftPageSide: boolean,
   transform: (p1: string, p2: CascadeValue) => T,
 ) => {
   // for logical properties
-  const couplingMap1 = vertical
-    ? rtl
-      ? couplingMapVertRtl
-      : couplingMapVert
-    : rtl
-      ? couplingMapHorRtl
-      : couplingMapHor;
+  const writingMode =
+    typeof vertical === "string"
+      ? vertical
+      : vertical
+        ? "vertical-rl"
+        : "horizontal-tb";
+  const couplingMap1 = getCouplingMap(writingMode, rtl);
 
   // for margin-inside/outside properties
   const couplingMap2 = leftPageSide
@@ -6559,6 +8616,32 @@ export const convertToPhysical = <T>(
 /**
  * Convert var() to its value
  */
+class VarFinder extends Css.Visitor {
+  found = false;
+
+  override visitFunc(func: Css.Func): Css.Val | null {
+    if (func.name === "var") {
+      this.found = true;
+      return null;
+    }
+    return super.visitFunc(func);
+  }
+}
+
+/** Whether a value contains var(), cached for the shared parsed values. */
+const containsVarCache = new WeakMap<Css.Val, boolean>();
+
+function containsVar(value: Css.Val): boolean {
+  let found = containsVarCache.get(value);
+  if (found === undefined) {
+    const finder = new VarFinder();
+    value.visit(finder);
+    found = finder.found;
+    containsVarCache.set(value, found);
+  }
+  return found;
+}
+
 export class VarFilterVisitor extends Css.FilterVisitor {
   private resolvingCustomProperties = [] as string[];
   private varResolutionState = { cycleMembers: new Set<string>() };
@@ -6893,7 +8976,7 @@ export class VarFilterVisitor extends Css.FilterVisitor {
     }
     const varVal = this.getVarValue(name);
     if (varVal) {
-      return varVal;
+      return Css.canonicalWideKeyword(varVal);
     }
     if (
       this.currentCustomPropertyName &&
@@ -6908,7 +8991,7 @@ export class VarFilterVisitor extends Css.FilterVisitor {
       return Css.empty;
     }
     if (func.values.length === 2) {
-      return func.values[1];
+      return Css.canonicalWideKeyword(func.values[1]);
     } else {
       return new Css.CommaList(func.values.slice(1));
     }
@@ -6954,9 +9037,56 @@ export class VarFilterVisitor extends Css.FilterVisitor {
 }
 
 /**
+ * Whether a value contains a keyword, which this expression language cannot
+ * evaluate as a number, e.g. the `<rounding-strategy>` of
+ * `round(up, 650, 100)` (a keyword becomes a media name, which is not a
+ * number). A value that contains one is valid CSS that the browser computes:
+ * the calculation is left to the browser instead of being parsed here (the
+ * parser would report the keyword as a syntax error) and must not be treated
+ * as a calculation that computes NaN. The numeric keywords of CSS Values 4
+ * (`infinity`, `NaN`) are numbers for the evaluator. (Review)
+ */
+class KeywordVisitor extends Css.Visitor {
+  found = false;
+
+  override visitIdent(ident: Css.Ident): Css.Val | null {
+    // The numeric constants of CSS Values 4 §10.7 are values of the
+    // calculation, not keywords that the parser cannot handle: `pi` and `e`
+    // are resolved by `Exprs.Context.evalName()` (together with the serialized
+    // `Infinity`/`NaN`), so they must not make the calculation unevaluable.
+    // (Review)
+    const name = ident.name.toLowerCase();
+    if (
+      name !== "infinity" &&
+      name !== "nan" &&
+      name !== "pi" &&
+      name !== "e"
+    ) {
+      this.found = true;
+    }
+    return null;
+  }
+}
+
+function hasUnevaluableKeyword(value: Css.Val): boolean {
+  const visitor = new KeywordVisitor();
+  value.visit(visitor);
+  return visitor.found;
+}
+
+/**
  * Convert calc() to its value
  */
 export class CalcFilterVisitor extends Css.FilterVisitor {
+  /**
+   * Whether a calculation of the value that this visitor evaluated is `NaN`,
+   * i.e. a supported function whose computed value is not a number, e.g. the
+   * `log(100, 0)` of a declaration. Such a declaration is invalid at
+   * computed-value time, so the property inherits, which the callers that
+   * accumulate a value for a dependent property need to know. (Review)
+   */
+  evaluatedToNaN = false;
+
   constructor(
     public context: Exprs.Context,
     public resolveViewportUnit?: boolean,
@@ -6969,11 +9099,12 @@ export class CalcFilterVisitor extends Css.FilterVisitor {
   override visitFunc(func: Css.Func): Css.Val {
     // convert func args
     let value = super.visitFunc(func);
-    if (func.name !== "calc") {
+    // A function name is matched case-insensitively, e.g. `CALC(2em)`.
+    if (func.name.toLowerCase() !== "calc") {
       return value;
     }
-    const exprText = value.toString().replace(/^calc\b/, "-epubx-expr");
-    if (this.hasUnresolvableUnit(exprText)) {
+    const exprText = value.toString().replace(/^calc\b/i, "-epubx-expr");
+    if (this.hasUnresolvableUnit(exprText) || hasUnevaluableKeyword(value)) {
       return value;
     }
     const exprVal = CssParser.parseValue(
@@ -6984,12 +9115,36 @@ export class CalcFilterVisitor extends Css.FilterVisitor {
     if (exprVal instanceof Css.Expr) {
       try {
         const exprResult = exprVal.expr.evaluate(this.context);
-        if (typeof exprResult === "number" && !isNaN(exprResult)) {
-          if (this.isLengthExpr(exprText)) {
+        if (typeof exprResult === "number" && isNaN(exprResult)) {
+          this.evaluatedToNaN = true;
+        } else if (typeof exprResult === "number") {
+          // A calculation can be a number even when it contains lengths:
+          // `calc(30px / 20px)` cancels their dimensions. Probe a property
+          // that accepts only numbers (including calculations of fractional
+          // numbers), so percentages and lengths cannot be mistaken for one.
+          const numberCalculation =
+            isNumberCalculationValue(value) ||
+            isNumberCalculation(exprVal.expr);
+          // The dimensions of the arguments of a function that returns a
+          // `<number>` whatever its arguments are, e.g. the `20px` of
+          // `sign(20px)`, are numbers and not lengths, so only the dimensions
+          // outside such a function say whether the calculation is a length.
+          // (Review)
+          const typeText = withoutNumberMathFunctionArguments(value);
+          const isLength = !numberCalculation && this.isLengthExpr(typeText);
+          if (isLength && Number.isFinite(exprResult)) {
             // length value
             value = new Css.Numeric(exprResult, "px");
-          } else if (!/\d[a-z]/i.test(exprText)) {
-            // unitless number
+          } else if (
+            !isLength &&
+            (numberCalculation || !/\d[a-z]/i.test(typeText))
+          ) {
+            // unitless number, which may be an infinity: a number valued
+            // property such as `font-weight` clamps it to its range, while a
+            // length cannot be represented as one — `calc(exp(1000) * 1px)`
+            // would be serialized as the invalid `Infinitypx` — so an
+            // overflowing length keeps the calc() for the browser to clamp.
+            // (Review)
             value = new Css.Num(exprResult);
           }
           // otherwise, keep the original calc() expression
@@ -7002,7 +9157,8 @@ export class CalcFilterVisitor extends Css.FilterVisitor {
   }
 
   protected hasUnresolvableUnit(exprText: string): boolean {
-    return /\d(%|em|ex|cap|ch|ic|lh|p?v[whbi]|p?vmin|p?vmax)\W|\Wvar\(\s*--/i.test(
+    // The browser resolves sv*/lv*/dv* units, including inside calculations.
+    return /\d(%|em|r?(?:ex|cap|ch|ic)|lh|[psld]?v(?:[whbi]|min|max))\W|\Wvar\(\s*--/i.test(
       exprText,
     );
   }
@@ -7016,13 +9172,18 @@ export class CalcFilterVisitor extends Css.FilterVisitor {
       (this.resolveViewportUnit &&
         Exprs.isViewportRelativeLengthUnit(numeric.unit)) ||
       (this.context.rootFontSize != null &&
-        Exprs.isRootFontRelativeLengthUnit(numeric.unit))
+        Exprs.isRootFontRelativeLengthUnit(numeric.unit)) ||
+      (this.context.rootFontMetricsReady &&
+        /^r(ex|cap|ch|ic)$/.test(numeric.unit))
     ) {
-      return new Css.Numeric(
-        numeric.num *
-          this.context.queryUnitSize(numeric.unit, false, this.vertical),
-        "px",
+      const size = this.context.queryUnitSize(
+        numeric.unit,
+        false,
+        this.vertical,
       );
+      return Number.isFinite(size)
+        ? new Css.Numeric(numeric.num * size, "px")
+        : numeric;
     }
     if (typeof this.percentRef === "number" && numeric.unit === "%") {
       return new Css.Numeric((numeric.num * this.percentRef) / 100, "px");
@@ -7033,7 +9194,7 @@ export class CalcFilterVisitor extends Css.FilterVisitor {
 
 export class RootSizingCalcFilterVisitor extends CalcFilterVisitor {
   protected override hasUnresolvableUnit(exprText: string): boolean {
-    return /\d(%|em|ex|cap|ch|ic|p?v[whbi]|p?vmin|p?vmax)\W|\Wvar\(\s*--/i.test(
+    return /\d(%|em|r?(?:ex|cap|ch|ic)|[psld]?v(?:[whbi]|min|max))\W|\Wvar\(\s*--/i.test(
       exprText,
     );
   }

@@ -22,6 +22,7 @@ import * as Base from "./base";
 import * as Constants from "./constants";
 import * as Css from "./css";
 import * as CssCascade from "./css-cascade";
+import * as CssLogicalUtil from "./css-logical-util";
 import * as CssParser from "./css-parser";
 import * as CssValidator from "./css-validator";
 import * as Exprs from "./exprs";
@@ -36,11 +37,21 @@ import * as Vtree from "./vtree";
 export function resolvePageProgression(
   style: CssCascade.ElementStyle,
 ): Constants.PageProgression {
-  const writingMode = (style["writing-mode"] as CssCascade.CascadeValue)?.value;
+  // Substitution preserves identifier casing; compare the same canonical
+  // keywords used by writing-mode geometry.
+  let writingMode = (style["writing-mode"] as CssCascade.CascadeValue)?.value
+    .toString()
+    .toLowerCase();
+  if (writingMode === "tb" || writingMode === "tb-rl") {
+    writingMode = "vertical-rl";
+  }
   const direction = (style["direction"] as CssCascade.CascadeValue)?.value;
   if (
-    writingMode === Css.ident.vertical_lr ||
-    (writingMode !== Css.ident.vertical_rl && direction !== Css.ident.rtl)
+    writingMode === "vertical-lr" ||
+    writingMode === "sideways-lr" ||
+    (writingMode !== "vertical-rl" &&
+      writingMode !== "sideways-rl" &&
+      direction !== Css.ident.rtl)
   ) {
     return Constants.PageProgression.LTR;
   } else {
@@ -198,6 +209,15 @@ export type PageSizeAndBleed = {
 export function resolvePageSizeAndBleed(style: {
   [key: string]: CssCascade.CascadeValue;
 }): PageSizeAndBleed {
+  // Variable substitution can introduce units after parse-time validation.
+  // Such descriptors are invalid at computed-value time and use defaults.
+  const descriptor = (name: string): CssCascade.CascadeValue | undefined => {
+    const declaration = style[name];
+    return declaration &&
+      !CssValidator.containsBrowserViewportUnit(declaration.value)
+      ? declaration
+      : undefined;
+  };
   // default value (fit to viewport, no bleed)
   const pageSizeAndBleed: PageSizeAndBleed = {
     width: Css.fullWidth,
@@ -206,7 +226,7 @@ export function resolvePageSizeAndBleed(style: {
     bleedOffset: Css.numericZero,
     cropOffset: Css.numericZero,
   };
-  const size: CssCascade.CascadeValue = style["size"];
+  const size = descriptor("size");
 
   if (!size || size.value === Css.ident.auto) {
     // if size is auto, fit to the viewport (use default value)
@@ -222,7 +242,7 @@ export function resolvePageSizeAndBleed(style: {
       val1 = value;
       val2 = null;
     }
-    if (val1.isNumeric()) {
+    if (val1.isNumeric() && (!val2 || val2.isNumeric())) {
       // <length>{1,2}
       pageSizeAndBleed.width = val1 as Css.Numeric;
       pageSizeAndBleed.height = (val2 || val1) as Css.Numeric;
@@ -245,7 +265,7 @@ export function resolvePageSizeAndBleed(style: {
     }
   }
   const marksCV = style["marks"];
-  const bleedCV = style["bleed"];
+  const bleedCV = descriptor("bleed");
   const marks =
     marksCV && !Css.isDefaultingValue(marksCV.value)
       ? marksCV.value
@@ -275,7 +295,7 @@ export function resolvePageSizeAndBleed(style: {
   }
 
   // crop-offset (Issue #913)
-  const cropOffsetCV = style["crop-offset"];
+  const cropOffsetCV = descriptor("crop-offset");
   const cropOffset =
     cropOffsetCV && !Css.isDefaultingValue(cropOffsetCV.value)
       ? cropOffsetCV.value
@@ -984,7 +1004,7 @@ export class PageRulePartition extends PageMaster.Partition<PageRulePartitionIns
       0,
     );
     for (const prop in propertiesAppliedToPartition) {
-      if (propertiesAppliedToPartition.hasOwnProperty(prop)) {
+      if (Object.hasOwn(propertiesAppliedToPartition, prop)) {
         this.specified[prop] = style[prop];
       }
     }
@@ -1049,7 +1069,7 @@ export class PageMarginBoxPartition extends PageMaster.Partition<PageMarginBoxPa
       }
     }
     for (const prop in ownStyle) {
-      if (Object.prototype.hasOwnProperty.call(ownStyle, prop)) {
+      if (Object.hasOwn(ownStyle, prop)) {
         const val = ownStyle[prop] as CssCascade.CascadeValue;
         if (
           val &&
@@ -1083,6 +1103,61 @@ export type PageAreaDimension = {
   marginRight: Exprs.Val;
 };
 
+/**
+ * Returns an expression for `max(0, value)`.
+ */
+function nonNegative(scope: Exprs.LexicalScope, value: Exprs.Val): Exprs.Val {
+  return new Exprs.Cond(
+    scope,
+    new Exprs.Gt(scope, value, scope.zero),
+    value,
+    scope.zero,
+  );
+}
+
+/**
+ * Returns an expression for `min(0, value)`.
+ */
+function nonPositive(scope: Exprs.LexicalScope, value: Exprs.Val): Exprs.Val {
+  return new Exprs.Cond(
+    scope,
+    new Exprs.Lt(scope, value, scope.zero),
+    value,
+    scope.zero,
+  );
+}
+
+/**
+ * Returns the page area dimension clipped to the page box: negative page
+ * margins are treated as zero and the page area border box is reduced by the
+ * part that extends beyond the page box. The page-margin boxes are laid out in
+ * this dimension, so that those on a side with a non-negative page margin are
+ * placed properly even when another side has a negative page margin.
+ */
+function clipPageAreaDimensionToPageBox(
+  scope: Exprs.LexicalScope,
+  dim: PageAreaDimension,
+): PageAreaDimension {
+  const clip = (
+    extent: Exprs.Val,
+    start: Exprs.Val,
+    end: Exprs.Val,
+  ): Exprs.Val =>
+    Exprs.add(
+      scope,
+      extent,
+      Exprs.add(scope, nonPositive(scope, start), nonPositive(scope, end)),
+    );
+  return {
+    borderBoxWidth: clip(dim.borderBoxWidth, dim.marginLeft, dim.marginRight),
+    borderBoxHeight: clip(dim.borderBoxHeight, dim.marginTop, dim.marginBottom),
+    marginTop: nonNegative(scope, dim.marginTop),
+    marginBottom: nonNegative(scope, dim.marginBottom),
+    marginLeft: nonNegative(scope, dim.marginLeft),
+    marginRight: nonNegative(scope, dim.marginRight),
+  };
+}
+
 export class PageRuleMasterInstance extends PageMaster.PageMasterInstance<PageRuleMaster> {
   readonly pageAreaDimension: PageAreaDimension;
   readonly pageAreaPartitionInstance: PageRulePartitionInstance;
@@ -1103,7 +1178,7 @@ export class PageRuleMasterInstance extends PageMaster.PageMasterInstance<PageRu
       }
     ).styler?.bodyPropagatedStyle;
     for (const name in docElementStyle) {
-      if (Object.prototype.hasOwnProperty.call(docElementStyle, name)) {
+      if (Object.hasOwn(docElementStyle, name)) {
         switch (name) {
           case "writing-mode":
           case "direction":
@@ -1130,7 +1205,14 @@ export class PageRuleMasterInstance extends PageMaster.PageMasterInstance<PageRu
         context,
         docElementStyle,
       );
-    const dim = this.pageAreaPartitionInstance.pageAreaDimension;
+    // The page box element and the page-margin boxes use the page area
+    // dimension clipped to the page box, so that negative page margins do not
+    // make the page box element larger than the page. The page area itself
+    // still extends beyond the page box by the negative page margins.
+    const dim = clipPageAreaDimensionToPageBox(
+      this.pageBox.scope,
+      this.pageAreaPartitionInstance.pageAreaDimension,
+    );
     this.pageAreaDimension = dim;
     const style = this.style;
     style["width"] = new Css.Expr(dim.borderBoxWidth);
@@ -1737,19 +1819,19 @@ class MultipleBoxesMarginBoxSizingParam implements MarginBoxSizingParam {
   /** @override */
   getOuterMaxContentSize(): number {
     const sizes = this.params.map((p) => p?.getOuterMaxContentSize() ?? 0);
-    return Math.max.apply(null, sizes) * sizes.length;
+    return Math.max(...sizes) * sizes.length;
   }
 
   /** @override */
   getOuterMinContentSize(): number {
     const sizes = this.params.map((p) => p?.getOuterMinContentSize() ?? 0);
-    return Math.max.apply(null, sizes) * sizes.length;
+    return Math.max(...sizes) * sizes.length;
   }
 
   /** @override */
   getOuterSize(): number {
     const sizes = this.params.map((p) => p?.getOuterSize() ?? 0);
-    return Math.max.apply(null, sizes) * sizes.length;
+    return Math.max(...sizes) * sizes.length;
   }
 }
 
@@ -1820,7 +1902,7 @@ export class PageRulePartitionInstance
   ) {
     super(parentInstance, pageRulePartition);
     for (const name in docElementStyle) {
-      if (name.match(/^background-/)) {
+      if (name.startsWith("background-")) {
         this.cascaded[name] = docElementStyle[name];
       }
     }
@@ -2030,7 +2112,7 @@ export class PageAreaPartitionInstance
     docElementStyle: CssCascade.ElementStyle,
   ): void {
     for (const name in docElementStyle) {
-      if (name.match(/^column.*$/)) {
+      if (name.startsWith("column")) {
         this.cascaded[name] = docElementStyle[name];
       }
     }
@@ -2055,14 +2137,20 @@ export class PageAreaPartitionInstance
     style["width"] = parent.contentBoxWidth;
 
     // Use negative margins and transparent borders to improve text selection behavior.
-    style["margin-left"] = new Css.Expr(
-      new Exprs.Negate(scope, parentStyle["left"].toExpr(scope, null)),
+    // A negative page margin is not a valid border width, so it is clamped to
+    // zero and the page area simply extends beyond the page box.
+    const leftWidth = nonNegative(
+      scope,
+      parentStyle["left"].toExpr(scope, null),
     );
-    style["margin-right"] = new Css.Expr(
-      new Exprs.Negate(scope, parentStyle["right"].toExpr(scope, null)),
+    const rightWidth = nonNegative(
+      scope,
+      parentStyle["right"].toExpr(scope, null),
     );
-    style["border-left-width"] = parentStyle["left"];
-    style["border-right-width"] = parentStyle["right"];
+    style["margin-left"] = new Css.Expr(new Exprs.Negate(scope, leftWidth));
+    style["margin-right"] = new Css.Expr(new Exprs.Negate(scope, rightWidth));
+    style["border-left-width"] = new Css.Expr(leftWidth);
+    style["border-right-width"] = new Css.Expr(rightWidth);
     style["border-left-style"] = Css.ident.solid;
     style["border-right-style"] = Css.ident.solid;
     style["border-left-color"] = Css.ident.transparent;
@@ -2078,14 +2166,17 @@ export class PageAreaPartitionInstance
     style["height"] = parent.contentBoxHeight;
 
     // Use negative margins and transparent borders to improve text selection behavior.
-    style["margin-top"] = new Css.Expr(
-      new Exprs.Negate(scope, parentStyle["top"].toExpr(scope, null)),
+    // A negative page margin is not a valid border width, so it is clamped to
+    // zero and the page area simply extends beyond the page box.
+    const topWidth = nonNegative(scope, parentStyle["top"].toExpr(scope, null));
+    const bottomWidth = nonNegative(
+      scope,
+      parentStyle["bottom"].toExpr(scope, null),
     );
-    style["margin-bottom"] = new Css.Expr(
-      new Exprs.Negate(scope, parentStyle["bottom"].toExpr(scope, null)),
-    );
-    style["border-top-width"] = parentStyle["top"];
-    style["border-bottom-width"] = parentStyle["bottom"];
+    style["margin-top"] = new Css.Expr(new Exprs.Negate(scope, topWidth));
+    style["margin-bottom"] = new Css.Expr(new Exprs.Negate(scope, bottomWidth));
+    style["border-top-width"] = new Css.Expr(topWidth);
+    style["border-bottom-width"] = new Css.Expr(bottomWidth);
     style["border-top-style"] = Css.ident.solid;
     style["border-bottom-style"] = Css.ident.solid;
     style["border-top-color"] = Css.ident.transparent;
@@ -2144,7 +2235,11 @@ export class PageMarginBoxPartitionInstance extends PageMaster.PartitionInstance
     Base.setCSSProperty(
       element,
       "flex-flow",
-      this.vertical ? (this.rtl ? "row-reverse" : "row") : "column",
+      this.vertical
+        ? CssLogicalUtil.isInlineReversed(this.writingMode, this.rtl)
+          ? "row-reverse"
+          : "row"
+        : "column",
     );
     const verticalAlign: Css.Val = this.getProp(context, "vertical-align");
     let flexAlign: string | null = null;
@@ -2790,7 +2885,7 @@ export class PageManager {
   private makeCascadeValueObjectKey(object: CssCascade.ElementStyle): string {
     const props = [] as string[];
     for (const prop in object) {
-      if (Object.prototype.hasOwnProperty.call(object, prop)) {
+      if (Object.hasOwn(object, prop)) {
         const val = object[prop] as CssCascade.CascadeValue;
         let str: string;
         if (val instanceof CssCascade.CascadeValue) {
@@ -3093,7 +3188,7 @@ export function mergeInPageRule(
   if (marginBoxes) {
     const targetMap = CssCascade.getMutableStyleMap(target, marginBoxesKey);
     for (const boxName in marginBoxes) {
-      if (marginBoxes.hasOwnProperty(boxName)) {
+      if (Object.hasOwn(marginBoxes, boxName)) {
         let targetBox = targetMap[boxName];
         if (!targetBox) {
           targetBox = {} as CssCascade.ElementStyle;
@@ -3119,7 +3214,7 @@ export function mergeInPageRule(
       footnoteAreaKey,
     );
     for (const key in footnoteArea) {
-      if (footnoteArea.hasOwnProperty(key)) {
+      if (Object.hasOwn(footnoteArea, key)) {
         let targetArea = targetFootnoteArea[key];
         if (!targetArea) {
           targetArea = {} as CssCascade.ElementStyle;
@@ -3129,7 +3224,7 @@ export function mergeInPageRule(
 
         // Merge regular properties (excluding _pseudos)
         for (const prop in sourceArea) {
-          if (sourceArea.hasOwnProperty(prop) && prop !== "_pseudos") {
+          if (Object.hasOwn(sourceArea, prop) && prop !== "_pseudos") {
             const val = sourceArea[prop];
             if (val instanceof CssCascade.CascadeValue) {
               CssCascade.setPropCascadeValue(targetArea, prop, val);
@@ -3145,7 +3240,7 @@ export function mergeInPageRule(
             "_pseudos",
           );
           for (const pseudoName in sourcePseudos) {
-            if (sourcePseudos.hasOwnProperty(pseudoName)) {
+            if (Object.hasOwn(sourcePseudos, pseudoName)) {
               let targetPseudo = targetPseudos[pseudoName];
               if (!targetPseudo) {
                 targetPseudo = {} as CssCascade.ElementStyle;
@@ -3153,7 +3248,7 @@ export function mergeInPageRule(
               }
               const sourcePseudo = sourcePseudos[pseudoName];
               for (const prop in sourcePseudo) {
-                if (sourcePseudo.hasOwnProperty(prop)) {
+                if (Object.hasOwn(sourcePseudo, prop)) {
                   const val = sourcePseudo[prop];
                   if (val instanceof CssCascade.CascadeValue) {
                     CssCascade.setPropCascadeValue(targetPseudo, prop, val);
@@ -3180,6 +3275,8 @@ export class PageParserHandler
   extends CssCascade.CascadeParserHandler
   implements CssValidator.PropertyReceiver
 {
+  readonly ruleType = "page";
+
   private currentPageSelectors: {
     selectors: string[] | null;
     specificity: number;
@@ -3468,6 +3565,8 @@ export class PageMarginBoxParserHandler
   ) {
     super(scope, owner, delegation);
   }
+
+  readonly ruleType = "page";
 
   readonly ruleId: number = CssCascade.nextRuleId();
 
