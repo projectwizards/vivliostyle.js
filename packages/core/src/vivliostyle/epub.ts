@@ -2259,9 +2259,22 @@ export class OPFView implements Vgen.CustomRendererFactory {
         nextLayoutPosition,
       );
     }
+    // adoc Studio fork: while all pages are rendered, a page with references
+    // to targets on many later pages, like a table of contents, is rendered
+    // again once, when all its targets have been laid out, and not for each
+    // page with one of its targets (Issue #1652). What is left is resolved
+    // after the last page of the document.
+    const isLastPageOfDocument =
+      !nextLayoutPosition &&
+      viewItem.item.spineIndex === this.opf.spine.length - 1;
     const unresolvedRefs = inCounterResolveScope
       ? []
-      : this.counterStore.getUnresolvedRefsToPage(page);
+      : this.renderingAllPages
+        ? this.counterStore.getDeferredUnresolvedRefsToPage(
+            page,
+            isLastPageOfDocument,
+          )
+        : this.counterStore.getUnresolvedRefsToPage(page);
     let unresolvedRefIndex = 0;
     let currentPage = page;
 
