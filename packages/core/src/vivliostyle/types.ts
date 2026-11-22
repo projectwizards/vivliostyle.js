@@ -497,6 +497,7 @@ export namespace Layout {
       position: Vtree.NodeContext,
       breakAtEdge: string | null,
       overflows: boolean,
+      breakBeforeText?: boolean,
     ): void;
     /**
      * @param checkPoints array of breaking points for breakable block
@@ -1471,8 +1472,10 @@ export namespace XmlDoc {
     readonly store: XMLDocStore | null;
     readonly url: string;
     readonly document: Document;
+    readonly baseURL: string;
 
     doc(): NodeList;
+    resolveURL(relURL: string): string;
     getElementOffset(element: Element): number;
     getNodeOffset(srcNode: Node, offsetInNode: number, after: boolean): number;
     getTotalOffset(): number;

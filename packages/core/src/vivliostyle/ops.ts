@@ -49,6 +49,7 @@ import * as Net from "./net";
 import * as PageFloats from "./page-floats";
 import * as CssPage from "./css-page";
 import * as Plugin from "./plugin";
+import * as PseudoElement from "./pseudo-element";
 import * as PageMaster from "./page-master";
 import * as Scripts from "./scripts";
 import * as Task from "./task";
@@ -865,17 +866,7 @@ export class StyleInstance
     let offset = Number.POSITIVE_INFINITY;
     for (let i = 0; i < flowPosition.positions.length; i++) {
       const pos = flowPosition.positions[i].chunkPosition.primary;
-      let node = pos.steps[0].node;
-      let offsetInNode = pos.offsetInNode;
-      let after = pos.after;
-      let k = 0;
-      while (node.ownerDocument != this.xmldoc.document) {
-        k++;
-        node = pos.steps[k].node;
-        after = false;
-        offsetInNode = 0;
-      }
-      const chunkOffset = this.xmldoc.getNodeOffset(node, offsetInNode, after);
+      const chunkOffset = this.getNodePositionOffset(pos);
       if (chunkOffset < offset) {
         offset = chunkOffset;
       }
@@ -889,9 +880,19 @@ export class StyleInstance
     let after = position.after;
     let k = 0;
     while (node.ownerDocument != this.xmldoc.document) {
+      // A position in generated content maps to the start of its host
+      // element, except the position after a consumed ::after (e.g. after
+      // the anchor of a float on ::after), which maps to the host's end.
+      // Content of an ::after not yet consumed still belongs to the host.
+      // (Issue #747)
+      const consumedAfterPseudo =
+        k === 0 &&
+        position.after &&
+        node.nodeType === 1 &&
+        PseudoElement.getPseudoName(node as Element) === "after";
       k++;
       node = position.steps[k].node;
-      after = false;
+      after = consumedAfterPseudo;
       offsetInNode = 0;
     }
     return this.xmldoc.getNodeOffset(node, offsetInNode, after);
@@ -3850,6 +3851,9 @@ export type StyleSheetParam =
 export type StyleSource = StyleSheetParam & {
   flavor: CssParser.StylesheetFlavor;
   media: string | null;
+  // URL of the document that embeds the style sheet text, against which
+  // fragment-only URLs are resolved (see CssParser.Parser.documentURL)
+  documentURL?: string;
 };
 
 function toStyleSource(
@@ -4142,10 +4146,11 @@ export class OPSDocStore extends Net.ResourceStore<XmlDoc.XMLDocHolder> {
           if (localName == "style") {
             const media = elem.getAttribute("media");
             docSources.push({
-              url,
+              url: xmldoc.baseURL,
               text: elem.textContent,
               flavor: CssParser.StylesheetFlavor.AUTHOR,
               media,
+              documentURL: url,
             });
           } else if (localName == "link") {
             const href = elem.getAttribute("href");
@@ -4157,14 +4162,14 @@ export class OPSDocStore extends Net.ResourceStore<XmlDoc.XMLDocHolder> {
               .split(/\s+/);
             const media = elem.getAttribute("media");
             if (href && rel?.includes("stylesheet")) {
-              linkedStyleSheetURLs.add(Base.resolveURL(href, url));
+              linkedStyleSheetURLs.add(xmldoc.resolveURL(href));
             }
             if (
               href &&
               rel?.includes("stylesheet") &&
               !rel.includes("alternate")
             ) {
-              const src = Base.resolveURL(href, url);
+              const src = xmldoc.resolveURL(href);
               docSources.push({
                 url: src,
                 text: null,
@@ -4230,6 +4235,10 @@ export class OPSDocStore extends Net.ResourceStore<XmlDoc.XMLDocHolder> {
         key += sources[i].media;
       }
       key += "^";
+      if (sources[i].documentURL) {
+        key += sources[i].documentURL;
+      }
+      key += "^";
     }
     const style = this.styleByKey[key];
     if (style) {
@@ -4252,6 +4261,7 @@ export class OPSDocStore extends Net.ResourceStore<XmlDoc.XMLDocHolder> {
                   sph,
                   source.url,
                   source.media,
+                  source.documentURL ?? null,
                 ).thenReturn(true);
               } else {
                 return CssParser.parseStylesheetFromURL(

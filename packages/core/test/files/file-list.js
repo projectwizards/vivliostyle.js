@@ -24,6 +24,10 @@ module.exports = [
         title: "border-width test (PR #1085)",
       },
       {
+        file: "button-border-line-wrapping.html",
+        title: "Default border width of a button and line wrapping (PR #2286)",
+      },
+      {
         file: "all-shorthand.html",
         title: "all shorthand property (PR #1697)",
       },
@@ -35,6 +39,16 @@ module.exports = [
       {
         file: "filename%23hash.html",
         title: "Reserved character in filename (Issue #2076)",
+      },
+      // The script items fail in the layout regression test on CI:
+      // raw.githubusercontent.com serves .js as text/plain with nosniff.
+      {
+        file: "base-url/base-element.html",
+        title: "Base element (Issue #604)",
+      },
+      {
+        file: "base-url/script-src.html",
+        title: "Relative script src (Issue #604)",
       },
       {
         file: "vivliostyle_media/index.html",
@@ -1184,6 +1198,10 @@ module.exports = [
         title: "Content in page margin box (PR #316)",
       },
       {
+        file: "quotes-in-page-margin-box.html",
+        title: "Quotes in page margin boxes (Issue #567)",
+      },
+      {
         file: "page-margin-box-images.html",
         title: "Page margin box images (Issue #1867)",
       },
@@ -1200,6 +1218,11 @@ module.exports = [
         file: "z-index-at-page-bare-text.html",
         title:
           "z-index on @page and page-margin boxes (bare text after float, Issue #1786)",
+      },
+      {
+        file: "z-index-at-page-bare-text-empty-inline.html",
+        title:
+          "z-index on @page and page-margin boxes (bare text after an empty inline element and a float, Issue #2285)",
       },
     ],
   },
@@ -1488,6 +1511,11 @@ module.exports = [
         file: "absolute-inline-child-page-break-vertical.html",
         title:
           "Absolutely positioned span in an inline element at a page break (vertical, Issue #2162)",
+      },
+      {
+        file: "empty-absolute-in-inline-page-break.html",
+        title:
+          "Empty absolutely positioned element in inline text at a page break (Issue #2285)",
       },
       {
         file: "absolute-inline-line-numbers-horizontal.html",
@@ -2029,6 +2057,11 @@ module.exports = [
       {
         file: "footnotes/footnote_with_pseudoelement.html",
         title: "Footnote with pseudoelement (PR #345)",
+      },
+      {
+        file: "footnotes/footnote-and-page-float-on-before-pseudo.html",
+        title:
+          "Footnote and page float on ::before pseudo element (Issue #747)",
       },
       {
         file: "footnotes/footnote-policy.html",

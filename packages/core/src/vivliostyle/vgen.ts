@@ -816,7 +816,9 @@ export class ViewFactory
             xmldoc = shadowContext.parentShadow?.xmldoc ?? this.xmldoc;
           }
           if (href) {
-            href = Base.resolveReferenceURL(href, xmldoc.url);
+            href = href.startsWith("#")
+              ? Base.resolveReferenceURL(href, xmldoc.url)
+              : xmldoc.resolveURL(href);
             cont1 = this.createRefShadow(
               href,
               Vtree.ShadowType.ROOTED,
@@ -1716,7 +1718,7 @@ export class ViewFactory
   }
 
   resolveURL(url: string): string {
-    url = Base.resolveURL(url, this.xmldoc.url);
+    url = this.xmldoc.resolveURL(url);
     return this.fallbackMap[url] || url;
   }
 
@@ -2678,6 +2680,14 @@ export class ViewFactory
             }
             if (attributeName == "style") {
               continue; // we do styling ourselves
+            }
+            if (attributeName == Base.STYLE_KEYS_ATTR) {
+              continue; // the keys come from the styles that we set
+            }
+            if (attributeName === "data-viv-float") {
+              // Marks the CSS floats laid out by Column.layoutFloat(); one in
+              // the source must not make an element a float. (Issue #2285)
+              continue;
             }
             if (
               attributeName === "media" &&
